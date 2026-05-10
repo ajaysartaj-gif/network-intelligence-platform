@@ -3778,6 +3778,76 @@ components.html(
     height=5000,
     scrolling=True
 )
+import streamlit as st
+import streamlit.components.v1 as components
+
+# ---------------------------------------------------
+# PAGE CONFIG
+# ---------------------------------------------------
+
+st.set_page_config(
+    page_title="NetBrain AI",
+    layout="wide"
+)
+
+# ---------------------------------------------------
+# HTML START
+# IMPORTANT:
+# Paste your COMPLETE existing 2100+ line HTML code
+# INSIDE the triple quotes below.
+# ---------------------------------------------------
+
+html_code = r"""
+
+PASTE YOUR COMPLETE EXISTING HTML CODE HERE
+
+IMPORTANT:
+1. Do NOT remove anything from your existing HTML.
+2. Paste the FULL code exactly as Claude generated.
+3. Replace all special dashes:
+   —
+   with normal dash:
+   -
+
+4. Do NOT paste Python code inside this section.
+5. Only HTML/CSS/JS inside this block.
+
+Example:
+
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+<meta charset="UTF-8">
+<title>NetBrain AI - Enterprise Network Intelligence Platform</title>
+
+<style>
+body{
+    background:#0f172a;
+    color:white;
+}
+</style>
+
+</head>
+
+<body>
+
+<h1>NetBrain AI</h1>
+
+</body>
+</html>
+
+"""
+
+# ---------------------------------------------------
+# HTML RENDER
+# ---------------------------------------------------
+
+components.html(
+    html_code,
+    height=5000,
+    scrolling=True
+)
 <!DOCTYPE html>
 <html lang="en">
 <head>
