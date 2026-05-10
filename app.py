@@ -29,7 +29,7 @@ import pandas as pd
 
 # ── Safe optional imports ──────────────────────────────────
 try:
-    import anthropic; CLAUDE_OK = True
+    from openai import OpenAI; CLAUDE_OK = True
 except: CLAUDE_OK = False
 try:
     from netmiko import ConnectHandler; NETMIKO_OK = True
@@ -94,8 +94,16 @@ def init_db():
 def get_devices(): con=db(); r=con.execute("SELECT * FROM devices").fetchall(); con.close(); return [dict(x) for x in r]
 def get_incidents(status=None):
     con=db()
-    q = "SELECT * FROM incidents" + (f" WHERE status='{status}'" if status else "") + " ORDER BY created_at DESC"
-    r=con.execute(q).fetchall(); con.close(); return [dict(x) for x in r]
+    try:
+        if status:
+            r = con.execute("SELECT * FROM incidents WHERE status=? ORDER BY created_at DESC", (status,)).fetchall()
+        else:
+            r = con.execute("SELECT * FROM incidents ORDER BY created_at DESC").fetchall()
+        con.close()
+        return [dict(x) for x in r]
+    except Exception:
+        con.close()
+        return []
 def get_changes(): con=db(); r=con.execute("SELECT * FROM changes ORDER BY created_at DESC").fetchall(); con.close(); return [dict(x) for x in r]
 def get_auto_actions(): con=db(); r=con.execute("SELECT * FROM autonomous_actions ORDER BY created_at DESC").fetchall(); con.close(); return [dict(x) for x in r]
 def save_device(h,ip,v,u,p,port,role,site): con=db(); con.execute("INSERT INTO devices(hostname,ip,vendor,username,password,port,role,site) VALUES(?,?,?,?,?,?,?,?)",(h,ip,v,u,p,port,role,site)); con.commit(); con.close()
@@ -143,20 +151,41 @@ KB = {
     "WIRELESS":"CAPWAP: control+data tunnels. 802.11ax=WiFi6. RSSI-based roaming. RF: channel width TPC. WPA3. Wireless assurance: client health.",
 }
 
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_MODEL    = "anthropic/claude-sonnet-4-5"   # best Claude via OpenRouter
+
 def _get_key():
-    try: return st.secrets.get("ANTHROPIC_API_KEY","")
-    except: return os.environ.get("ANTHROPIC_API_KEY","")
+    try:    return st.secrets.get("OPENROUTER_API_KEY", "")
+    except: return os.environ.get("OPENROUTER_API_KEY", "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")
 
 def ai_call(messages, persona="noc", max_tokens=2000, stream=False):
     key = _get_key()
-    if not key: return "⚠️ Set ANTHROPIC_API_KEY in Streamlit Cloud → App Settings → Secrets"
-    if not CLAUDE_OK: return "⚠️ anthropic package missing"
+    if not key:
+        return ("⚠️ **OpenRouter API key missing.**\n\n"
+                "Add to Streamlit Cloud → App Settings → Secrets:\n"
+                "```\nOPENROUTER_API_KEY = \"sk-or-v1-...\"\n```")
+    if not CLAUDE_OK:
+        return "⚠️ `openai` package missing. Add `openai>=1.0.0` to requirements.txt"
     try:
-        client = anthropic.Anthropic(api_key=key)
-        sys = NET_SYSTEM + "\n\n" + PERSONAS.get(persona, PERSONAS["noc"])
-        resp = client.messages.create(model="claude-sonnet-4-20250514", max_tokens=max_tokens, system=sys, messages=messages)
-        return resp.content[0].text
-    except Exception as e: return f"❌ API error: `{e}`"
+        client = OpenAI(
+            api_key=key,
+            base_url=OPENROUTER_BASE_URL,
+        )
+        sys_prompt = NET_SYSTEM + "\n\n" + PERSONAS.get(persona, PERSONAS["noc"])
+        # OpenRouter uses OpenAI message format — inject system as first message
+        full_messages = [{"role": "system", "content": sys_prompt}] + messages
+        resp = client.chat.completions.create(
+            model=OPENROUTER_MODEL,
+            max_tokens=max_tokens,
+            messages=full_messages,
+            extra_headers={
+                "HTTP-Referer": "https://netbrain-ai.streamlit.app",
+                "X-Title": "NetBrain AI",
+            }
+        )
+        return resp.choices[0].message.content
+    except Exception as e:
+        return f"❌ OpenRouter API error: `{e}`"
 
 def rag(query, n=3):
     global _col
