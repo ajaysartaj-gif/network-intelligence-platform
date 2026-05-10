@@ -135,7 +135,8 @@ def call_claude(messages, persona="noc", max_tokens=2000):
     except: api_key = os.environ.get("ANTHROPIC_API_KEY","")
     if not api_key:
         return ("⚠️ **Claude API key missing.**\n\nAdd to Streamlit Cloud secrets:\n"
-                "Go to **App menu → Settings → Secrets** and add:\n```\nANTHROPIC_API_KEY = \"sk-ant-...\"\n```")
+                "Go to **App menu → Settings → Secrets** and add:\n```\nANTHROPIC_API_KEY = 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"
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1")
     if not CLAUDE_OK:
         return "⚠️ `anthropic` package not installed. Check requirements.txt."
     try:
