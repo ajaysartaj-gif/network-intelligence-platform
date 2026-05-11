@@ -21,6 +21,7 @@ st.set_page_config(
 # =========================================================
 
 import os
+from core.ai_engine import ask_ai, get_api_key
 import time
 import random
 import logging
@@ -256,6 +257,7 @@ with st.sidebar:
 
 st.title("🧠 NetBrain AI")
 st.caption("Enterprise Autonomous Network Operations Platform")
+st.write("API Key Loaded:", bool(get_api_key()))
 
 # =========================================================
 # METRICS
