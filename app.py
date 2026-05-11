@@ -31,25 +31,33 @@ st.set_page_config(
 # ── Stdlib + 3rd-party imports ────────────────────────────
 import sys, os, logging, re, hashlib, time, threading, copy, random
 from pathlib import Path
-@@ -1670,104 +1674,67 @@ def build_synthesis_prompt(query: str, results: List[DeviceResult]) -> str:
-                   f"Status: ({r.status}\n"
-                   f"{r.output}")
+
+
+def build_synthesis_prompt(query: str, results: List[DeviceResult]) -> str:
+    device_sections = []
+
+    for r in results:
+        section = (
+            f"Device: {r.hostname}\n"
+            f"Status: {r.status}\n"
+            f"{r.output}"
+        )
         device_sections.append(section)
 
     device_context = "\n\n".join(device_sections)
     ok_count = sum(1 for r in results if r.status == "ok")
 
-    return (f'Multi-device query: "{query}"\n'
-            f'{len(results)} devices queried ({ok_count} successful):\n\n'
-            f'{device_context}\n\n'
-            f'Provide:\n'
-            f'1. DIRECT ANSWER — answer the query using device data\n'
-            f'2. FINDINGS — notable findings per device (focus on anomalies)\n'
-            f'3. RISKS — any risks or issues detected\n'
-            f'4. RECOMMENDED ACTIONS — prioritized next steps\n'
-            f'Use specific device hostnames. Be concise.')
-
-
+    return (
+        f'Multi-device query: "{query}"\n'
+        f'{len(results)} devices queried ({ok_count} successful):\n\n'
+        f'{device_context}\n\n'
+        f'Provide:\n'
+        f'1. DIRECT ANSWER — answer the query using device data\n'
+        f'2. FINDINGS — notable findings per device (focus on anomalies)\n'
+        f'3. RISKS — any risks or issues detected\n'
+        f'4. RECOMMENDED ACTIONS — prioritized next steps\n'
+        f'Use specific device hostnames. Be concise.'
+    )
 # ══ SYSTEM A — AI ENGINE ═════════════════════════════
 
 import os, logging, time
