@@ -1,47 +1,51 @@
-from openai import OpenAI
-import streamlit as st
 import os
+import streamlit as st
+from openai import OpenAI
 
-MODEL = "gpt-4.1-mini"
+# =========================================================
+# MODEL CONFIG
+# =========================================================
 
+MODEL = "openai/gpt-4.1-mini"
+
+# =========================================================
+# GET API KEY
+# =========================================================
 
 def get_api_key():
 
     try:
-        return st.secrets["OPENAI_API_KEY"]
-    except Exception:
-        return os.getenv("OPENAI_API_KEY", "")
+        return st.secrets["OPENROUTER_API_KEY"]
 
+    except Exception:
+        return os.getenv("OPENROUTER_API_KEY", "")
+
+# =========================================================
+# CREATE CLIENT
+# =========================================================
 
 def get_client():
 
-    key = get_api_key()
+    api_key = get_api_key()
 
-    if not key:
+    if not api_key:
         return None
 
-    return OpenAI(api_key=key)
+    return OpenAI(
+        api_key=api_key,
+        base_url="https://openrouter.ai/api/v1"
+    )
 
-
-SYSTEM_PROMPT = """
-You are NetBrain AI.
-
-You are an enterprise network operations assistant.
-
-Provide:
-- root cause analysis
-- troubleshooting
-- network diagnostics
-- operational guidance
-"""
-
+# =========================================================
+# ASK AI
+# =========================================================
 
 def ask_ai(query: str):
 
     client = get_client()
 
-    if client is None:
-        return "OpenAI API key missing."
+    if not client:
+        return "ERROR: OpenRouter API key missing."
 
     try:
 
@@ -50,15 +54,33 @@ def ask_ai(query: str):
             messages=[
                 {
                     "role": "system",
-                    "content": SYSTEM_PROMPT,
+                    "content": """
+You are NetBrain AI.
+
+You are an expert enterprise network operations AI assistant.
+
+Specialties:
+- BGP
+- OSPF
+- MPLS
+- EVPN
+- VXLAN
+- Firewall analysis
+- Root cause analysis
+- Multi-vendor troubleshooting
+- Observability
+- Incident investigation
+
+Provide concise technical answers.
+"""
                 },
                 {
                     "role": "user",
-                    "content": query,
+                    "content": query
                 }
             ],
             temperature=0.2,
-            max_tokens=1200,
+            max_tokens=1000
         )
 
         return response.choices[0].message.content
