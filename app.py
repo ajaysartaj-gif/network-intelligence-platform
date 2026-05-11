@@ -17,47 +17,67 @@ Architecture:
   security/rbac.py          ← Role-based access control
   ui/components.py          ← Design system + component library
 """
-
 # ── MUST be first Streamlit call ──────────────────────────
 import streamlit as st
+
 st.set_page_config(
     page_title="NetBrain AI",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="collapsed",
-    menu_items={"About": "NetBrain AI — Autonomous Network Operating System v2.0"},
+    menu_items={
+        "About": "NetBrain AI — Autonomous Network Operating System v2.0"
+    },
 )
 
 # ── Stdlib + 3rd-party imports ────────────────────────────
-import sys, os, logging, re, hashlib, time, threading, copy, random
+import sys
+import os
+import logging
+import re
+import hashlib
+import time
+import threading
+import copy
+import random
+
 from pathlib import Path
+from typing import List, Dict, Optional, Any
 
+# ── Database imports ──────────────────────────────────────
+from database.database import (
+    seed_database,
+    get_devices,
+    get_incidents,
+    get_changes,
+    get_auto_actions,
+    update_record,
+    add_device,
+    add_incident,
+    write_audit,
+    get_audit_logs,
+)
 
-def build_synthesis_prompt(query: str, results: List[DeviceResult]) -> str:
-    device_sections = []
+# ── Workspace config ──────────────────────────────────────
+from config.workspaces import WORKSPACES
 
-    for r in results:
-        section = (
-            f"Device: {r.hostname}\n"
-            f"Status: {r.status}\n"
-            f"{r.output}"
-        )
-        device_sections.append(section)
+# ── Optional AI imports ───────────────────────────────────
+try:
+    from openai import OpenAI
+    _OPENAI_OK = True
+except Exception:
+    _OPENAI_OK = False
 
-    device_context = "\n\n".join(device_sections)
-    ok_count = sum(1 for r in results if r.status == "ok")
+# ── Logging ───────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
 
-    return (
-        f'Multi-device query: "{query}"\n'
-        f'{len(results)} devices queried ({ok_count} successful):\n\n'
-        f'{device_context}\n\n'
-        f'Provide:\n'
-        f'1. DIRECT ANSWER — answer the query using device data\n'
-        f'2. FINDINGS — notable findings per device (focus on anomalies)\n'
-        f'3. RISKS — any risks or issues detected\n'
-        f'4. RECOMMENDED ACTIONS — prioritized next steps\n'
-        f'Use specific device hostnames. Be concise.'
-    )
+logger = logging.getLogger(__name__)
+
+# ── App init ──────────────────────────────────────────────
+seed_database()
 # ══ SYSTEM A — AI ENGINE ═════════════════════════════
 
 import os, logging, time
