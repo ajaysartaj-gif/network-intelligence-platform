@@ -1,31 +1,9 @@
-# NetBrain AI — Streamlit Cloud Compatible Requirements
-# Only packages that install reliably on free tier
-
-# ── Core ──
 streamlit>=1.35.0
-pandas>=2.0.0
-
-# ── AI Engine (OpenRouter via OpenAI SDK) ──
 openai>=1.30.0
-
-# ── Database (SQLAlchemy ORM) ──
 sqlalchemy>=2.0.0
-
-# ── Security / Encryption ──
 cryptography>=42.0.0
 bcrypt>=4.1.0
-
-# ── Network SSH ──
 netmiko>=4.3.0
 paramiko>=3.4.0
-
-# ── Utilities ──
+pandas>=2.0.0
 python-dotenv>=1.0.0
-
-# ── OPTIONAL (uncomment for full features, needs paid tier) ──
-# plotly>=5.20.0
-# napalm>=5.0.0
-# spacy>=3.7.0
-# chromadb>=0.5.0
-# sentence-transformers>=3.0.0
-# PyMuPDF>=1.24.0
