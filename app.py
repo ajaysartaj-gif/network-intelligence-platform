@@ -29,8 +29,7 @@ from typing import List, Dict
 from database.seed import *
 
 import pandas as pd
-# ── Database Seed ─────────────────────────────────────────
-from database.seed import *
+
 # =========================================================
 # SAFE OPTIONAL IMPORTS
 # =========================================================
