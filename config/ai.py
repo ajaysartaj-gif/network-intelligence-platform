@@ -1,4 +1,3 @@
- (cd "$(git rev-parse --show-toplevel)" && git apply --3way <<'EOF' 
 diff --git a/config/ai.py b/config/ai.py
 new file mode 100644
 index 0000000000000000000000000000000000000000..c31961357104b1348c1250865945fd4df2a06fa2
@@ -38,6 +37,3 @@ index 0000000000000000000000000000000000000000..c31961357104b1348c1250865945fd4d
 +6. Learn from context: if similar incident mentioned, reference it explicitly"""
 +
 +PERSONAS = {'fresher': 'Persona: BEGINNER STUDENT. Explain everything with analogies. Define every acronym inline. Use simple language. Step-by-step guidance. Encourage and reassure. Visual descriptions.', 'ccna': 'Persona: CCNA ENGINEER. Explain with context and reasoning. Show CLI with line-by-line explanation. Guide through troubleshooting systematically. Reference exam topics where relevant.', 'noc': 'Persona: NOC ENGINEER. BE CONCISE. Lead immediately with probable root cause. Give exact CLI to verify and fix. Include rollback. Mention escalation path. Time is critical.', 'architect': 'Persona: SENIOR ARCHITECT. Expert level — skip basics entirely. Focus on design trade-offs, scalability, HA, redundancy, vendor comparison. Reference RFCs and standards. Provide BOM context.', 'manager': 'Persona: OPERATIONS MANAGER. Business language only. Avoid technical jargon. Focus on user impact, revenue risk, SLA performance, decisions needed, timeline to resolve.', 'security': 'Persona: SECURITY ENGINEER. Threat context first. Attack vectors. Compliance implications. Zero Trust alignment. SIEM correlation opportunities. Containment actions. CVE references.'}
- 
-EOF
-)
