@@ -749,43 +749,99 @@ mdq_run = run_query
 
 # ── Init ──────────────────────────────────────────────────
 seed_database()
-
 # ══════════════════════════════════════════════════════════
 # SESSION STATE
 # ══════════════════════════════════════════════════════════
+
 _DEFAULTS = {
-    "workspace":     "operations",
-    "persona":       "noc",
-    "chat_msgs":     [],
-    "chat_hist":     [],
-    "kg_selected":   None,
-    "mdq_results":   None,
-    "nlp_results":   None,
-    "rag_results":   [],
-@@ -3892,78 +3359,62 @@ def render_topbar():
-    st.markdown(f"""
-    <div class="nb-topbar">
-      <div class="nb-logo">
-        <div class="nb-logo-mark">🧠</div>
-        <div>
-          <div class="nb-logo-name">NetBrain AI</div>
-          <div class="nb-logo-ver">Autonomous Network OS</div>
-        </div>
-      </div>
-      <div class="nb-divider-v"></div>
-      <div class="nb-status-row">
-        {_chip(ai_lbl,  stat["ai"])}
-        {_chip(ssh_lbl, stat["ssh"], sim=not stat["ssh"])}
-        {_chip(rag_lbl, True, sim=stat["rag"]["backend"]=="Keyword")}
-        {_chip("DB ✓", True)}
-      </div>
-      <div style="flex:1"></div>
-      <div style="font-size:11px;color:var(--text-tertiary);font-family:JetBrains Mono,monospace">{get_role_label()}</div>
-    </div>
-    """, unsafe_allow_html=True)
+    "workspace": "operations",
+    "persona": "noc",
+    "chat_msgs": [],
+    "chat_hist": [],
+    "kg_selected": None,
+    "mdq_results": None,
+    "nlp_results": None,
+    "rag_results": [],
+    "design_output": None,
+    "auto_mode": "human",
+    "user_role": "admin",
+    "user_name": "engineer",
+}
+
+for k, v in _DEFAULTS.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
 
 # ══════════════════════════════════════════════════════════
+# TOPBAR
+# ══════════════════════════════════════════════════════════
+
+def render_topbar():
+
+    stat = get_system_status()
+
+    def _chip(lbl, ok, sim=False):
+
+        cls = (
+            "chip-ok"
+            if ok
+            else "chip-warn"
+            if sim
+            else "chip-err"
+        )
+
+        return (
+            f'<span class="nb-chip {cls}">'
+            f'<span class="chip-dot"></span>{lbl}</span>'
+        )
+
+    ai_lbl = "AI ON" if stat["ai"] else "AI OFF"
+    ssh_lbl = "SSH" if stat["ssh"] else "SSH⚡sim"
+    rag_lbl = stat["rag"]["backend"][:6]
+
+    st.markdown(
+        f"""
+        <div class="nb-topbar">
+
+          <div class="nb-logo">
+            <div class="nb-logo-mark">🧠</div>
+
+            <div>
+              <div class="nb-logo-name">
+                NetBrain AI
+              </div>
+
+              <div class="nb-logo-ver">
+                Autonomous Network OS
+              </div>
+            </div>
+          </div>
+
+          <div class="nb-divider-v"></div>
+
+          <div class="nb-status-row">
+            {_chip(ai_lbl, stat["ai"])}
+            {_chip(ssh_lbl, stat["ssh"], sim=not stat["ssh"])}
+            {_chip(rag_lbl, True, sim=stat["rag"]["backend"] == "Keyword")}
+            {_chip("DB ✓", True)}
+          </div>
+
+          <div style="flex:1"></div>
+
+          <div style="
+              font-size:11px;
+              color:var(--text-tertiary);
+              font-family:JetBrains Mono,monospace
+          ">
+              {get_role_label()}
+          </div>
+
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+  # ══════════════════════════════════════════════════════════
 # WORKSPACE NAV
 # ══════════════════════════════════════════════════════════
 WORKSPACES = [
