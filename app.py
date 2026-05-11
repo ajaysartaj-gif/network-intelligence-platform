@@ -1333,16 +1333,28 @@ elif ws == "twin":
             st.info("Run a simulation on the left to see results here.")
         elif twin_type == "failure":
             sev_color = "var(--accent-red)" if result.get("severity") == "critical" else "var(--accent-amber)"
+            # Pre-compute expressions to avoid backslash-in-f-string SyntaxError
+            failover_txt = ("✅ " + str(result.get("failover_device","")) + " (" + str(result.get("estimated_rto_s","?")) + "s)") if result.get("failover_possible") else "❌ No failover — SPOF"
+            spof_color   = "var(--accent-red)" if result.get("is_spof") else "var(--accent-green)"
+            spof_txt     = "⚠️ YES" if result.get("is_spof") else "✅ No"
+            services_html = "".join(
+                '<span style="font-size:11px;padding:2px 7px;border-radius:8px;background:var(--accent-red-subtle);color:var(--accent-red);margin:2px;display:inline-block">' + s + '</span>'
+                for s in result.get("affected_services", [])
+            )
+            recs_html = "".join(
+                '<div style="font-size:12px;color:var(--text-primary);padding:4px 0;border-bottom:1px solid var(--border-subtle)">' + rec + '</div>'
+                for rec in result.get("recommendations", [])
+            )
             st.markdown(f"""<div style="background:var(--bg-surface);border:1px solid var(--border-default);border-radius:10px;padding:16px;margin-bottom:10px">
               <div style="font-size:14px;font-weight:700;color:{sev_color};margin-bottom:12px">⚡ Failure: {result.get('failed_device','')}</div>
               <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
                 <div><div style="font-size:10px;color:var(--text-tertiary);font-family:JetBrains Mono,monospace;text-transform:uppercase;margin-bottom:3px">Criticality</div><div style="font-size:16px;font-weight:700;color:{sev_color}">{result.get('criticality',0)}/10</div></div>
                 <div><div style="font-size:10px;color:var(--text-tertiary);font-family:JetBrains Mono,monospace;text-transform:uppercase;margin-bottom:3px">Users Impacted</div><div style="font-size:16px;font-weight:700;color:var(--accent-red)">{result.get('affected_users',0)}</div></div>
-                <div><div style="font-size:10px;color:var(--text-tertiary);font-family:JetBrains Mono,monospace;text-transform:uppercase;margin-bottom:3px">Failover</div><div style="font-size:13px;font-weight:600;color:var(--accent-green)">{'✅ ' + result['failover_device'] + f' ({result[\"estimated_rto_s\"]}s)' if result.get('failover_possible') else '❌ No failover — SPOF'}</div></div>
-                <div><div style="font-size:10px;color:var(--text-tertiary);font-family:JetBrains Mono,monospace;text-transform:uppercase;margin-bottom:3px">SPOF</div><div style="font-size:13px;font-weight:600;color:{'var(--accent-red)' if result.get('is_spof') else 'var(--accent-green)'}">{'⚠️ YES' if result.get('is_spof') else '✅ No'}</div></div>
+                <div><div style="font-size:10px;color:var(--text-tertiary);font-family:JetBrains Mono,monospace;text-transform:uppercase;margin-bottom:3px">Failover</div><div style="font-size:13px;font-weight:600;color:var(--accent-green)">{failover_txt}</div></div>
+                <div><div style="font-size:10px;color:var(--text-tertiary);font-family:JetBrains Mono,monospace;text-transform:uppercase;margin-bottom:3px">SPOF</div><div style="font-size:13px;font-weight:600;color:{spof_color}">{spof_txt}</div></div>
               </div>
-              <div style="margin-bottom:8px"><div style="font-size:10px;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.8px;font-family:JetBrains Mono,monospace;margin-bottom:5px">Affected Services</div>{"".join(f'<span style="font-size:11px;padding:2px 7px;border-radius:8px;background:var(--accent-red-subtle);color:var(--accent-red);margin:2px;display:inline-block">{s}</span>' for s in result.get("affected_services",[]))}</div>
-              <div><div style="font-size:10px;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.8px;font-family:JetBrains Mono,monospace;margin-bottom:5px">AI Recommendations</div>{"".join(f'<div style="font-size:12px;color:var(--text-primary);padding:4px 0;border-bottom:1px solid var(--border-subtle)">{r}</div>' for r in result.get("recommendations",[]))}</div>
+              <div style="margin-bottom:8px"><div style="font-size:10px;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.8px;font-family:JetBrains Mono,monospace;margin-bottom:5px">Affected Services</div>{services_html}</div>
+              <div><div style="font-size:10px;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.8px;font-family:JetBrains Mono,monospace;margin-bottom:5px">AI Recommendations</div>{recs_html}</div>
             </div>""", unsafe_allow_html=True)
         else:
             score = result.get("risk_score", 0)
