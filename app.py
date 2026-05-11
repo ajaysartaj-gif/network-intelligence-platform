@@ -136,48 +136,89 @@ def get_api_key() -> str:
         return st.secrets.get("OPENROUTER_API_KEY", "")
     except Exception:
         return os.environ.get("OPENROUTER_API_KEY", "")
-
 # ══════════════════════════════════════════════════════════
 # CORE AI CALL
 # ══════════════════════════════════════════════════════════
 @st.cache_resource
 def _get_client():
     key = get_api_key()
+
     if not key or not _OPENAI_OK:
         return None
-    return OpenAI(api_key=key, base_url=OPENROUTER_BASE)
+
+    return OpenAI(
+        api_key=key,
+        base_url=OPENROUTER_BASE
+    )
 
 
 def call_ai(
     messages: list,
     persona: str = "noc",
     max_tokens: int = 2000,
-@@ -3221,559 +3188,59 @@ def get_service_impact(device_id: str) -> List[KGNode]:
+):
+    client = _get_client()
+
+    if client is None:
+        return "AI client unavailable. Check OPENROUTER_API_KEY."
+
+    try:
+        response = client.chat.completions.create(
+            model="anthropic/claude-3.5-sonnet",
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=0.2,
+        )
+
+        return response.choices[0].message.content
+
+    except Exception as e:
+        return f"AI Error: {str(e)}"
+
+
+# ══════════════════════════════════════════════════════════
+# KNOWLEDGE GRAPH HELPERS
+# ══════════════════════════════════════════════════════════
+
+def get_service_impact(device_id: str) -> List[KGNode]:
     """Find all services affected if a device fails."""
+
     affected = []
+
     for node in NODES:
         if node.node_type == "service":
             chain = get_impact_chain(node.id)
+
             if any(item["node"].id == device_id for item in chain):
                 affected.append(node)
+
     return affected
 
 
 def search_graph(query: str) -> List[KGNode]:
     """Search graph nodes by label or metadata."""
+
     ql = query.lower()
-    return [n for n in NODES if ql in n.label.lower() or
-            any(ql in str(v).lower() for v in n.metadata.values())]
+
+    return [
+        n for n in NODES
+        if ql in n.label.lower()
+        or any(ql in str(v).lower() for v in n.metadata.values())
+    ]
 
 
 def get_all_nodes_by_type(node_type: str) -> List[KGNode]:
-    return [n for n in NODES if n.node_type == node_type]
+    return [
+        n for n in NODES
+        if n.node_type == node_type
+    ]
 
 
 def get_spof_nodes() -> List[KGNode]:
-    return [n for n in NODES if n.metadata.get("spof") is True]
-
-
+    return [
+        n for n in NODES
+        if n.metadata.get("spof") is True
+    ]
 # ══ UI COMPONENTS ════════════════════════════════════
 
 import streamlit as st
