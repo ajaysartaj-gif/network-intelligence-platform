@@ -1,10 +1,9 @@
-"""
-(cd "$(git rev-parse --show-toplevel)" && git apply --3way <<'EOF' 
 diff --git a/app.py b/app.py
 index 63f04e39cd9bc1d42534e252668d8fc282648737..28779cbc4299f76972ac66c9ea3eb8958a2a6b5a 100644
 --- a/app.py
 +++ b/app.py
 @@ -1,29 +1,33 @@
+ """
  NetBrain AI — Autonomous Network Operating System
  app.py — Main entry point (Streamlit)
  
@@ -25,8 +24,8 @@ index 63f04e39cd9bc1d42534e252668d8fc282648737..28779cbc4299f76972ac66c9ea3eb895
  """
  
  # ── MUST be first Streamlit call ──────────────────────────
-import streamlit as st
-  st.set_page_config(
+ import streamlit as st
+ st.set_page_config(
      page_title="NetBrain AI",
      page_icon="🧠",
      layout="wide",
@@ -806,6 +805,3 @@ import streamlit as st
                  unsafe_allow_html=True)
  
      col_p, col_q, col_b, col_sel = st.columns([0.18, 0.52, 0.10, 0.20])
- 
-EOF
-)
