@@ -2,17 +2,15 @@ from openai import OpenAI
 import streamlit as st
 import os
 
-OPENROUTER_BASE = "https://openrouter.ai/api/v1"
-
-MODEL = "openai/gpt-4.1-mini"
+MODEL = "gpt-4.1-mini"
 
 
 def get_api_key():
 
     try:
-        return st.secrets["OPENROUTER_API_KEY"]
+        return st.secrets["OPENAI_API_KEY"]
     except Exception:
-        return os.getenv("OPENROUTER_API_KEY", "")
+        return os.getenv("OPENAI_API_KEY", "")
 
 
 def get_client():
@@ -22,10 +20,7 @@ def get_client():
     if not key:
         return None
 
-    return OpenAI(
-        api_key=key,
-        base_url=OPENROUTER_BASE,
-    )
+    return OpenAI(api_key=key)
 
 
 SYSTEM_PROMPT = """
@@ -46,7 +41,7 @@ def ask_ai(query: str):
     client = get_client()
 
     if client is None:
-        return "AI key missing."
+        return "OpenAI API key missing."
 
     try:
 
@@ -69,4 +64,5 @@ def ask_ai(query: str):
         return response.choices[0].message.content
 
     except Exception as e:
+
         return f"AI Error: {str(e)}"
