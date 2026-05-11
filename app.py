@@ -25,8 +25,8 @@ index 63f04e39cd9bc1d42534e252668d8fc282648737..28779cbc4299f76972ac66c9ea3eb895
  """
  
  # ── MUST be first Streamlit call ──────────────────────────
- import streamlit as st
- st.set_page_config(
+import streamlit as st
+  st.set_page_config(
      page_title="NetBrain AI",
      page_icon="🧠",
      layout="wide",
