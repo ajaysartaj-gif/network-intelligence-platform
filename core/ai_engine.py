@@ -4,7 +4,7 @@ import os
 
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 
-MODEL = "anthropic/claude-3.5-sonnet"
+MODEL = "openai/gpt-4.1-mini"
 
 
 def get_api_key():
