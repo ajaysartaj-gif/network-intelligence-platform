@@ -5,7 +5,6 @@ index 63f04e39cd9bc1d42534e252668d8fc282648737..28779cbc4299f76972ac66c9ea3eb895
 --- a/app.py
 +++ b/app.py
 @@ -1,29 +1,33 @@
- """
  NetBrain AI — Autonomous Network Operating System
  app.py — Main entry point (Streamlit)
  
