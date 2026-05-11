@@ -20,4 +20,5 @@ WORKSPACES = [
     ('executive', '📈', 'Executive'),
     ('finops', '💰', 'FinOps'),
     ('audit', '🔐', 'Audit'),
+    ('Network Engineering', '🔐', 'Network Engineering'),
 ]
