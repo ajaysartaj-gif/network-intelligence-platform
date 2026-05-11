@@ -32,7 +32,7 @@ st.set_page_config(
 import sys, os, logging, re, hashlib, time, threading, copy, random
 from pathlib import Path
 @@ -1670,104 +1674,67 @@ def build_synthesis_prompt(query: str, results: List[DeviceResult]) -> str:
-                   f"Status: {r.status}\n"
+                   f"Status: ({r.status}\n"
                    f"{r.output}")
         device_sections.append(section)
 
