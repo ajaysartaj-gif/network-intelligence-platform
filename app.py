@@ -741,11 +741,12 @@ from ui.components import (
 
 
 # ── Compatibility aliases ─────────────────────────────────
-nlp_extract = extract
+
 def rag_search(query, n=4, vendor_filter=None, protocol_filter=None):
     return search(query, n, vendor_filter, protocol_filter)
-mdq_run = run_query
 
+
+mdq_run = run_query
 
 # ── Init ──────────────────────────────────────────────────
 seed_database()
