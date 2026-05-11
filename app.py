@@ -841,59 +841,68 @@ def render_topbar():
         """,
         unsafe_allow_html=True,
     )
-  # ══════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════
 # WORKSPACE NAV
 # ══════════════════════════════════════════════════════════
-WORKSPACES = [
-    ("operations",  "⚡",  "Operations"),
-    ("incident",    "🚨",  "Incidents"),
-    ("topology",    "🗺",  "Topology"),
-    ("observe",     "📡",  "Observability"),
-    ("troubleshoot","🔧",  "Diagnose"),
-    ("change",      "📋",  "Changes"),
-    ("autonomous",  "🤖",  "Autonomous"),
-    ("twin",        "👾",  "Digital Twin"),
-    ("security",    "🔒",  "Security"),
-    ("compliance",  "🛡",  "Compliance"),
-    ("design",      "🏗",  "Design"),
-    ("mdq",         "⚡",  "Multi-Device"),
-    ("nlp",         "🧬",  "NLP"),
-    ("rag",         "📚",  "Knowledge"),
-    ("learn",       "📖",  "Learn"),
-    ("devices",     "🖧",  "Devices"),
-    ("executive",   "📈",  "Executive"),
-    ("finops",      "💰",  "FinOps"),
-    ("audit",       "🔐",  "Audit"),
-]
+
 from config.workspaces import WORKSPACES
 
-def render_workspace_nav():
+
 @st.cache_data(ttl=10)
 def get_workspace_badges() -> dict:
-    """Return lightweight navigation badge counts without re-querying every rerun."""
-    active_incs = len(get_incidents("active"))
-    pending_chg = len([c for c in get_changes() if c["status"] == "pending"])
-    pending_auto= len([a for a in get_auto_actions() if a["status"] == "pending_approval"])
-    pending_auto = len([a for a in get_auto_actions() if a["status"] == "pending_approval"])
-    return {"incident": active_incs, "change": pending_chg, "autonomous": pending_auto}
+    """
+    Return lightweight navigation badge counts
+    without re-querying every rerun.
+    """
 
-    badges = {"incident": active_incs, "change": pending_chg, "autonomous": pending_auto}
+    active_incs = len(get_incidents("active"))
+
+    pending_chg = len([
+        c for c in get_changes()
+        if c["status"] == "pending"
+    ])
+
+    pending_auto = len([
+        a for a in get_auto_actions()
+        if a["status"] == "pending_approval"
+    ])
+
+    return {
+        "incident": active_incs,
+        "change": pending_chg,
+        "autonomous": pending_auto,
+    }
+
+
 def render_workspace_nav():
+
     badges = get_workspace_badges()
 
     cols = st.columns(len(WORKSPACES))
+
     for col, (ws_id, icon, label) in zip(cols, WORKSPACES):
+
         with col:
+
             badge = badges.get(ws_id, 0)
-            btn_label = f"{icon} {label}" + (f" ·{badge}" if badge else "")
-            is_active = st.session_state.workspace == ws_id
-            if st.button(btn_label, key=f"ws_{ws_id}",
-                         use_container_width=True,
-                         type="primary" if is_active else "secondary"):
+
+            btn_label = (
+                f"{icon} {label}"
+                + (f" ·{badge}" if badge else "")
+            )
+
+            is_active = (
+                st.session_state.workspace == ws_id
+            )
+
+            if st.button(
+                btn_label,
+                key=f"ws_{ws_id}",
+                use_container_width=True,
+                type="primary" if is_active else "secondary",
+            ):
                 st.session_state.workspace = ws_id
                 st.rerun()
-
-
 # ══════════════════════════════════════════════════════════
 # PERSONA + GLOBAL SEARCH BAR
 # ══════════════════════════════════════════════════════════
