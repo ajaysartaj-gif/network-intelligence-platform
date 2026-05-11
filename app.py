@@ -279,6 +279,8 @@ with col4:
 # AI SEARCH
 # =========================================================
 
+from core.ai_engine import ask_ai
+
 st.divider()
 
 query = st.text_input(
@@ -290,13 +292,10 @@ if query:
 
     with st.spinner("Analyzing telemetry and topology..."):
         time.sleep(2)
-
-     from core.ai_engine import ask_ai
-          ai_response = ask_ai(query)
+        ai_response = ask_ai(query)
 
     st.markdown("## AI Analysis")
     st.write(ai_response)
-
 # =========================================================
 # DEVICES
 # =========================================================
