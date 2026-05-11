@@ -1,1479 +1,1633 @@
 """
-NetBrain AI — AI-Native Autonomous Network Operating System
-=============================================================
-NOT a dashboard. NOT a monitoring portal.
-An AI-Native Autonomous Network Operating System.
+NetBrain AI — Autonomous Network Operating System
+app.py — Main entry point (Streamlit)
 
 Architecture:
-- Contextual Operational Workspaces (not pages)
-- Incident War Room (not alert list)
-- AI embedded in every module (not just chatbot)
-- Network Knowledge Graph (not static views)
-- Operational Memory (learns continuously)
-- Business Impact Layer (not just device metrics)
-- Autonomous Operations Center
+  app.py                    ← This file (entry, routing, state)
+  core/ai_engine.py         ← OpenRouter AI + personas
+  core/nlp_engine.py        ← NLP entity extraction + intent
+  core/rag_engine.py        ← RAG knowledge base (ChromaDB/keyword)
+  core/mdq_engine.py        ← Multi-device parallel query
+  database/models.py        ← SQLAlchemy ORM models
+  database/database.py      ← DB manager, encryption, seeding
+  security/rbac.py          ← Role-based access control
+  ui/components.py          ← Design system + component library
 """
 
+# ── MUST be first Streamlit call ──────────────────────────
 import streamlit as st
 st.set_page_config(
-    page_title="NetBrain AI — Autonomous Network OS",
+    page_title="NetBrain AI",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="collapsed",
-    menu_items={"About": "NetBrain AI — Autonomous Network Operating System v2.0"}
+    menu_items={"About": "NetBrain AI — Autonomous Network Operating System v2.0"},
 )
 
-import os, re, json, sqlite3, threading, hashlib, time
-from datetime import datetime, timedelta
+# ── Standard library ──────────────────────────────────────
+import sys, os, logging
+from pathlib import Path
+
+# ── Add project root to path ──────────────────────────────
+ROOT = Path(__file__).parent
+sys.path.insert(0, str(ROOT))
+
+# ── Logging setup ─────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+    ]
+)
+logger = logging.getLogger("netbrain.app")
+
+# ── Module imports ─────────────────────────────────────────
 import pandas as pd
 
-# ── Safe optional imports ──────────────────────────────────
-try:
-    from openai import OpenAI; CLAUDE_OK = True
-except: CLAUDE_OK = False
-try:
-    from netmiko import ConnectHandler; NETMIKO_OK = True
-except: NETMIKO_OK = False
-try:
-    import spacy; _nlp = spacy.load("en_core_web_sm"); SPACY_OK = True
-except: SPACY_OK = False; _nlp = None
-try:
-    import chromadb; from sentence_transformers import SentenceTransformer
-    _cc = chromadb.PersistentClient(path="./chroma_db")
-    _emb = SentenceTransformer("all-MiniLM-L6-v2"); _col = None; RAG_OK = True
-except: RAG_OK = False; _cc = _emb = _col = None
+from database.database import (
+    seed_database, get_devices, get_incidents, get_changes,
+    get_auto_actions, update_record, add_device, add_incident,
+    write_audit, get_audit_logs,
+)
+from database.models import Change, AutonomousAction, Incident
+from core.ai_engine import call_ai, analyze_incident, generate_config, score_change_risk, design_network, get_api_key
+from core.nlp_engine import extract as nlp_extract, enrich_query
+from core.rag_engine import search as rag_search, format_rag_context, ingest_document, rag_status
+from core.mdq_engine import run_query as mdq_run, build_synthesis_prompt, NETMIKO_OK
+from core.observability_engine import (
+    get_live_telemetry, get_historical_telemetry, detect_anomalies,
+    get_saas_health, get_netflow_summary, get_recent_syslogs,
+)
+from core.digital_twin_engine import simulate_failure, simulate_change, get_twin_status
+from core.digital_twin_engine import simulate_failure, simulate_change, get_twin_status
+from core.knowledge_graph import NODES, EDGES, get_node, get_neighbors, get_service_impact, get_spof_nodes
+from core.incident_engine import calculate_blast_radius, correlate_incidents, get_similar_incidents_from_memory
+from security.rbac import get_current_role, has_permission, require_permission, get_role_label, ALL_ROLES
+from ui.components import (
+    inject_css, ai_insight_card, metric_grid, render_chat_message,
+    section_header, risk_bar, DESIGN_SYSTEM_CSS,
+)
 
-# ══════════════════════════════════════════════════════════
-# DATABASE
-# ══════════════════════════════════════════════════════════
-DB = "netbrain.db"
-def db():
-    c = sqlite3.connect(DB, check_same_thread=False); c.row_factory = sqlite3.Row; return c
-
-def init_db():
-    con = db()
-    con.executescript("""
-        CREATE TABLE IF NOT EXISTS devices (id INTEGER PRIMARY KEY AUTOINCREMENT, hostname TEXT, ip TEXT, vendor TEXT DEFAULT 'cisco_ios', username TEXT, password TEXT, port INTEGER DEFAULT 22, role TEXT, site TEXT, status TEXT DEFAULT 'up', cpu INTEGER DEFAULT 0, memory INTEGER DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
-        CREATE TABLE IF NOT EXISTS incidents (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, description TEXT, root_cause TEXT, resolution TEXT, devices TEXT, protocols TEXT, severity TEXT, status TEXT DEFAULT 'active', business_impact TEXT, affected_users INTEGER DEFAULT 0, confidence INTEGER DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP, resolved_at TEXT);
-        CREATE TABLE IF NOT EXISTS changes (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, description TEXT, device TEXT, change_type TEXT, risk_level TEXT, status TEXT DEFAULT 'pending', ai_risk_score INTEGER DEFAULT 0, ai_recommendation TEXT, created_by TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
-        CREATE TABLE IF NOT EXISTS chat_history (id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT, content TEXT, persona TEXT, workspace TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
-        CREATE TABLE IF NOT EXISTS autonomous_actions (id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT, device TEXT, trigger TEXT, ai_confidence INTEGER, status TEXT DEFAULT 'pending', result TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
-        CREATE TABLE IF NOT EXISTS knowledge_graph (id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT, source_type TEXT, target TEXT, target_type TEXT, relationship TEXT, metadata TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
-    """)
-    if con.execute("SELECT COUNT(*) FROM devices").fetchone()[0] == 0:
-        con.executemany("INSERT INTO devices(hostname,ip,vendor,username,password,port,role,site,status,cpu,memory) VALUES(?,?,?,?,?,?,?,?,?,?,?)", [
-            ("CORE-RTR-01","10.0.0.1","cisco_ios_xr","admin","admin123",22,"Core Router","HQ","warn",88,62),
-            ("PE-MUM-01","10.0.1.1","cisco_ios_xr","admin","admin123",22,"PE Router","Mumbai","critical",34,48),
-            ("PE-DEL-01","10.0.2.1","cisco_ios_xr","admin","admin123",22,"PE Router","Delhi","up",22,41),
-            ("DIST-SW-W","10.1.1.1","cisco_ios","admin","admin123",22,"Dist Switch","HQ-West","up",18,35),
-            ("DIST-SW-C","10.1.2.1","cisco_ios","admin","admin123",22,"Dist Switch","HQ-Central","warn",45,71),
-            ("FW-EDGE-01","192.168.1.1","paloalto_panos","admin","admin123",22,"Firewall","DMZ","up",18,55),
-            ("SW-ACC-14","10.2.14.1","cisco_ios","admin","admin123",22,"Access Switch","HQ-Floor2","critical",0,0),
-            ("WLC-HQ-01","10.3.1.1","cisco_ios","admin","admin123",22,"WLC","HQ","up",22,38),
-        ])
-    if con.execute("SELECT COUNT(*) FROM incidents").fetchone()[0] == 0:
-        con.executemany("INSERT INTO incidents(title,description,root_cause,resolution,devices,protocols,severity,status,business_impact,affected_users,confidence) VALUES(?,?,?,?,?,?,?,?,?,?,?)", [
-            ("BGP Session Flapping — PE-MUM-01","BGP peer AS65002 flapping 3x/hr causing route instability","Upstream ISP BGP prefix withdrawal causing hold-timer expiry","Increase BGP hold-timer to 90s. Open ISP ticket. Enable BFD for sub-second detection.","PE-MUM-01","BGP","critical","active","142 prefixes withdrawn. Mumbai branch SaaS access degraded. 340 users impacted.",340,87),
-            ("Interface Down — SW-ACC-14 Gi0/0/3","Physical interface failure on access switch","Physical port failure or cable disconnect","Replace cable or SFP. Check port for physical damage.","SW-ACC-14","Layer2","critical","active","VLAN 120 users unable to access corporate network. 47 users impacted.",47,94),
-            ("OSPF Adjacency Lost — 2024-11-14","OSPF neighbor lost between CORE and DIST","MTU mismatch on GigabitEthernet interface","Added ip ospf mtu-ignore on both interfaces","CORE-RTR-01,DIST-SW-W","OSPF","major","resolved","Brief routing disruption. Self-recovered in 4 minutes.",0,96),
-        ])
-    if con.execute("SELECT COUNT(*) FROM changes").fetchone()[0] == 0:
-        con.executemany("INSERT INTO changes(title,description,device,change_type,risk_level,status,ai_risk_score,ai_recommendation,created_by) VALUES(?,?,?,?,?,?,?,?,?)", [
-            ("BGP hold-timer update — PE-MUM-01","Increase BGP hold-timer from 60s to 90s on PE-MUM-01 to reduce flapping","PE-MUM-01","config","low",  "approved",15,"Low risk. Timer change only. No protocol restart required. Recommend BFD simultaneously.","NOC-Engineer"),
-            ("IOS-XR firmware upgrade — CORE-RTR-01","Upgrade from 7.5.2 to 7.7.1 on core router","CORE-RTR-01","firmware","high","pending",72,"HIGH RISK. Core router. Maintenance window required. Digital twin test first. Rollback plan mandatory.","Architect"),
-            ("New VLAN 150 — DIST-SW-W","Add VLAN 150 for new HR subnet deployment","DIST-SW-W","vlan","low","pending",8,"Low risk. VLAN addition only. No impact to existing VLANs. Recommend testing on DEV switch first.","NOC-Engineer"),
-        ])
-    if con.execute("SELECT COUNT(*) FROM autonomous_actions").fetchone()[0] == 0:
-        con.executemany("INSERT INTO autonomous_actions(action,device,trigger,ai_confidence,status,result) VALUES(?,?,?,?,?,?)", [
-            ("BFD enabled on BGP peer 10.0.2.1","PE-MUM-01","BGP flap detected — 3 events in 60 min",91,"executed","BFD session established. Detection time reduced to 300ms."),
-            ("SNMP trap forwarded to NOC","SW-ACC-14","Interface down — Gi0/0/3",99,"executed","Ticket INC0047821 created. NOC notified via Slack."),
-            ("BGP hold-timer increase staged","PE-MUM-01","Recurring BGP flap pattern — 3rd occurrence",78,"pending_approval","Awaiting NOC engineer approval. Estimated risk: LOW."),
-        ])
-    con.commit(); con.close()
-
-def get_devices(): con=db(); r=con.execute("SELECT * FROM devices").fetchall(); con.close(); return [dict(x) for x in r]
-def get_incidents(status=None):
-    con=db()
-    try:
-        if status:
-            r = con.execute("SELECT * FROM incidents WHERE status=? ORDER BY created_at DESC", (status,)).fetchall()
-        else:
-            r = con.execute("SELECT * FROM incidents ORDER BY created_at DESC").fetchall()
-        con.close()
-        return [dict(x) for x in r]
-    except Exception:
-        con.close()
-        return []
-def get_changes(): con=db(); r=con.execute("SELECT * FROM changes ORDER BY created_at DESC").fetchall(); con.close(); return [dict(x) for x in r]
-def get_auto_actions(): con=db(); r=con.execute("SELECT * FROM autonomous_actions ORDER BY created_at DESC").fetchall(); con.close(); return [dict(x) for x in r]
-def save_device(h,ip,v,u,p,port,role,site): con=db(); con.execute("INSERT INTO devices(hostname,ip,vendor,username,password,port,role,site) VALUES(?,?,?,?,?,?,?,?)",(h,ip,v,u,p,port,role,site)); con.commit(); con.close()
-def add_incident(title,desc,sev,devices,protocols,business_impact,affected_users,confidence): con=db(); con.execute("INSERT INTO incidents(title,description,severity,devices,protocols,business_impact,affected_users,confidence) VALUES(?,?,?,?,?,?,?,?)",(title,desc,sev,devices,protocols,business_impact,affected_users,confidence)); con.commit(); con.close()
-init_db()
-
-# ══════════════════════════════════════════════════════════
-# CLAUDE AI ENGINE
-# ══════════════════════════════════════════════════════════
-NET_SYSTEM = """You are NetBrain AI — an AI-Native Autonomous Network Operating System.
-You are NOT a chatbot. You are an intelligent operational AI embedded in every workflow.
-
-Core capabilities:
-- Deep networking expertise: BGP OSPF EIGRP IS-IS MPLS SRv6 VXLAN EVPN SD-WAN SASE Zero-Trust IPSec
-- Vendors: Cisco Juniper Arista PaloAlto Fortinet Aruba Nokia Huawei Versa Zscaler
-- Operational intelligence: RCA topology blast-radius change-risk compliance autonomous-remediation
-- Business context: translate technical failures to business impact revenue risk SLA breach
-
-Response style rules:
-- Be specific. Name devices, IPs, protocols, commands.
-- Always include CLI when relevant.
-- Show confidence percentage for analysis.
-- Explain WHY not just WHAT.
-- Structure: Summary → Evidence → Root Cause → Business Impact → Recommended Actions → Rollback
-- Adapt depth to persona (CCNA=explain everything, NOC=concise+actionable, Architect=deep+design)."""
-
-PERSONAS = {
-    "fresher": "Helping a networking student. Use simple language. Explain every term. Use analogies. Be encouraging. Show step-by-step. Visual descriptions.",
-    "ccna":    "Helping CCNA engineer. Explain with context. Define acronyms inline. Show CLI with explanation. Guide troubleshooting steps.",
-    "noc":     "Helping NOC engineer during operations. CONCISE. Lead with probable root cause immediately. Exact CLI commands. Rollback steps. Escalation path.",
-    "architect":"Helping senior network architect. Expert level. Skip basics. Design trade-offs. Scalability HA redundancy. RFC references. BOM context.",
-    "manager": "Helping operations manager. Business language. Avoid technical jargon. Focus on user impact revenue risk SLA performance decisions needed.",
-    "security":"Helping security engineer. Threat context. Attack paths. Compliance. Zero Trust principles. SIEM correlation. Containment actions.",
-}
-
-KB = {
-    "BGP":"BGP states: Idle→Connect→Active→OpenSent→OpenConfirm→Established. Active=TCP not established. Causes: ACL blocking 179, remote-as wrong, MD5 mismatch, update-source wrong. BGP hold-timer 180s default. BFD for sub-second. Best path: Weight>LocalPref>Originate>AS_PATH>MED>eBGP>IGP. Route reflector: iBGP no full-mesh. AS_PATH prepend for traffic engineering. Communities: no-export 65535:65281.",
-    "OSPF":"States: Down→Init→2-Way→ExStart→Exchange→Loading→Full. ExStart stuck=MTU mismatch→ip ospf mtu-ignore. Full=healthy. DR/BDR: priority then RID. Priority 0=never DR. LSAs: 1=Router 2=Network 3=Summary 5=External 7=NSSA. Area 0=backbone. ABR connects areas. Hello 10s, Dead 40s. Must match both ends.",
-    "VLAN":"Trunk not passing: show interfaces trunk → switchport trunk allowed vlan add. Native VLAN mismatch=broadcasts. STP: BLK→LIS→LRN→FWD. RSTP <1s. EtherChannel: match speed/duplex/VLAN. LACP active/passive. PortFast access only. BPDU Guard.",
-    "SDWAN":"vManage+vBond+vSmart+vEdge. OMP=overlay routing. Colors=transport. App-aware routing: SLA per app. Direct cloud access=breakout for SaaS. TLOC=system-IP+color+encap. ZTP for branch onboarding.",
-    "MPLS":"Label: 20-bit+3TC+1S+8TTL. LDP for IGP. RSVP-TE for explicit paths. L3VPN: VRF+RT+RD. L2VPN: VPWS p2p VPLS multipoint. SR: prefix-SID adj-SID no-LDP. SRv6: IPv6 as segments.",
-    "SECURITY":"Zero Trust: never-trust always-verify. ZTNA=app-specific. SASE=SD-WAN+SSE. Microsegmentation=east-west. App-ID+User-ID+Content-ID. NAC 802.1X. MFA mandatory. BFD for path validation.",
-    "DATACENTER":"Leaf-spine: ECMP no-STP. VXLAN UDP4789 VNI=24bit. EVPN: type2=MAC/IP type3=multicast type5=prefix. Symmetric IRB=anycast-GW. RoCE: PFC+ECN+DCQCN lossless for GPU.",
-    "CLOUD":"AWS: VPC TGW Direct-Connect. Azure: VNet ExpressRoute VWAN. GCP: VPC Cloud-Interconnect. Hybrid: IPSec or dedicated. Kubernetes: CNI calico cilium flannel.",
-    "WIRELESS":"CAPWAP: control+data tunnels. 802.11ax=WiFi6. RSSI-based roaming. RF: channel width TPC. WPA3. Wireless assurance: client health.",
-}
-
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-OPENROUTER_MODEL    = "anthropic/claude-sonnet-4-5"   # best Claude via OpenRouter
-
-def _get_key():
-    try:    return st.secrets.get("OPENROUTER_API_KEY", "")
-    except: return os.environ.get("OPENROUTER_API_KEY", "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")
-
-def ai_call(messages, persona="noc", max_tokens=2000, stream=False):
-    key = _get_key()
-    if not key:
-        return ("⚠️ **OpenRouter API key missing.**\n\n"
-                "Add to Streamlit Cloud → App Settings → Secrets:\n"
-                "```\nOPENROUTER_API_KEY = \"sk-or-v1-...\"\n```")
-    if not CLAUDE_OK:
-        return "⚠️ `openai` package missing. Add `openai>=1.0.0` to requirements.txt"
-    try:
-        client = OpenAI(
-            api_key=key,
-            base_url=OPENROUTER_BASE_URL,
-        )
-        sys_prompt = NET_SYSTEM + "\n\n" + PERSONAS.get(persona, PERSONAS["noc"])
-        # OpenRouter uses OpenAI message format — inject system as first message
-        full_messages = [{"role": "system", "content": sys_prompt}] + messages
-        resp = client.chat.completions.create(
-            model=OPENROUTER_MODEL,
-            max_tokens=max_tokens,
-            messages=full_messages,
-            extra_headers={
-                "HTTP-Referer": "https://netbrain-ai.streamlit.app",
-                "X-Title": "NetBrain AI",
-            }
-        )
-        return resp.choices[0].message.content
-    except Exception as e:
-        return f"❌ OpenRouter API error: `{e}`"
-
-def rag(query, n=3):
-    global _col
-    if RAG_OK and _cc and _emb:
-        try:
-            if _col is None:
-                _col = _cc.get_or_create_collection("netbrain_v2", metadata={"hnsw:space":"cosine"})
-                if _col.count() == 0:
-                    for t,c in KB.items():
-                        words=c.split(); chunks=[" ".join(words[i:i+150]) for i in range(0,len(words),120) if words[i:i+150]]
-                        ids=[hashlib.md5(f"{t}_{i}".encode()).hexdigest() for i in range(len(chunks))]
-                        embs=_emb.encode(chunks).tolist()
-                        _col.add(ids=ids,documents=chunks,embeddings=embs,metadatas=[{"topic":t} for _ in chunks])
-            emb=_emb.encode([query]).tolist()
-            res=_col.query(query_embeddings=emb,n_results=min(n,_col.count()))
-            return [(d,m) for d,m in zip(res["documents"][0],res["metadatas"][0])]
-        except: pass
-    q=query.lower(); scored=[]
-    for t,c in KB.items():
-        sc=sum(1 for w in q.split() if len(w)>3 and w in c.lower()); sc+=(5 if t.lower() in q else 0)
-        if sc>0: scored.append((sc,t,c))
-    scored.sort(reverse=True)
-    return [(c[:300],{"topic":t}) for _,t,c in scored[:n]]
-
-def nlp_extract(text):
-    ents = {
-        "ips": list(dict.fromkeys(re.findall(r'\b(?:\d{1,3}\.){3}\d{1,3}(?:\/\d{1,2})?\b', text))),
-        "ifaces": list(dict.fromkeys(re.findall(r'\b(?:Gi|Fa|Te|Hu|Et|xe|ge|Lo|Tu)\d+(?:[\/\-]\d+){0,3}\b', text, re.I))),
-        "vlans": list(dict.fromkeys(re.findall(r'\bVLAN\s*\d+\b', text, re.I))),
-        "as_nums": list(dict.fromkeys(re.findall(r'\bAS\s*\d+\b', text, re.I))),
-        "protos": [p for p in ["BGP","OSPF","EIGRP","MPLS","EVPN","VXLAN","STP","BFD","IPSec","SD-WAN","SASE","ZTNA","SRv6"] if p.upper() in text.upper()],
-        "vendors": [v for v in ["Cisco","Juniper","Arista","Palo Alto","Fortinet","Aruba","Zscaler","Versa","Nokia","Huawei"] if v.lower() in text.lower()],
-        "devices": list(dict.fromkeys(re.findall(r'\b[A-Z]{2,}[-_][A-Z0-9]{2,}[-_][A-Z0-9]+\b', text))),
-        "urgency": "critical" if any(w in text.lower() for w in ["down","outage","critical","p1","production","customers","revenue"]) else "high" if any(w in text.lower() for w in ["flapping","degraded","slow","latency","p2"]) else "normal",
-        "intent": next((i for i,kws in {
-            "incident_rca":["flapping","down","failing","outage","broken","not working","lost"],
-            "design":["design","architect","plan","build","create network","topology"],
-            "change_request":["change","upgrade","modify","update","add vlan","new config"],
-            "query_devices":["show","check","all devices","across","query","fetch"],
-            "explain":["explain","what is","how does","why","difference","understand"],
-            "generate_config":["generate","write config","create config","configure"],
-            "security":["threat","attack","breach","lateral","vulnerability","CVE"],
-        }.items() if any(k in text.lower() for k in kws)), "general"),
-        "persona_hint": "architect" if any(w in text.lower() for w in ["srv6","evpn","vxlan","bfd","lsdb","route-reflector","sr-mpls"]) else "fresher" if any(w in text.lower() for w in ["what is","explain","how does","beginner","simple","learn"]) else None
-    }
-    return ents
-
-def pipeline(query, persona="noc", history=None, workspace_context=None):
-    ents = nlp_extract(query)
-    ep = ents.get("persona_hint") or persona
-    ctx_parts = []
-    if ents["ips"]: ctx_parts.append(f"IPs:{','.join(ents['ips'])}")
-    if ents["protos"]: ctx_parts.append(f"Protocols:{','.join(ents['protos'])}")
-    if ents["devices"]: ctx_parts.append(f"Devices:{','.join(ents['devices'])}")
-    if ents["vlans"]: ctx_parts.append(f"VLANs:{','.join(ents['vlans'])}")
-    enriched = f"[Context: {' | '.join(ctx_parts)}]\n[Intent: {ents['intent']}]\n[Urgency: {ents['urgency']}]\n\n{query}" if ctx_parts else query
-    chunks = rag(query, 3)
-    incidents = get_incidents("active")
-    similar = [i for i in incidents if any(p.lower() in f"{i['title']} {i.get('protocols','')}".lower() for p in ents["protos"])][:1]
-    msgs = []
-    if chunks:
-        kb_text = "\n\n".join(f"[{m.get('topic','KB')}] {c}" for c,m in chunks)
-        msgs += [{"role":"user","content":f"KNOWLEDGE BASE:\n{kb_text}"},{"role":"assistant","content":"Knowledge reviewed."}]
-    if similar:
-        inc = similar[0]
-        msgs += [{"role":"user","content":f"ACTIVE INCIDENT CONTEXT:\nTitle:{inc['title']}\nRCA:{inc.get('root_cause','')}\nBusiness:{inc.get('business_impact','')}\nConfidence:{inc.get('confidence',0)}%"},
-                 {"role":"assistant","content":"Incident context loaded."}]
-    if workspace_context:
-        msgs += [{"role":"user","content":f"WORKSPACE CONTEXT:\n{workspace_context}"},{"role":"assistant","content":"Workspace context understood."}]
-    if history: msgs += history[-6:]
-    msgs.append({"role":"user","content":enriched})
-    response = ai_call(msgs, ep, 2000)
-    return {"response":response,"entities":ents,"persona_used":ep,"rag_topics":[m.get("topic","") for _,m in chunks],"similar_incidents":[i["title"] for i in similar]}
-
-def run_mdq(query, persona="noc"):
-    devices=get_devices(); results=[]
-    NL_CMD={"bgp summary":{"cisco_ios":"show ip bgp summary","cisco_ios_xr":"show bgp all summary","juniper_junos":"show bgp summary","arista_eos":"show bgp summary"},
-             "ospf neighbor":{"cisco_ios":"show ip ospf neighbor","cisco_ios_xr":"show ospf neighbor","juniper_junos":"show ospf neighbor","arista_eos":"show ip ospf neighbor"},
-             "interface":{"cisco_ios":"show interfaces status","cisco_ios_xr":"show interfaces brief","juniper_junos":"show interfaces terse","arista_eos":"show interfaces status"},
-             "cpu":{"cisco_ios":"show processes cpu sorted","cisco_ios_xr":"show processes cpu","juniper_junos":"show chassis routing-engine","arista_eos":"show processes top once"},
-             "vlan":{"cisco_ios":"show vlan brief","cisco_ios_xr":"show vlan","juniper_junos":"show vlans","arista_eos":"show vlan"},
-             "routing table":{"cisco_ios":"show ip route","cisco_ios_xr":"show route ipv4","juniper_junos":"show route","arista_eos":"show ip route"}}
-    def resolve(q,v):
-        for kw,vm in NL_CMD.items():
-            if kw in q.lower(): return vm.get(v,vm.get("cisco_ios","show version"))
-        return "show version" if not q.strip().startswith("show") else q.strip()
-    def sim(dev,cmd):
-        ip=dev.get("ip",""); h=dev.get("hostname","")
-        if "bgp" in cmd and "summary" in cmd: out=f"BGP router id {ip}\nNeighbor    AS     Up/Down  State\n10.0.0.1  65001  5d02h14  Established/142\n10.0.1.1  65002  0d00h04  Active\n10.0.2.1  65003  2d11h22  Established/87"
-        elif "ospf" in cmd: out="Neighbor ID  Pri  State     Interface\n192.168.1.1    1  FULL/DR   Gi0/0\n192.168.1.2    1  FULL/BDR  Gi0/1\n192.168.1.3    0  EXSTART   Gi0/2"
-        elif "cpu" in cmd: out=f"CPU 5sec {dev.get('cpu',0)}%, 1min {max(0,dev.get('cpu',0)-13)}%"
-        elif "vlan" in cmd: out="VLAN  Name         Status\n1     default      active\n100   FINANCE      active\n120   BRANCH-HYD   suspend"
-        elif "interface" in cmd: out="Interface  Status  Protocol\nGi0/0      up      up\nGi0/1      up      up\nGi0/2      down    down"
-        else: out=f"Hostname:{h}\nUptime:127d 4h"
-        return {"status":"ok","output":out,"simulated":True}
-    def qone(dev):
-        cmd=resolve(query,dev.get("vendor","cisco_ios"))
-        out=sim(dev,cmd)
-        results.append({**{k:dev.get(k,"") for k in ["hostname","ip","vendor","role","site","status"]}, "command":cmd, **out})
-    threads=[threading.Thread(target=qone,args=(d,)) for d in devices]
-    for t in threads: t.start()
-    for t in threads: t.join(timeout=15)
-    ctx="\n\n".join(f"=== {r['hostname']} ({r['ip']}) | {r['vendor']} | {r['role']} ===\nCMD:{r['command']}\n{r['output']}" for r in results)
-    synth=ai_call([{"role":"user","content":f'Query:"{query}"\n{len(results)} devices:\n{ctx}\n\n1)DIRECT ANSWER 2)ANOMALIES per device 3)RISKS 4)RECOMMENDED ACTIONS. Be specific with hostnames.'}],persona)
-    return {"results":results,"synthesis":synth,"count":len(results)}
-
-# ══════════════════════════════════════════════════════════
-# DESIGN SYSTEM — Light Professional + Alive
-# ══════════════════════════════════════════════════════════
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,wght@0,300;0,400;0,500;0,600;1,400&family=DM+Mono:wght@400;500&family=Fraunces:wght@600;700;900&display=swap');
-
-/* ── Reset & Base ── */
-*{box-sizing:border-box}
-html,body,[class*="css"]{font-family:'DM Sans',sans-serif!important;font-size:14px}
-.stApp{background:#f0f2f6!important}
-#MainMenu,footer,header{visibility:hidden}
-
-/* ── Top Command Bar ── */
-.topbar{
-  background:linear-gradient(135deg,#0a1628 0%,#0f2042 100%);
-  padding:0 24px;height:56px;display:flex;align-items:center;gap:16px;
-  position:sticky;top:0;z-index:1000;
-  box-shadow:0 2px 20px rgba(0,0,0,.3);
-}
-.logo-mark{font-size:22px;filter:drop-shadow(0 0 8px rgba(59,116,208,.6))}
-.logo-name{font-family:'Fraunces',serif;font-size:18px;font-weight:900;color:#fff;letter-spacing:-.3px}
-.logo-ver{font-size:10px;color:rgba(255,255,255,.35);font-family:'DM Mono',monospace;letter-spacing:.5px}
-.tb-search{
-  flex:1;max-width:560px;height:36px;
-  background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.15);
-  border-radius:10px;display:flex;align-items:center;gap:8px;padding:0 14px;
-  transition:.2s;cursor:text
-}
-.tb-search:focus-within{background:rgba(255,255,255,.13);border-color:rgba(59,116,208,.6);box-shadow:0 0 0 3px rgba(59,116,208,.15)}
-.tb-search input{flex:1;background:none;border:none;outline:none;color:#fff;font-size:13px;font-family:'DM Sans',sans-serif}
-.tb-search input::placeholder{color:rgba(255,255,255,.35)}
-.tb-hint{font-size:11px;color:rgba(255,255,255,.2);font-family:'DM Mono',monospace;white-space:nowrap}
-.tb-spacer{flex:1}
-
-/* Status Chips */
-.sys-chips{display:flex;gap:5px}
-.sys-chip{font-size:10px;padding:3px 8px;border-radius:12px;font-family:'DM Mono',monospace;font-weight:600;cursor:default;display:flex;align-items:center;gap:4px}
-.chip-ok{background:rgba(30,143,85,.2);color:#4ade80;border:1px solid rgba(30,143,85,.3)}
-.chip-warn{background:rgba(251,191,36,.15);color:#fbbf24;border:1px solid rgba(251,191,36,.25)}
-.chip-err{background:rgba(239,68,68,.15);color:#f87171;border:1px solid rgba(239,68,68,.25)}
-
-/* Persona Switcher */
-.persona-sw{display:flex;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.1);border-radius:8px;overflow:hidden;height:30px}
-.p-btn{padding:0 11px;font-size:11px;font-weight:600;color:rgba(255,255,255,.4);cursor:pointer;height:100%;display:flex;align-items:center;gap:4px;border:none;background:none;transition:.15s;white-space:nowrap;font-family:'DM Sans',sans-serif}
-.p-btn:hover{color:rgba(255,255,255,.75)}
-.p-btn.active{background:rgba(255,255,255,.15);color:#fff}
-.tb-avatar{width:30px;height:30px;border-radius:8px;background:linear-gradient(135deg,#3b74d0,#0077cc);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:#fff;cursor:pointer;flex-shrink:0}
-
-/* ── Workspace Grid ── */
-.ws-shell{display:flex;min-height:calc(100vh - 56px)}
-.ws-rail{
-  width:64px;min-width:64px;background:#fff;border-right:1px solid #e2e8f0;
-  display:flex;flex-direction:column;align-items:center;padding:12px 0;gap:4px;
-  flex-shrink:0;
-}
-.rail-btn{
-  width:44px;height:44px;border-radius:12px;display:flex;flex-direction:column;
-  align-items:center;justify-content:center;cursor:pointer;transition:.15s;
-  border:1px solid transparent;gap:3px;text-decoration:none;background:none;
-}
-.rail-btn:hover{background:#f1f5f9;border-color:#e2e8f0}
-.rail-btn.active{background:#eff6ff;border-color:#bfdbfe}
-.rail-ico{font-size:18px;line-height:1}
-.rail-lbl{font-size:8px;color:#94a3b8;font-family:'DM Mono',monospace;line-height:1;text-align:center}
-.rail-btn.active .rail-lbl{color:#3b82f6}
-.rail-badge{
-  position:absolute;top:-2px;right:-2px;width:14px;height:14px;
-  border-radius:50%;background:#ef4444;color:#fff;
-  font-size:8px;display:flex;align-items:center;justify-content:center;
-  font-family:'DM Mono',monospace;font-weight:700;border:1.5px solid #fff
-}
-.rail-sep{width:28px;height:1px;background:#e2e8f0;margin:4px 0}
-.ws-main{flex:1;overflow:hidden;display:flex;flex-direction:column}
-.ws-content{flex:1;overflow-y:auto;padding:20px}
-.ws-content::-webkit-scrollbar{width:4px}
-.ws-content::-webkit-scrollbar-thumb{background:#e2e8f0;border-radius:4px}
-
-/* ── AI Command Input ── */
-.ai-cmd-bar{
-  background:#fff;border:1.5px solid #e2e8f0;border-radius:14px;
-  padding:14px 16px;margin-bottom:20px;
-  box-shadow:0 2px 12px rgba(0,0,0,.06);
-  transition:.2s;
-}
-.ai-cmd-bar:focus-within{border-color:#3b82f6;box-shadow:0 0 0 3px rgba(59,130,246,.1)}
-.ai-cmd-label{font-size:10px;font-weight:600;color:#94a3b8;letter-spacing:1px;text-transform:uppercase;font-family:'DM Mono',monospace;margin-bottom:8px;display:flex;align-items:center;gap:6px}
-.ai-cmd-label::before{content:'';width:6px;height:6px;border-radius:50%;background:#22c55e;animation:pulse-dot 2s infinite;display:inline-block}
-@keyframes pulse-dot{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.6;transform:scale(.8)}}
-
-/* ── Workspace Panels ── */
-.ws-header{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:18px;gap:12px;flex-wrap:wrap}
-.ws-title{font-family:'Fraunces',serif;font-size:22px;font-weight:700;color:#0f172a;line-height:1.2}
-.ws-subtitle{font-size:13px;color:#64748b;margin-top:3px}
-
-/* ── AI Insight Bar (inline, not blocking) ── */
-.ai-insight{
-  background:linear-gradient(135deg,#f0f7ff 0%,#fff 100%);
-  border:1px solid #bfdbfe;border-left:4px solid #3b82f6;
-  border-radius:0 12px 12px 0;padding:12px 16px;
-  margin-bottom:16px;
-}
-.ai-insight-hdr{font-size:10px;font-weight:700;color:#3b82f6;letter-spacing:1px;text-transform:uppercase;font-family:'DM Mono',monospace;margin-bottom:5px;display:flex;align-items:center;gap:6px}
-.ai-insight-body{font-size:13px;color:#1e293b;line-height:1.6}
-.ai-insight-body strong{color:#1e40af}
-.ai-insight-body code{font-family:'DM Mono',monospace;font-size:12px;background:#dbeafe;color:#1e40af;padding:1px 5px;border-radius:4px}
-.ai-conf{font-size:11px;color:#64748b;margin-top:5px;font-family:'DM Mono',monospace}
-
-/* ── Metric Cards ── */
-.metrics-row{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}
-.metric-card{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:16px 18px;box-shadow:0 1px 4px rgba(0,0,0,.05);position:relative;overflow:hidden;transition:.2s}
-.metric-card:hover{box-shadow:0 4px 16px rgba(0,0,0,.08);transform:translateY(-1px)}
-.metric-card::after{content:'';position:absolute;bottom:0;left:0;right:0;height:3px}
-.mc-green::after{background:linear-gradient(90deg,#22c55e,#16a34a)}.mc-red::after{background:linear-gradient(90deg,#ef4444,#dc2626)}.mc-amber::after{background:linear-gradient(90deg,#f59e0b,#d97706)}.mc-blue::after{background:linear-gradient(90deg,#3b82f6,#2563eb)}.mc-purple::after{background:linear-gradient(90deg,#8b5cf6,#7c3aed)}
-.mc-lbl{font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.8px;font-family:'DM Mono',monospace;margin-bottom:6px}
-.mc-val{font-family:'Fraunces',serif;font-size:28px;font-weight:700;line-height:1;margin-bottom:4px}
-.mc-meta{font-size:12px;color:#94a3b8}
-.mc-trend-up{color:#22c55e}.mc-trend-dn{color:#ef4444}.mc-trend-ne{color:#94a3b8}
-.mc-icon{position:absolute;right:14px;top:14px;font-size:20px;opacity:.12}
-.mc-green .mc-val{color:#15803d}.mc-red .mc-val{color:#b91c1c}.mc-amber .mc-val{color:#92400e}.mc-blue .mc-val{color:#1e40af}.mc-purple .mc-val{color:#5b21b6}
-
-/* ── Incident War Room ── */
-.warroom{background:#fff;border:1px solid #fee2e2;border-radius:14px;overflow:hidden;box-shadow:0 4px 24px rgba(239,68,68,.1);margin-bottom:20px}
-.warroom-hdr{background:linear-gradient(135deg,#7f1d1d,#991b1b);padding:16px 20px;display:flex;align-items:center;gap:12px}
-.warroom-pulse{width:10px;height:10px;border-radius:50%;background:#fca5a5;animation:pulse-dot 1s infinite;flex-shrink:0}
-.warroom-title{font-family:'Fraunces',serif;font-size:15px;font-weight:700;color:#fff;flex:1}
-.warroom-body{padding:0}
-.warroom-section{padding:14px 20px;border-bottom:1px solid #fef2f2}
-.warroom-section:last-child{border-bottom:none}
-.ws-row{display:flex;align-items:flex-start;gap:12px}
-.ws-icon{width:30px;height:30px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0}
-.ws-data{flex:1;font-size:13px;color:#1e293b;line-height:1.6}
-.ws-label{font-size:10px;font-weight:700;color:#94a3b8;letter-spacing:.8px;text-transform:uppercase;font-family:'DM Mono',monospace;margin-bottom:2px}
-
-/* ── Device Status Grid ── */
-.device-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;margin-bottom:20px}
-.dev-card{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:12px;cursor:pointer;transition:.15s;position:relative}
-.dev-card:hover{box-shadow:0 4px 16px rgba(0,0,0,.1);transform:translateY(-1px);border-color:#93c5fd}
-.dev-status-bar{position:absolute;top:0;left:0;right:0;height:3px;border-radius:10px 10px 0 0}
-.status-up .dev-status-bar{background:linear-gradient(90deg,#22c55e,#16a34a)}
-.status-warn .dev-status-bar{background:linear-gradient(90deg,#f59e0b,#d97706)}
-.status-critical .dev-status-bar{background:linear-gradient(90deg,#ef4444,#dc2626);animation:blink-bar 1.5s infinite}
-@keyframes blink-bar{0%,100%{opacity:1}50%{opacity:.5}}
-.dev-hostname{font-family:'DM Mono',monospace;font-size:12px;font-weight:600;color:#0f172a;margin-top:4px}
-.dev-role{font-size:11px;color:#64748b;margin:2px 0}
-.dev-site{font-size:10px;color:#94a3b8;font-family:'DM Mono',monospace}
-.dev-metrics{display:flex;gap:8px;margin-top:8px}
-.dev-metric{flex:1;text-align:center}
-.dm-val{font-family:'DM Mono',monospace;font-size:13px;font-weight:600}
-.dm-lbl{font-size:9px;color:#94a3b8;text-transform:uppercase;letter-spacing:.5px}
-.dm-val.high{color:#ef4444}.dm-val.warn{color:#f59e0b}.dm-val.ok{color:#22c55e}
-.dev-ai-badge{
-  background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;
-  padding:3px 7px;font-size:10px;color:#1d4ed8;font-family:'DM Mono',monospace;
-  margin-top:6px;display:inline-flex;align-items:center;gap:3px
-}
-
-/* ── Knowledge Graph Node ── */
-.kg-node{
-  background:#fff;border:1.5px solid #e2e8f0;border-radius:12px;padding:14px;
-  cursor:pointer;transition:.2s;position:relative;
-}
-.kg-node:hover{border-color:#93c5fd;box-shadow:0 4px 20px rgba(59,130,246,.12);transform:translateY(-2px)}
-.kg-node.selected{border-color:#3b82f6;background:#eff6ff;box-shadow:0 0 0 3px rgba(59,130,246,.15)}
-.kg-type{font-size:9px;font-weight:700;color:#94a3b8;letter-spacing:1px;text-transform:uppercase;font-family:'DM Mono',monospace;margin-bottom:4px}
-.kg-name{font-size:13px;font-weight:600;color:#0f172a}
-.kg-meta{font-size:11px;color:#64748b;margin-top:3px}
-
-/* ── AI Chat Bubbles ── */
-.chat-user{background:#1e40af;color:#fff;border-radius:14px 14px 2px 14px;padding:10px 14px;margin:4px 0;display:inline-block;max-width:80%;font-size:13px;line-height:1.6;box-shadow:0 2px 8px rgba(30,64,175,.2)}
-.chat-ai{background:#fff;border:1px solid #e2e8f0;border-radius:14px 14px 14px 2px;padding:12px 16px;margin:4px 0;display:inline-block;max-width:88%;font-size:13px;line-height:1.65;box-shadow:0 2px 8px rgba(0,0,0,.06)}
-.ai-meta-row{display:flex;gap:5px;flex-wrap:wrap;margin-top:6px}
-.ai-meta-pill{font-size:10px;padding:2px 7px;border-radius:10px;font-family:'DM Mono',monospace;font-weight:600;display:inline-flex;align-items:center;gap:3px}
-.amp-rag{background:#e0f2fe;color:#0369a1}.amp-nlp{background:#ede9fe;color:#5b21b6}.amp-per{background:#dcfce7;color:#15803d}.amp-inc{background:#fef3c7;color:#92400e}
-
-/* ── Timeline ── */
-.timeline-item{display:flex;gap:14px;padding:10px 0;border-bottom:1px solid #f1f5f9;align-items:flex-start}
-.timeline-item:last-child{border-bottom:none}
-.tl-dot{width:28px;height:28px;border-radius:8px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:13px}
-.tl-body{flex:1}
-.tl-title{font-size:13px;font-weight:500;color:#0f172a;margin-bottom:2px}
-.tl-meta{font-size:11px;color:#94a3b8;font-family:'DM Mono',monospace}
-.tl-ai{font-size:12px;color:#1d4ed8;background:#eff6ff;border-radius:6px;padding:3px 8px;margin-top:4px;display:inline-block}
-.tl-dot.critical{background:#fee2e2}.tl-dot.major{background:#fef3c7}.tl-dot.info{background:#e0f2fe}.tl-dot.ok{background:#dcfce7}.tl-dot.ai{background:#ede9fe}
-
-/* ── Change Cards ── */
-.change-card{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:16px;margin-bottom:12px;cursor:pointer;transition:.15s}
-.change-card:hover{box-shadow:0 4px 16px rgba(0,0,0,.08);border-color:#93c5fd}
-.risk-bar{display:flex;align-items:center;gap:8px;margin-top:8px}
-.risk-track{flex:1;height:6px;background:#f1f5f9;border-radius:4px;overflow:hidden}
-.risk-fill{height:100%;border-radius:4px}
-.risk-low .risk-fill{background:linear-gradient(90deg,#22c55e,#16a34a)}
-.risk-medium .risk-fill{background:linear-gradient(90deg,#f59e0b,#d97706)}
-.risk-high .risk-fill{background:linear-gradient(90deg,#ef4444,#dc2626)}
-.risk-score{font-family:'DM Mono',monospace;font-size:12px;font-weight:700;width:30px;text-align:right}
-.risk-low .risk-score{color:#15803d}.risk-medium .risk-score{color:#92400e}.risk-high .risk-score{color:#b91c1c}
-
-/* ── Autonomous Ops ── */
-.auto-action{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:12px;margin-bottom:8px;display:flex;gap:12px;align-items:flex-start}
-.aa-status{width:32px;height:32px;border-radius:8px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:15px}
-.aa-exec{background:#dcfce7}.aa-pend{background:#fef3c7}.aa-fail{background:#fee2e2}
-.aa-body{flex:1}
-.aa-title{font-size:13px;font-weight:500;color:#0f172a;margin-bottom:3px}
-.aa-meta{font-size:11px;color:#64748b;font-family:'DM Mono',monospace;margin-bottom:3px}
-.aa-ai{font-size:11px;color:#6d28d9;background:#ede9fe;padding:2px 7px;border-radius:6px;display:inline-block}
-.aa-conf{font-size:11px;font-family:'DM Mono',monospace;color:#94a3b8}
-
-/* ── Buttons ── */
-.btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;transition:.15s;border:1.5px solid;font-family:'DM Sans',sans-serif;white-space:nowrap;text-decoration:none}
-.btn-primary{background:#1e40af;border-color:#1e40af;color:#fff;box-shadow:0 2px 8px rgba(30,64,175,.25)}
-.btn-primary:hover{background:#1d4ed8;border-color:#1d4ed8;box-shadow:0 4px 16px rgba(30,64,175,.35)}
-.btn-secondary{background:#fff;border-color:#e2e8f0;color:#475569}
-.btn-secondary:hover{border-color:#93c5fd;color:#1e40af}
-.btn-danger{background:#fef2f2;border-color:#fecaca;color:#b91c1c}
-.btn-success{background:#f0fdf4;border-color:#bbf7d0;color:#15803d}
-.btn-sm{padding:5px 11px;font-size:12px}
-
-/* ── Tags ── */
-.tag{display:inline-flex;align-items:center;gap:3px;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600;font-family:'DM Mono',monospace}
-.tag-red{background:#fee2e2;color:#b91c1c}.tag-amber{background:#fef3c7;color:#92400e}.tag-green{background:#dcfce7;color:#15803d}.tag-blue{background:#dbeafe;color:#1e40af}.tag-purple{background:#ede9fe;color:#5b21b6}.tag-slate{background:#f1f5f9;color:#475569}
-
-/* ── Section Headers ── */
-.sec-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:8px}
-.sec-title{font-size:14px;font-weight:700;color:#0f172a;display:flex;align-items:center;gap:6px}
-.sec-line{flex:1;height:1px;background:#f1f5f9}
-
-/* ── Cards ── */
-.card{background:#fff;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.05)}
-.card-hdr{padding:14px 18px;border-bottom:1px solid #f1f5f9;display:flex;align-items:center;justify-content:space-between;gap:10px;background:#fff}
-.card-title{font-size:13px;font-weight:700;color:#0f172a;display:flex;align-items:center;gap:7px}
-.card-body{padding:16px 18px}
-
-/* ── Topology SVG Wrapper ── */
-.topo-wrap{background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;position:relative}
-.topo-controls{display:flex;gap:6px;padding:10px 14px;border-bottom:1px solid #e2e8f0;background:#fff;flex-wrap:wrap;align-items:center}
-.topo-layer-btn{padding:4px 10px;border-radius:16px;font-size:12px;font-weight:600;border:1.5px solid #e2e8f0;background:#fff;color:#64748b;cursor:pointer;transition:.12s;font-family:'DM Sans',sans-serif}
-.topo-layer-btn.active{background:#1e40af;border-color:#1e40af;color:#fff}
-.topo-layer-btn:hover:not(.active){border-color:#93c5fd;color:#1e40af}
-
-/* ── Knowledge Graph Panel ── */
-.kg-detail{background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:18px;box-shadow:0 4px 20px rgba(0,0,0,.08)}
-.kg-detail-hdr{font-family:'Fraunces',serif;font-size:16px;font-weight:700;color:#0f172a;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid #f1f5f9}
-.rel-item{display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid #f8fafc;font-size:13px}
-.rel-item:last-child{border-bottom:none}
-.rel-arrow{color:#94a3b8;font-size:11px;font-family:'DM Mono',monospace}
-.rel-node{background:#f1f5f9;border-radius:6px;padding:2px 8px;font-size:12px;font-weight:600;color:#334155;font-family:'DM Mono',monospace;cursor:pointer}
-.rel-node:hover{background:#dbeafe;color:#1e40af}
-.rel-type{font-size:11px;color:#94a3b8;font-style:italic}
-
-/* ── AI Design Studio ── */
-.design-studio{background:linear-gradient(135deg,#f0f7ff 0%,#faf5ff 100%);border:1px solid #c7d2fe;border-radius:16px;padding:24px;margin-bottom:20px}
-.studio-title{font-family:'Fraunces',serif;font-size:18px;font-weight:700;color:#1e1b4b;margin-bottom:6px}
-.studio-sub{font-size:13px;color:#5b21b6;margin-bottom:20px}
-
-/* ── Autonomous mode buttons ── */
-.auto-modes{display:flex;gap:8px;margin-bottom:16px}
-.auto-mode-btn{flex:1;padding:10px;border-radius:10px;border:1.5px solid;text-align:center;cursor:pointer;transition:.15s;font-family:'DM Sans',sans-serif}
-.mode-human{border-color:#e2e8f0;background:#fff;color:#475569}
-.mode-semi{border-color:#dbeafe;background:#eff6ff;color:#1e40af}
-.mode-full{border-color:#e9d5ff;background:#faf5ff;color:#5b21b6}
-.auto-mode-btn.selected{box-shadow:0 0 0 3px rgba(59,130,246,.2)}
-.mode-full.selected{box-shadow:0 0 0 3px rgba(139,92,246,.2)}
-
-/* ── Streamlit overrides ── */
-div[data-testid="stButton"] button{border-radius:8px!important;font-weight:600!important;font-family:'DM Sans',sans-serif!important;transition:.15s!important}
-div[data-testid="stTextInput"] input,div[data-testid="stTextArea"] textarea,div[data-testid="stSelectbox"]{border-radius:8px!important}
-div[data-testid="stExpander"]{border-radius:10px!important}
-.stAlert{border-radius:10px!important}
-div.block-container{padding:0!important;max-width:100%!important}
-section[data-testid="stSidebar"]{display:none!important}
-
-/* ── Confidence indicator ── */
-.conf-bar{display:flex;align-items:center;gap:8px;margin-top:6px}
-.conf-track{flex:1;height:4px;background:#f1f5f9;border-radius:4px;overflow:hidden}
-.conf-fill{height:100%;border-radius:4px}
-.conf-high .conf-fill{background:linear-gradient(90deg,#22c55e,#16a34a)}
-.conf-med .conf-fill{background:linear-gradient(90deg,#f59e0b,#d97706)}
-.conf-low .conf-fill{background:linear-gradient(90deg,#ef4444,#dc2626)}
-.conf-pct{font-family:'DM Mono',monospace;font-size:11px;font-weight:700;width:32px}
-.conf-high .conf-pct{color:#15803d}.conf-med .conf-pct{color:#92400e}.conf-low .conf-pct{color:#b91c1c}
-
-/* ── RAG source chips ── */
-.rag-chip{display:inline-flex;align-items:center;gap:4px;padding:2px 7px;border-radius:6px;font-size:10px;font-family:'DM Mono',monospace;background:#e0f2fe;color:#0369a1;margin:2px}
-
-@media(max-width:900px){
-  .metrics-row{grid-template-columns:1fr 1fr}
-  .device-grid{grid-template-columns:1fr 1fr}
-  .ws-rail{display:none}
-}
-</style>
-""", unsafe_allow_html=True)
+# ── Init ──────────────────────────────────────────────────
+seed_database()
 
 # ══════════════════════════════════════════════════════════
 # SESSION STATE
 # ══════════════════════════════════════════════════════════
-def ss(k,v):
-    if k not in st.session_state: st.session_state[k]=v
-ss("workspace","operations")
-ss("persona","noc")
-ss("chat_msgs",[])
-ss("chat_hist",[])
-ss("incident_focus",None)
-ss("kg_selected",None)
-ss("auto_mode","human")
-ss("mdq_res",None)
-ss("design_output",None)
-ss("workspace_context","")
-ss("global_search","")
-ss("nlp_live",{})
-
-personas = ["fresher","ccna","noc","architect","manager","security"]
-persona_labels = {"fresher":"🌱 Fresher","ccna":"🎓 CCNA","noc":"🖥 NOC","architect":"🏗 Architect","manager":"📊 Manager","security":"🔒 Security"}
-workspaces = [
-    ("operations","⚡","Operations","Command center"),
-    ("incident","🚨","Incidents","War room"),
-    ("topology","🗺","Topology","Knowledge graph"),
-    ("troubleshoot","🔧","Diagnose","AI RCA engine"),
-    ("change","📋","Changes","Safety engine"),
-    ("autonomous","🤖","Autonomous","AI operations"),
-    ("design","🏗","Design","AI design studio"),
-    ("learn","📖","Learn","Adaptive learning"),
-]
+_DEFAULTS = {
+    "workspace":     "operations",
+    "persona":       "noc",
+    "chat_msgs":     [],
+    "chat_hist":     [],
+    "kg_selected":   None,
+    "mdq_results":   None,
+    "nlp_results":   None,
+    "rag_results":   [],
+    "design_output": None,
+    "auto_mode":     "human",
+    "user_role":     "admin",    # Set via login in production
+    "user_name":     "engineer",
+}
+for k, v in _DEFAULTS.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
 # ══════════════════════════════════════════════════════════
-# TOP COMMAND BAR
+# INJECT CSS
+# ══════════════════════════════════════════════════════════
+inject_css()
+
+# ══════════════════════════════════════════════════════════
+# STATUS CHECK
+# ══════════════════════════════════════════════════════════
+@st.cache_data(ttl=30)
+def get_system_status():
+    api_key = get_api_key()
+    r_stat = rag_status()
+    return {
+        "ai":      bool(api_key),
+        "ssh":     NETMIKO_OK,
+        "rag":     r_stat,
+        "db":      True,
+    }
+
+# ══════════════════════════════════════════════════════════
+# CORE PIPELINE
+# ══════════════════════════════════════════════════════════
+def pipeline(query: str, persona: str = "noc", history: list = None,
+             workspace_ctx: str = "") -> dict:
+    """Full 4-engine pipeline: NLP → RAG → Incident Memory → Claude."""
+    # 1 — NLP
+    nlp_result = nlp_extract(query)
+    effective_persona = nlp_result.persona_hint or persona
+
+    # 2 — RAG
+    rag_results = rag_search(query, n=3)
+    rag_ctx = format_rag_context(rag_results)
+    rag_topics = [m.get("topic", m.get("title", "")) for _, m in rag_results]
+
+    # 3 — Incident Memory
+    active_incs = get_incidents("active")
+    similar = [i for i in active_incs
+               if any(p.lower() in f"{i['title']} {i.get('protocols','')}".lower()
+                      for p in nlp_result.protocols)][:2]
+    inc_ctx = "\n".join(
+        f"INCIDENT: {i['title']} | RCA: {i['root_cause']} | Fix: {i['resolution']}"
+        for i in similar
+    )
+
+    # 4 — Enrich + Call Claude
+    enriched = enrich_query(query, nlp_result)
+    messages = (history or [])[-6:] + [{"role": "user", "content": enriched}]
+
+    response = call_ai(
+        messages,
+        persona=effective_persona,
+        rag_context=rag_ctx,
+        incident_context=inc_ctx,
+        workspace_context=workspace_ctx,
+        max_tokens=2000,
+    )
+
+    write_audit(
+        user=st.session_state.user_name,
+        action="ai_query",
+        resource=f"workspace:{st.session_state.workspace}",
+        detail=query[:200],
+    )
+
+    return {
+        "response":          response,
+        "entities":          {"protocols": nlp_result.protocols, "ips": nlp_result.ipv4,
+                               "devices": nlp_result.hostnames, "vlans": nlp_result.vlans},
+        "persona_used":      effective_persona,
+        "rag_topics":        rag_topics,
+        "similar_incidents": [i["title"] for i in similar],
+    }
+
+
+def go(prompt: str, target_workspace: str = "troubleshoot", ctx: str = ""):
+    """Send a prompt, store response, navigate to workspace."""
+    st.session_state.chat_msgs.append({"role": "user", "content": prompt, "meta": None})
+    with st.spinner("🧠 Reasoning…"):
+        result = pipeline(prompt, st.session_state.persona,
+                          st.session_state.chat_hist, ctx)
+    st.session_state.chat_msgs.append({"role": "assistant", "content": result["response"], "meta": result})
+    st.session_state.chat_hist += [
+        {"role": "user", "content": prompt},
+        {"role": "assistant", "content": result["response"]},
+    ]
+    st.session_state.workspace = target_workspace
+    st.rerun()
+
+
+# ══════════════════════════════════════════════════════════
+# TOPBAR
 # ══════════════════════════════════════════════════════════
 def render_topbar():
-    stat_claude = CLAUDE_OK and bool(_get_key())
-    def chip(lbl,ok,sim=False):
+    stat = get_system_status()
+
+    def _chip(lbl, ok, sim=False):
         cls = "chip-ok" if ok else "chip-warn" if sim else "chip-err"
-        dot = "●"
-        return f'<span class="sys-chip {cls}">{dot} {lbl}</span>'
+        return f'<span class="nb-chip {cls}"><span class="chip-dot"></span>{lbl}</span>'
+
+    ai_lbl  = "AI ON"  if stat["ai"]  else "AI OFF"
+    ssh_lbl = "SSH"    if stat["ssh"] else "SSH⚡sim"
+    rag_lbl = stat["rag"]["backend"][:6]
 
     st.markdown(f"""
-    <div class="topbar">
-      <div class="logo-mark">🧠</div>
-      <div>
-        <div class="logo-name">NetBrain AI</div>
-        <div class="logo-ver">AUTONOMOUS NETWORK OS</div>
+    <div class="nb-topbar">
+      <div class="nb-logo">
+        <div class="nb-logo-mark">🧠</div>
+        <div>
+          <div class="nb-logo-name">NetBrain AI</div>
+          <div class="nb-logo-ver">Autonomous Network OS</div>
+        </div>
       </div>
-      <div style="width:1px;height:28px;background:rgba(255,255,255,.1);margin:0 4px"></div>
-      <div class="sys-chips">
-        {chip(f"Claude {'ON' if stat_claude else 'OFF'}", stat_claude)}
-        {chip("SSH ⚡sim", True, not NETMIKO_OK) if not NETMIKO_OK else chip("SSH LIVE", True)}
-        {chip("NLP ~regex", True, True) if not SPACY_OK else chip("NLP spaCy", True)}
-        {chip("RAG keyword", True, True) if not RAG_OK else chip("RAG vector", True)}
+      <div class="nb-divider-v"></div>
+      <div class="nb-status-row">
+        {_chip(ai_lbl,  stat["ai"])}
+        {_chip(ssh_lbl, stat["ssh"], sim=not stat["ssh"])}
+        {_chip(rag_lbl, True, sim=stat["rag"]["backend"]=="Keyword")}
+        {_chip("DB ✓", True)}
       </div>
       <div style="flex:1"></div>
+      <div style="font-size:11px;color:var(--text-tertiary);font-family:JetBrains Mono,monospace">{get_role_label()}</div>
     </div>
     """, unsafe_allow_html=True)
 
-# ══════════════════════════════════════════════════════════
-# WORKSPACE SHELL
-# ══════════════════════════════════════════════════════════
-def render_rail():
-    active_incidents = len(get_incidents("active"))
-    pending_changes = len([c for c in get_changes() if c["status"]=="pending"])
-    pending_auto = len([a for a in get_auto_actions() if a["status"]=="pending_approval"])
-
-    icons = {"operations":"⚡","incident":"🚨","topology":"🗺","troubleshoot":"🔧","change":"📋","autonomous":"🤖","design":"🏗","learn":"📖"}
-    labels = {"operations":"OPS","incident":"WAR","topology":"GRAPH","troubleshoot":"RCA","change":"CHG","autonomous":"AUTO","design":"DESIGN","learn":"LEARN"}
-    badges = {"incident": active_incidents if active_incidents > 0 else None, "change": pending_changes if pending_changes > 0 else None, "autonomous": pending_auto if pending_auto > 0 else None}
-
-    rail_html = '<div class="ws-rail">'
-    for ws_id, icon, _, _ in workspaces:
-        active_cls = "active" if st.session_state.workspace == ws_id else ""
-        badge = badges.get(ws_id)
-        badge_html = f'<span class="rail-badge">{badge}</span>' if badge else ""
-        rail_html += f'<div class="rail-btn {active_cls}" style="position:relative" title="{labels[ws_id]}">{badge_html}<div class="rail-ico">{icon}</div><div class="rail-lbl">{labels[ws_id]}</div></div>'
-        if ws_id in ["incident","change","design"]:
-            rail_html += '<div class="rail-sep"></div>'
-    rail_html += '</div>'
-
-    # Render rail with Streamlit columns for click handling
-    with st.container():
-        cols = st.columns([1,9])
-        with cols[0]:
-            st.markdown("<br>", unsafe_allow_html=True)
-            for ws_id, icon, label, _ in workspaces:
-                badge = badges.get(ws_id, 0) or ""
-                btn_label = f"{icon} {badge}" if badge else icon
-                if st.button(btn_label, key=f"rail_{ws_id}", help=label, use_container_width=True):
-                    st.session_state.workspace = ws_id
-                    st.rerun()
 
 # ══════════════════════════════════════════════════════════
-# HELPER COMPONENTS
+# WORKSPACE NAV
 # ══════════════════════════════════════════════════════════
-def ai_insight(label, text, confidence=None, sources=None):
-    conf_html = ""
-    if confidence:
-        cls = "conf-high" if confidence>=80 else "conf-med" if confidence>=60 else "conf-low"
-        conf_html = f'<div class="conf-bar {cls}"><span class="conf-pct">{confidence}%</span><div class="conf-track"><div class="conf-fill" style="width:{confidence}%"></div></div><span style="font-size:11px;color:#94a3b8">AI Confidence</span></div>'
-    src_html = ""
-    if sources:
-        src_html = "<div style='margin-top:5px'>" + "".join(f'<span class="rag-chip">📚 {s}</span>' for s in sources if s) + "</div>"
-    st.markdown(f"""<div class="ai-insight">
-      <div class="ai-insight-hdr">🧠 {label}</div>
-      <div class="ai-insight-body">{text}</div>
-      {conf_html}{src_html}
-    </div>""", unsafe_allow_html=True)
+WORKSPACES = [
+    ("operations",  "⚡",  "Operations"),
+    ("incident",    "🚨",  "Incidents"),
+    ("topology",    "🗺",  "Topology"),
+    ("observe",     "📡",  "Observability"),
+    ("troubleshoot","🔧",  "Diagnose"),
+    ("change",      "📋",  "Changes"),
+    ("autonomous",  "🤖",  "Autonomous"),
+    ("twin",        "👾",  "Digital Twin"),
+    ("security",    "🔒",  "Security"),
+    ("compliance",  "🛡",  "Compliance"),
+    ("design",      "🏗",  "Design"),
+    ("mdq",         "⚡",  "Multi-Device"),
+    ("nlp",         "🧬",  "NLP"),
+    ("rag",         "📚",  "Knowledge"),
+    ("learn",       "📖",  "Learn"),
+    ("devices",     "🖧",  "Devices"),
+    ("executive",   "📈",  "Executive"),
+    ("finops",      "💰",  "FinOps"),
+    ("audit",       "🔐",  "Audit"),
+]
 
-def metric_card(label, value, meta, color="blue", trend=None, icon=""):
-    trend_html = f'<span class="mc-trend-{"up" if trend=="up" else "dn" if trend=="dn" else "ne"}">{" ↑" if trend=="up" else " ↓" if trend=="dn" else ""}</span>' if trend else ""
-    st.markdown(f"""<div class="metric-card mc-{color}">
-      <div class="mc-icon">{icon}</div>
-      <div class="mc-lbl">{label}</div>
-      <div class="mc-val">{value}{trend_html}</div>
-      <div class="mc-meta">{meta}</div>
-    </div>""", unsafe_allow_html=True)
+def render_workspace_nav():
+    active_incs = len(get_incidents("active"))
+    pending_chg = len([c for c in get_changes() if c["status"] == "pending"])
+    pending_auto= len([a for a in get_auto_actions() if a["status"] == "pending_approval"])
 
-def render_msg(role, content, meta=None):
-    if role == "user":
-        st.markdown(f'<div style="text-align:right;margin:6px 0"><span class="chat-user">{content}</span></div>', unsafe_allow_html=True)
-    else:
-        st.markdown(f'<div style="margin:6px 0"><span class="chat-ai">{content}</span></div>', unsafe_allow_html=True)
-        if meta:
-            pills = ""
-            if meta.get("persona_used"): pills += f'<span class="ai-meta-pill amp-per">👤 {meta["persona_used"]}</span>'
-            if meta.get("rag_topics"):   pills += "".join(f'<span class="ai-meta-pill amp-rag">📚 {t}</span>' for t in meta["rag_topics"][:2] if t)
-            if meta.get("similar_incidents"): pills += f'<span class="ai-meta-pill amp-inc">💡 {meta["similar_incidents"][0][:30]}</span>'
-            ents = meta.get("entities",{})
-            if ents.get("protos"): pills += f'<span class="ai-meta-pill amp-nlp">🧬 {", ".join(ents["protos"][:3])}</span>'
-            if pills: st.markdown(f'<div class="ai-meta-row">{pills}</div>', unsafe_allow_html=True)
+    badges = {"incident": active_incs, "change": pending_chg, "autonomous": pending_auto}
 
-def go_chat(prompt, workspace="troubleshoot", ctx=""):
-    st.session_state.chat_msgs.append({"role":"user","content":prompt,"meta":None})
-    with st.spinner("🧠 Reasoning…"):
-        r = pipeline(prompt, st.session_state.persona, st.session_state.chat_hist, ctx or st.session_state.workspace_context)
-    st.session_state.chat_msgs.append({"role":"assistant","content":r["response"],"meta":r})
-    st.session_state.chat_hist += [{"role":"user","content":prompt},{"role":"assistant","content":r["response"]}]
-    st.session_state.workspace = workspace
-    st.rerun()
+    cols = st.columns(len(WORKSPACES))
+    for col, (ws_id, icon, label) in zip(cols, WORKSPACES):
+        with col:
+            badge = badges.get(ws_id, 0)
+            btn_label = f"{icon} {label}" + (f" ·{badge}" if badge else "")
+            is_active = st.session_state.workspace == ws_id
+            if st.button(btn_label, key=f"ws_{ws_id}",
+                         use_container_width=True,
+                         type="primary" if is_active else "secondary"):
+                st.session_state.workspace = ws_id
+                st.rerun()
 
-def sec_header(title, subtitle=None):
-    sub = f'<div style="font-size:12px;color:#64748b;margin-top:2px">{subtitle}</div>' if subtitle else ""
-    st.markdown(f"""<div style="margin-bottom:16px">
-      <div style="font-family:Fraunces,serif;font-size:20px;font-weight:700;color:#0f172a">{title}</div>{sub}
-    </div>""", unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════
-# RENDER TOPBAR
+# PERSONA + GLOBAL SEARCH BAR
+# ══════════════════════════════════════════════════════════
+def render_persona_and_search():
+    p_icons = {"fresher":"🌱","ccna":"🎓","noc":"🖥","architect":"🏗","manager":"📊","security":"🔒"}
+    personas = list(p_icons.keys())
+
+    st.markdown('<div class="ai-cmd-wrap"><div class="ai-cmd-label"><span class="ai-cmd-pulse"></span>AI Copilot — Natural Language Network Intelligence</div></div>',
+                unsafe_allow_html=True)
+
+    col_p, col_q, col_b, col_sel = st.columns([0.18, 0.52, 0.10, 0.20])
+    with col_p:
+        chosen = st.selectbox("Persona", [f"{p_icons[p]} {p.title()}" for p in personas],
+                              index=personas.index(st.session_state.persona),
+                              label_visibility="collapsed", key="persona_sel")
+        st.session_state.persona = personas[[f"{p_icons[p]} {p.title()}" for p in personas].index(chosen)]
+    with col_q:
+        query = st.text_input("", placeholder="'Why is BGP flapping?' · 'Design SD-WAN 50 branches' · 'Show OSPF all devices' · 'Simulate CORE-RTR-01 failure'",
+                              label_visibility="collapsed", key="global_q")
+    with col_b:
+        ask = st.button("⚡ Ask AI", use_container_width=True, type="primary", key="global_ask")
+    with col_sel:
+        sample = st.selectbox("", ["Examples…",
+            "Why is BGP flapping on PE-MUM-01?","Show BGP summary all devices",
+            "Design enterprise campus 3000 users","What if CORE-RTR-01 fails?",
+            "Explain OSPF DR election","Generate Cisco IOS-XR BGP config",
+            "Compliance gap analysis","Security posture analysis"],
+            label_visibility="collapsed", key="sample_q")
+
+    if ask and query.strip():
+        ents = nlp_extract(query)
+        target = {"incident_rca":"troubleshoot","design":"design","change_request":"change",
+                  "query_devices":"mdq","security_analysis":"troubleshoot",
+                  "digital_twin":"autonomous"}.get(ents.intent, "troubleshoot")
+        go(query.strip(), target)
+    if sample != "Examples…":
+        go(sample, "troubleshoot")
+        st.session_state["sample_q"] = "Examples…"
+
+
+# ══════════════════════════════════════════════════════════
+# RENDER
 # ══════════════════════════════════════════════════════════
 render_topbar()
-
-# ══════════════════════════════════════════════════════════
-# PERSONA SELECTOR — horizontal below topbar
-# ══════════════════════════════════════════════════════════
-p_icons = {"fresher":"🌱","ccna":"🎓","noc":"🖥","architect":"🏗","manager":"📊","security":"🔒"}
-p_cols = st.columns(len(personas) + 2)
-with p_cols[0]:
-    st.markdown("<div style='font-size:11px;color:#94a3b8;font-weight:600;padding-top:8px;font-family:DM Mono,monospace'>PERSONA</div>",unsafe_allow_html=True)
-for i, p in enumerate(personas):
-    with p_cols[i+1]:
-        is_active = st.session_state.persona == p
-        btn_style = "primary" if is_active else "secondary"
-        if st.button(f"{p_icons[p]} {p.title()}", key=f"persona_{p}", use_container_width=True, type="primary" if is_active else "secondary"):
-            st.session_state.persona = p
-            st.rerun()
-
+render_workspace_nav()
 st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
+render_persona_and_search()
+st.markdown("<div style='height:8px;background:var(--border-subtle);margin:8px 0'></div>", unsafe_allow_html=True)
 
-# ══════════════════════════════════════════════════════════
-# WORKSPACE NAV — horizontal tabs
-# ══════════════════════════════════════════════════════════
-ws_cols = st.columns(len(workspaces))
-for i, (ws_id, icon, label, subtitle) in enumerate(workspaces):
-    with ws_cols[i]:
-        active_incidents = len(get_incidents("active")) if ws_id == "incident" else 0
-        btn_lbl = f"{icon} {label}" + (f" ({active_incidents})" if active_incidents > 0 else "")
-        if st.button(btn_lbl, key=f"ws_{ws_id}", use_container_width=True,
-                     type="primary" if st.session_state.workspace == ws_id else "secondary"):
-            st.session_state.workspace = ws_id
-            st.rerun()
-
-st.markdown("<div style='height:2px;background:#f1f5f9;margin:8px 0'></div>", unsafe_allow_html=True)
-
-# ══════════════════════════════════════════════════════════
-# GLOBAL AI COMMAND BAR
-# ══════════════════════════════════════════════════════════
-with st.container():
-    st.markdown('<div class="ai-cmd-bar"><div class="ai-cmd-label">AI Copilot — Ask anything about your network</div></div>', unsafe_allow_html=True)
-    gi, gb, gsel = st.columns([0.72, 0.12, 0.16])
-    with gi:
-        global_q = st.text_input("", placeholder="'Why is BGP unstable?' · 'Design SD-WAN 50 branches' · 'Show all devices with OSPF issues' · 'Simulate PE-MUM-01 failure'",
-                                  label_visibility="collapsed", key="global_input")
-    with gb:
-        if st.button("⚡ Ask AI", use_container_width=True, type="primary", key="global_ask"):
-            if global_q.strip():
-                ents = nlp_extract(global_q)
-                target_ws = {"incident_rca":"troubleshoot","design":"design","change_request":"change","query_devices":"operations","security":"incident"}.get(ents.get("intent",""), "troubleshoot")
-                go_chat(global_q, target_ws)
-    with gsel:
-        sample_q = st.selectbox("", ["Quick query…","Why is BGP flapping on PE-MUM-01?","Show all devices with issues","Design enterprise campus 3000 users","What happens if CORE-RTR-01 fails?","Explain OSPF DR election","Generate BGP config Cisco IOS-XR","Simulate firmware upgrade risk","Find security gaps in my network","VLAN 100 users cannot reach internet"], label_visibility="collapsed", key="sample_sel")
-        if sample_q != "Quick query…" and sample_q:
-            ents = nlp_extract(sample_q)
-            go_chat(sample_q, "troubleshoot")
-
-# ══════════════════════════════════════════════════════════
-# WORKSPACES
-# ══════════════════════════════════════════════════════════
 ws = st.session_state.workspace
 
-# ─────────────────────── OPERATIONS WORKSPACE ─────────────
+# ══════════════════════════════════════════════════════════
+# WORKSPACE: OPERATIONS
+# ══════════════════════════════════════════════════════════
 if ws == "operations":
-    sec_header("⚡ Operations Command Center", "Real-time network intelligence · AI-embedded · Contextual workflows")
+    section_header("⚡ Operations Command Center",
+                   "Real-time network intelligence · AI-embedded in every workflow")
 
-    # AI operational pulse
-    ai_insight("Operational Intelligence — Real-time",
-        "<strong>2 active incidents</strong> — BGP flap PE-MUM-01 (<strong>87% confidence: ISP withdrawal</strong>) + SW-ACC-14 interface down (<strong>94% confidence: physical failure</strong>). "
-        "<strong>CORE-RTR-01 CPU at 88%</strong> — correlates with BGP SPF recalculation. "
+    ai_insight_card(
+        "Operational Intelligence — Live",
+        "<strong>2 active incidents</strong> — BGP flap PE-MUM-01 (<strong>87% confidence: ISP withdrawal</strong>) "
+        "+ SW-ACC-14 interface down (<strong>94% confidence: physical failure</strong>). "
+        "<strong>CORE-RTR-01 CPU 88%</strong> — correlates with BGP SPF recalculation. "
         "<strong>Autonomous action pending:</strong> BGP hold-timer increase awaiting your approval.",
-        confidence=87, sources=["BGP","OSPF","Incident Memory"])
+        confidence=87, sources=["BGP","OSPF","Incident Memory"],
+    )
 
-    # Metrics
-    mc = st.columns(5)
-    with mc[0]: metric_card("Devices Online","831","of 847 · 16 degraded","green","dn","✅")
-    with mc[1]: metric_card("Active Incidents","2","BGP + Interface","red",None,"🔴")
-    with mc[2]: metric_card("BGP Sessions","248","247 up · 1 active","blue","dn","🔄")
-    with mc[3]: metric_card("Auto Actions","3","1 pending approval","amber",None,"🤖")
-    with mc[4]: metric_card("Change Queue","3","1 high risk","purple",None,"📋")
+    metric_grid([
+        {"label":"Devices Online","value":"831","meta":"of 847 · 16 degraded","color":"green","icon":"✅"},
+        {"label":"Active Incidents","value":"2","meta":"BGP + Interface","color":"red","icon":"🔴"},
+        {"label":"BGP Sessions","value":"248","meta":"247 up · 1 active","color":"blue","icon":"🔄"},
+        {"label":"Pending Actions","value":"1","meta":"Awaiting approval","color":"amber","icon":"🤖"},
+    ])
 
-    # Device grid
-    st.markdown('<div class="sec-hdr"><div class="sec-title">🖧 Live Device Status — Click for AI Analysis</div><div class="sec-line"></div></div>', unsafe_allow_html=True)
-    devices = get_devices()
-    dev_cols = st.columns(4)
-    for i, d in enumerate(devices):
-        with dev_cols[i % 4]:
-            status = d.get("status","up")
-            cpu = d.get("cpu",0); mem = d.get("memory",0)
-            cpu_cls = "high" if cpu >= 80 else "warn" if cpu >= 60 else "ok"
-            mem_cls = "high" if mem >= 80 else "warn" if mem >= 60 else "ok"
-            cpu_disp = f"{cpu}%" if cpu > 0 else "—"
-            mem_disp = f"{mem}%" if mem > 0 else "—"
-            ai_badge = ""
-            if status == "critical": ai_badge = '<div class="dev-ai-badge">🧠 AI: Investigate now</div>'
-            elif status == "warn": ai_badge = '<div class="dev-ai-badge">🧠 AI: Monitor closely</div>'
-            st.markdown(f"""<div class="dev-card status-{status}">
-              <div class="dev-status-bar"></div>
-              <div class="dev-hostname">{d['hostname']}</div>
-              <div class="dev-role">{d.get('role','')}</div>
-              <div class="dev-site">📍 {d.get('site','')}</div>
-              <div class="dev-metrics">
-                <div class="dev-metric"><div class="dm-val {cpu_cls}">{cpu_disp}</div><div class="dm-lbl">CPU</div></div>
-                <div class="dev-metric"><div class="dm-val {mem_cls}">{mem_disp}</div><div class="dm-lbl">MEM</div></div>
-              </div>{ai_badge}
-            </div>""", unsafe_allow_html=True)
-            if st.button(f"AI Analysis", key=f"dev_ai_{d['hostname']}", use_container_width=True):
-                ctx = f"Device: {d['hostname']} ({d['ip']}) | Role: {d['role']} | Site: {d['site']} | Status: {status} | CPU: {cpu}% | Memory: {mem}%"
-                go_chat(f"Analyze {d['hostname']} ({d['ip']}). Status={status}, CPU={cpu}%, Memory={mem}%. Give health assessment, risks, and recommendations.", "troubleshoot", ctx)
+    col_devs, col_timeline = st.columns([0.55, 0.45])
 
-    # Operational timeline
-    col_t, col_a = st.columns([0.55, 0.45])
-    with col_t:
-        st.markdown('<div class="sec-hdr"><div class="sec-title">⏱ Operational Timeline</div><div class="sec-line"></div></div>', unsafe_allow_html=True)
+    with col_devs:
+        st.markdown('<div style="font-size:13px;font-weight:700;color:var(--text-primary);margin-bottom:10px">🖧 Live Device Status</div>', unsafe_allow_html=True)
+        devices = get_devices()
+        dev_cols = st.columns(2)
+        for i, d in enumerate(devices):
+            status = d.get("status", "up")
+            cpu, mem = d.get("cpu", 0), d.get("memory", 0)
+            cpu_cls = "mv-crit" if cpu >= 80 else "mv-warn" if cpu >= 60 else "mv-ok"
+            mem_cls = "mv-crit" if mem >= 80 else "mv-warn" if mem >= 60 else "mv-ok"
+            with dev_cols[i % 2]:
+                st.markdown(f"""<div class="nb-dev dev-{status}">
+                  <div class="nb-dev-hn">{d['hostname']}</div>
+                  <div class="nb-dev-role">{d.get('role','')}</div>
+                  <div class="nb-dev-site">📍 {d.get('site','')}</div>
+                  <div class="nb-dev-metrics">
+                    <div class="nb-dev-m"><div class="nb-dev-mv {cpu_cls}">{f"{cpu}%" if cpu else "—"}</div><div class="nb-dev-ml">CPU</div></div>
+                    <div class="nb-dev-m"><div class="nb-dev-mv {mem_cls}">{f"{mem}%" if mem else "—"}</div><div class="nb-dev-ml">MEM</div></div>
+                  </div>
+                </div>""", unsafe_allow_html=True)
+                if st.button(f"🧠", key=f"dev_ai_{d['hostname']}", help=f"AI analyze {d['hostname']}"):
+                    go(f"Analyze health of {d['hostname']} ({d['ip']}). Status={status}, CPU={cpu}%, Memory={mem}%. Give assessment, risks, and recommendations.",
+                       "troubleshoot", f"Device: {d['hostname']} | Role: {d['role']} | Status: {status}")
+
+    with col_timeline:
+        st.markdown('<div style="font-size:13px;font-weight:700;color:var(--text-primary);margin-bottom:10px">⏱ Operational Timeline</div>', unsafe_allow_html=True)
         timeline = [
-            ("critical","🔴","2m ago","BGP Session Flapping — PE-MUM-01","AS65002 · 3 flaps · 142 prefixes at risk","AI correlated with ISP route withdrawal — 87% confidence"),
-            ("critical","🔴","8m ago","Interface Down — SW-ACC-14 Gi0/0/3","Access layer · VLAN 120 · 47 users impacted","AI: Physical failure. Check cable/SFP. 94% confidence."),
-            ("major","🟡","14m ago","High CPU — CORE-RTR-01 (88%)","OSPF SPF recalculation detected","AI: Symptom of BGP flap. Will resolve when BGP stabilizes."),
-            ("ai","🤖","18m ago","Autonomous Action: BFD enabled","PE-MUM-01 · Confidence 91%","Executed automatically. BGP detection now 300ms."),
-            ("major","🟡","31m ago","OSPF Neighbor Timeout — Area 0","Segment 10.10.40.0/24 · DR election","AI: Related to BGP instability cascade."),
-            ("ok","✅","2h ago","Change #3 Approved — BGP hold-timer","Approved by Architect · Risk score: 15/100","Scheduled for next maintenance window."),
+            ("crit","🔴","2m ago","BGP Flapping — PE-MUM-01","AS65002 · 142 prefixes · ISP root cause","AI: ISP BGP withdrawal — 87% confidence"),
+            ("crit","🔴","8m ago","Interface Down — SW-ACC-14","VLAN 120 · 47 users","AI: Physical failure. Replace cable/SFP. 94% confidence."),
+            ("warn","🟡","14m ago","High CPU — CORE-RTR-01 (88%)","OSPF SPF recalculation","AI: Symptom of BGP flap — will self-resolve"),
+            ("ai","🤖","18m ago","BFD Auto-Enabled — PE-MUM-01","Confidence 91% · Executed","BGP detection reduced to 300ms"),
+            ("warn","🟡","31m ago","OSPF Neighbor Timeout — Area 0","Segment 10.10.40.0/24","AI: Related to BGP instability cascade"),
+            ("ok","✅","2h ago","Change #1 Approved — BGP timer","Risk score 15 · Low","Scheduled for maintenance window"),
         ]
-        for sev, ico, time_ago, title, meta_txt, ai_txt in timeline:
-            st.markdown(f"""<div class="timeline-item">
-              <div class="tl-dot {sev}">{ico}</div>
-              <div class="tl-body">
-                <div class="tl-title">{title}</div>
-                <div class="tl-meta">{time_ago} · {meta_txt}</div>
-                <div class="tl-ai">🧠 {ai_txt}</div>
+        for sev, ico, ts, title, meta_txt, ai_txt in timeline:
+            st.markdown(f"""<div class="nb-timeline-item">
+              <div class="nb-tl-dot tl-{sev}">{ico}</div>
+              <div class="nb-tl-body">
+                <div class="nb-tl-title">{title}</div>
+                <div class="nb-tl-meta">{ts} · {meta_txt}</div>
+                <div class="nb-tl-ai">🧠 {ai_txt}</div>
               </div>
             </div>""", unsafe_allow_html=True)
 
-    with col_a:
-        st.markdown('<div class="sec-hdr"><div class="sec-title">🤖 Pending AI Actions</div><div class="sec-line"></div></div>', unsafe_allow_html=True)
-        auto_actions = get_auto_actions()
-        for a in auto_actions:
-            status = a.get("status","pending")
-            cls = "aa-exec" if status=="executed" else "aa-pend" if "pending" in status else "aa-fail"
-            ico = "✅" if status=="executed" else "⏳" if "pending" in status else "❌"
-            conf = a.get("ai_confidence",0)
-            conf_cls = "conf-high" if conf>=80 else "conf-med" if conf>=60 else "conf-low"
-            st.markdown(f"""<div class="auto-action">
-              <div class="aa-status {cls}">{ico}</div>
-              <div class="aa-body">
-                <div class="aa-title">{a['action']}</div>
-                <div class="aa-meta">Device: {a.get('device','')} · Trigger: {a.get('trigger','')[:50]}</div>
-                <div class="aa-ai">{a.get('result','')[:80]}</div>
-                <div class="conf-bar {conf_cls}" style="margin-top:5px"><span class="conf-pct">{conf}%</span><div class="conf-track"><div class="conf-fill" style="width:{conf}%"></div></div></div>
-              </div>
-            </div>""", unsafe_allow_html=True)
-            if "pending" in status:
-                ac1, ac2 = st.columns(2)
-                with ac1:
-                    if st.button("✅ Approve", key=f"approve_{a['id']}", use_container_width=True):
-                        con=db(); con.execute(f"UPDATE autonomous_actions SET status='executed' WHERE id={a['id']}"); con.commit(); con.close(); st.rerun()
-                with ac2:
-                    if st.button("❌ Reject", key=f"reject_{a['id']}", use_container_width=True):
-                        con=db(); con.execute(f"UPDATE autonomous_actions SET status='rejected' WHERE id={a['id']}"); con.commit(); con.close(); st.rerun()
+    st.markdown("**⚡ Quick Actions:**")
+    qc = st.columns(4)
+    quick_actions = [
+        ("🔧 Diagnose BGP", "BGP flapping on PE-MUM-01 AS65002 — root cause analysis and fix"),
+        ("⚡ Query All Devices", "Show BGP summary across all network devices simultaneously", "mdq"),
+        ("📊 Compliance Check", "Full compliance gap analysis — top 5 critical findings"),
+        ("🏗 Design SD-WAN", "Design SD-WAN for 50 branches, dual ISP, Azure, SASE, app-SLA"),
+    ]
+    for col, action in zip(qc, quick_actions):
+        with col:
+            prompt, *rest = action[1:]
+            target = rest[0] if rest else "troubleshoot"
+            if st.button(action[0], use_container_width=True, key=f"qa_{action[0]}"):
+                go(action[1], target)
 
-# ─────────────────────── INCIDENT WAR ROOM ─────────────────
+
+# ══════════════════════════════════════════════════════════
+# WORKSPACE: INCIDENTS
+# ══════════════════════════════════════════════════════════
 elif ws == "incident":
-    sec_header("🚨 Incident War Room", "AI-native incident operations · Root cause · Business impact · Remediation")
+    section_header("🚨 Incident War Room", "AI-native incident operations · RCA · Blast radius · Autonomous remediation")
 
     incidents = get_incidents("active")
     resolved  = get_incidents("resolved")
 
     if not incidents:
-        st.success("✅ No active incidents. All systems operational.")
+        st.success("✅ All clear — no active incidents.")
     else:
-        for inc in incidents:
-            conf = inc.get("confidence", 0)
-            conf_cls = "conf-high" if conf>=80 else "conf-med" if conf>=60 else "conf-low"
-            sev_color = "#7f1d1d" if inc["severity"]=="critical" else "#78350f"
-            sev_bg = "#991b1b" if inc["severity"]=="critical" else "#b45309"
+        ai_insight_card(
+            "AI Correlation",
+            f"<strong>{len(incidents)} active incidents correlated.</strong> "
+            "Primary root: ISP instability AS65002 → BGP flap → OSPF recalc → high CPU (alerts 1,3,4 are symptoms). "
+            "Secondary: Physical failure SW-ACC-14 Gi0/0/3. <strong>Fix root causes, not all symptoms.</strong>",
+        )
 
-            st.markdown(f"""<div class="warroom">
-              <div class="warroom-hdr" style="background:linear-gradient(135deg,{sev_color},{sev_bg})">
-                <div class="warroom-pulse"></div>
-                <div class="warroom-title">🚨 {inc['title']}</div>
-                <span style="font-size:10px;background:rgba(255,255,255,.15);padding:3px 8px;border-radius:10px;color:#fff;font-family:DM Mono,monospace">{inc['severity'].upper()} · ACTIVE</span>
+    for inc in incidents:
+        conf = inc.get("ai_confidence", 0)
+        conf_cls = "conf-high" if conf >= 80 else "conf-med" if conf >= 60 else "conf-low"
+        sev = inc["severity"]
+
+        st.markdown(f"""<div class="nb-warroom">
+          <div class="nb-wr-hdr">
+            <div class="nb-wr-pulse"></div>
+            <div class="nb-wr-title">🚨 {inc['title']}</div>
+            <span class="nb-chip {'chip-err' if sev=='critical' else 'chip-warn'}">{sev.upper()} · ACTIVE</span>
+          </div>
+          <div style="padding:14px 18px">
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px">
+              <div>
+                <div style="font-size:9px;font-weight:700;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.8px;font-family:JetBrains Mono,monospace;margin-bottom:5px">AI Root Cause</div>
+                <div style="font-size:13px;color:var(--text-primary);line-height:1.6">{inc.get('root_cause','Analyzing…')}</div>
+                <div class="nb-conf {conf_cls}" style="margin-top:6px"><span class="nb-conf-pct">{conf}%</span><div class="nb-conf-track"><div class="nb-conf-fill" style="width:{conf}%"></div></div><span style="font-size:10px;color:var(--text-tertiary)">AI Confidence</span></div>
               </div>
-              <div class="warroom-body">
-                <div class="warroom-section">
-                  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px">
-                    <div>
-                      <div style="font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.8px;font-family:DM Mono,monospace;margin-bottom:5px">AI Root Cause</div>
-                      <div style="font-size:13px;color:#0f172a;line-height:1.6">{inc.get('root_cause','Analyzing…')}</div>
-                      <div class="conf-bar {conf_cls}" style="margin-top:6px"><span class="conf-pct">{conf}%</span><div class="conf-track"><div class="conf-fill" style="width:{conf}%"></div></div><span style="font-size:11px;color:#94a3b8">AI Confidence</span></div>
-                    </div>
-                    <div>
-                      <div style="font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.8px;font-family:DM Mono,monospace;margin-bottom:5px">Business Impact</div>
-                      <div style="font-size:13px;color:#0f172a;line-height:1.6">{inc.get('business_impact','Calculating…')}</div>
-                      <div style="margin-top:5px"><span style="font-size:12px;font-weight:700;color:#b91c1c">{inc.get('affected_users',0)} users impacted</span></div>
-                    </div>
-                    <div>
-                      <div style="font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.8px;font-family:DM Mono,monospace;margin-bottom:5px">AI Remediation</div>
-                      <div style="font-size:13px;color:#0f172a;line-height:1.6">{inc.get('resolution','Generating…')}</div>
-                    </div>
-                  </div>
-                </div>
+              <div>
+                <div style="font-size:9px;font-weight:700;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.8px;font-family:JetBrains Mono,monospace;margin-bottom:5px">Business Impact</div>
+                <div style="font-size:13px;color:var(--text-primary);line-height:1.6">{inc.get('business_impact','Calculating…')}</div>
+                <div style="margin-top:5px;font-size:13px;font-weight:700;color:var(--accent-red)">{inc.get('affected_users',0)} users impacted</div>
               </div>
-            </div>""", unsafe_allow_html=True)
+              <div>
+                <div style="font-size:9px;font-weight:700;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.8px;font-family:JetBrains Mono,monospace;margin-bottom:5px">Remediation</div>
+                <div style="font-size:13px;color:var(--text-primary);line-height:1.6">{inc.get('resolution','Generating…')}</div>
+              </div>
+            </div>
+          </div>
+        </div>""", unsafe_allow_html=True)
 
-            ic1, ic2, ic3, ic4 = st.columns(4)
-            with ic1:
-                if st.button(f"🧠 Deep AI RCA", key=f"inc_rca_{inc['id']}", use_container_width=True, type="primary"):
-                    ctx = f"INCIDENT: {inc['title']}\nDevices: {inc['devices']}\nProtocols: {inc['protocols']}\nBusiness Impact: {inc['business_impact']}\nAffected Users: {inc['affected_users']}"
-                    go_chat(f"Perform deep root cause analysis for incident: {inc['title']}. Devices: {inc.get('devices','')}. Protocols: {inc.get('protocols','')}. Give comprehensive RCA with evidence, blast radius, affected services, remediation steps, and rollback plan.", "incident", ctx)
-            with ic2:
-                if st.button("📊 Blast Radius", key=f"inc_blast_{inc['id']}", use_container_width=True):
-                    go_chat(f"Analyze complete blast radius for: {inc['title']}. What devices, services, users, applications, and business processes are impacted? Show dependency chain.", "incident")
-            with ic3:
-                if st.button("🔧 Auto-Remediate", key=f"inc_rem_{inc['id']}", use_container_width=True):
-                    go_chat(f"Generate autonomous remediation plan for: {inc['title']}. Include exact CLI commands, execution order, validation steps, and rollback procedure. Assess risk.", "incident")
-            with ic4:
-                if st.button("✅ Resolve", key=f"inc_resolve_{inc['id']}", use_container_width=True):
-                    con=db(); con.execute(f"UPDATE incidents SET status='resolved', resolved_at=datetime('now') WHERE id={inc['id']}"); con.commit(); con.close(); st.rerun()
-            st.markdown("---")
+        ic1, ic2, ic3, ic4 = st.columns(4)
+        with ic1:
+            if st.button("🧠 Deep AI RCA", key=f"rca_{inc['id']}", use_container_width=True, type="primary"):
+                result = analyze_incident(
+                    inc["title"], inc["description"],
+                    inc.get("protocols",""), inc.get("protocols",""),
+                    st.session_state.persona,
+                )
+                st.session_state.chat_msgs.append({"role":"assistant","content":result["response"],"meta":None})
+                st.markdown(result["response"])
+        with ic2:
+            if st.button("📊 Blast Radius", key=f"blast_{inc['id']}", use_container_width=True):
+                go(f"Analyze blast radius for: {inc['title']}. What devices, services, users, applications are impacted? Show full dependency chain.", "incident")
+        with ic3:
+            if st.button("🔧 Auto-Remediate", key=f"rem_{inc['id']}", use_container_width=True):
+                go(f"Generate autonomous remediation plan for: {inc['title']}. Include CLI commands, execution order, validation, rollback procedure.", "incident")
+        with ic4:
+            if has_permission("resolve_incidents"):
+                if st.button("✅ Resolve", key=f"res_{inc['id']}", use_container_width=True):
+                    update_record(Incident, inc["id"], status="resolved")
+                    write_audit(st.session_state.user_name, "resolve_incident", f"incident:{inc['id']}", inc["title"])
+                    st.rerun()
+        st.markdown("---")
 
-    # Recent resolved
     if resolved:
-        with st.expander(f"📋 Resolved Incidents ({len(resolved)}) — Operational Memory"):
+        with st.expander(f"📋 Resolved ({len(resolved)}) — Operational Memory"):
             for r in resolved[:5]:
-                st.markdown(f"""<div class="timeline-item">
-                  <div class="tl-dot ok">✅</div>
-                  <div class="tl-body">
-                    <div class="tl-title">{r['title']}</div>
-                    <div class="tl-meta">RCA: {r.get('root_cause','')} · Fix: {r.get('resolution','')[:80]}</div>
+                st.markdown(f"""<div class="nb-timeline-item">
+                  <div class="nb-tl-dot tl-ok">✅</div>
+                  <div class="nb-tl-body">
+                    <div class="nb-tl-title">{r['title']}</div>
+                    <div class="nb-tl-meta">RCA: {r.get('root_cause','')} · Fix: {r.get('resolution','')[:80]}</div>
                   </div>
                 </div>""", unsafe_allow_html=True)
 
-    # Add incident
     with st.expander("➕ Log New Incident"):
         f1, f2 = st.columns(2)
         with f1:
-            new_title = st.text_input("Incident title")
-            new_devices = st.text_input("Affected devices (comma-separated)")
-            new_sev = st.selectbox("Severity", ["critical","major","minor"])
+            nt = st.text_input("Title", key="ni_title")
+            nd = st.text_input("Devices", placeholder="PE-MUM-01, CORE-RTR-01", key="ni_devs")
+            ns = st.selectbox("Severity", ["critical","major","minor"], key="ni_sev")
         with f2:
-            new_desc = st.text_area("Description", height=80)
-            new_impact = st.text_input("Business impact (users/apps affected)")
-        if st.button("🚨 Log Incident + AI RCA", type="primary"):
-            if new_title:
-                add_incident(new_title, new_desc, new_sev, new_devices, "", new_impact, 0, 0)
-                go_chat(f"New incident logged: {new_title}. Devices: {new_devices}. Description: {new_desc}. Perform immediate RCA and provide remediation steps.", "incident")
+            ndesc = st.text_area("Description", height=80, key="ni_desc")
+            nimpact = st.text_input("Business impact", key="ni_impact")
+        if st.button("🚨 Log + AI RCA", type="primary", key="ni_submit"):
+            if nt:
+                add_incident(nt, ndesc, ns, nd, nimpact, 0, 0)
+                go(f"New incident: {nt}. Devices: {nd}. {ndesc}. Perform immediate RCA.", "incident")
 
-# ─────────────────────── TOPOLOGY WORKSPACE ─────────────────
+
+# ══════════════════════════════════════════════════════════
+# WORKSPACE: TOPOLOGY
+# ══════════════════════════════════════════════════════════
 elif ws == "topology":
-    sec_header("🗺 Network Knowledge Graph", "Everything connected · Click any object for AI analysis · Relationship-driven intelligence")
+    section_header("🗺 Network Knowledge Graph", "Everything connected · Click for AI analysis · Relationship-driven intelligence")
 
-    ai_insight("Topology Intelligence",
-        "<strong>Dependency analysis:</strong> PE-MUM-01 is on the critical path for <strong>Mumbai branch SaaS access</strong> (340 users). "
-        "SW-ACC-14 failure isolates <strong>Floor 2 users</strong> from DIST-SW-C. "
-        "<strong>SPOF detected:</strong> FW-EDGE-01 has no redundant path — single point of failure for internet egress.",
-        confidence=91, sources=["Topology","BGP","OSPF"])
+    ai_insight_card(
+        "Topology Intelligence",
+        "<strong>Dependency analysis:</strong> PE-MUM-01 is on the critical path for Mumbai SaaS access (340 users). "
+        "SW-ACC-14 failure isolates Floor 2 from DIST-SW-C. "
+        "<strong>SPOF detected:</strong> FW-EDGE-01 has no redundant path — single point of failure for all internet egress.",
+        confidence=91, sources=["Topology","BGP","OSPF"],
+    )
 
-    # Topology SVG
-    st.markdown("""<div class="topo-wrap">
-    <div class="topo-controls">
-      <button class="topo-layer-btn active">🌐 All</button>
-      <button class="topo-layer-btn">🔄 L3 Routing</button>
-      <button class="topo-layer-btn">🔀 L2 Switching</button>
-      <button class="topo-layer-btn">🔒 Security</button>
-      <button class="topo-layer-btn">☁ Cloud</button>
-      <button class="topo-layer-btn">📡 SD-WAN</button>
-      <span style="margin-left:auto;font-size:11px;color:#94a3b8;font-family:DM Mono,monospace">Click devices for AI analysis →</span>
-    </div>
-    <div style="padding:16px;background:#f8fafc;min-height:460px">
-    <svg viewBox="0 0 760 440" width="100%" xmlns="http://www.w3.org/2000/svg">
-      <defs>
-        <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
-          <path d="M2 2L8 5L2 8" fill="none" stroke="#94a3b8" stroke-width="1.5" stroke-linecap="round"/>
-        </marker>
-        <filter id="glow"><feGaussianBlur stdDeviation="2" result="coloredBlur"/><feMerge><feMergeNode in="coloredBlur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
-      </defs>
+    st.markdown("""<div class="nb-topo-wrap">
+      <div class="nb-topo-bar">
+        <button class="nb-layer-btn active">🌐 All</button>
+        <button class="nb-layer-btn">🔄 L3 Routing</button>
+        <button class="nb-layer-btn">🔀 L2 Switching</button>
+        <button class="nb-layer-btn">🔒 Security</button>
+        <button class="nb-layer-btn">☁ Cloud</button>
+        <button class="nb-layer-btn">📡 SD-WAN</button>
+        <span style="margin-left:auto;font-size:10px;color:var(--text-tertiary);font-family:JetBrains Mono,monospace">← Click nodes → select for AI analysis</span>
+      </div>
+      <div style="padding:16px;background:var(--bg-elevated);min-height:460px">
+      <svg viewBox="0 0 760 440" width="100%" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <filter id="glow-b"><feGaussianBlur stdDeviation="3" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+          <filter id="glow-r"><feGaussianBlur stdDeviation="2" result="blur"/><feColorMatrix in="blur" type="matrix" values="1 0 0 0 0.97 0 0 0 0 0.32 0 0 0 0 0.29 0 0 0 0.8 0"/><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+        </defs>
+        <!-- ISP Cloud -->
+        <ellipse cx="380" cy="30" rx="80" ry="22" fill="rgba(188,140,255,.06)" stroke="rgba(188,140,255,.4)" stroke-width="1.5" stroke-dasharray="6 3"/>
+        <text x="380" y="34" text-anchor="middle" fill="#bc8cff" font-size="11" font-family="JetBrains Mono">INTERNET / ISP</text>
+        <!-- FW - SPOF warning -->
+        <line x1="380" y1="52" x2="380" y2="88" stroke="rgba(188,140,255,.4)" stroke-width="1.5"/>
+        <rect x="338" y="88" width="84" height="30" rx="7" fill="rgba(31,27,34,.9)" stroke="rgba(210,153,34,.6)" stroke-width="1.5"/>
+        <text x="380" y="104" text-anchor="middle" fill="#d29922" font-size="10" font-family="JetBrains Mono" font-weight="600">FW-EDGE-01</text>
+        <circle cx="416" cy="93" r="5" fill="#d29922" opacity=".9"/>
+        <text x="424" y="97" fill="#d29922" font-size="8" font-family="JetBrains Mono">⚠ SPOF</text>
+        <!-- Core router links -->
+        <line x1="380" y1="118" x2="180" y2="172" stroke="rgba(48,54,61,.8)" stroke-width="2"/>
+        <line x1="380" y1="118" x2="380" y2="172" stroke="rgba(48,54,61,.8)" stroke-width="2.5"/>
+        <line x1="380" y1="118" x2="580" y2="172" stroke="rgba(48,54,61,.8)" stroke-width="2"/>
+        <!-- CORE-RTR-01 — WARNING -->
+        <circle cx="180" cy="192" r="28" fill="rgba(210,153,34,.1)" stroke="rgba(210,153,34,.7)" stroke-width="2.5"/>
+        <text x="180" y="188" text-anchor="middle" fill="#d29922" font-size="10" font-family="JetBrains Mono" font-weight="600">CORE-RTR</text>
+        <text x="180" y="200" text-anchor="middle" fill="#d29922" font-size="8" font-family="JetBrains Mono">01</text>
+        <text x="180" y="212" text-anchor="middle" fill="#d29922" font-size="8" font-family="JetBrains Mono">CPU 88% ⚠</text>
+        <!-- PE-MUM-01 — CRITICAL -->
+        <circle cx="380" cy="192" r="30" fill="rgba(248,81,73,.1)" stroke="rgba(248,81,73,.8)" stroke-width="2.5" filter="url(#glow-r)"/>
+        <text x="380" y="186" text-anchor="middle" fill="#f85149" font-size="10" font-family="JetBrains Mono" font-weight="600">PE-MUM-01</text>
+        <text x="380" y="198" text-anchor="middle" fill="#f85149" font-size="8" font-family="JetBrains Mono">BGP FLAP 🔴</text>
+        <text x="380" y="210" text-anchor="middle" fill="#f85149" font-size="8" font-family="JetBrains Mono">10.0.1.1</text>
+        <!-- PE-DEL-01 — OK -->
+        <circle cx="580" cy="192" r="26" fill="rgba(47,129,247,.08)" stroke="rgba(47,129,247,.5)" stroke-width="1.5"/>
+        <text x="580" y="188" text-anchor="middle" fill="#2f81f7" font-size="10" font-family="JetBrains Mono" font-weight="600">PE-DEL-01</text>
+        <text x="580" y="200" text-anchor="middle" fill="#2f81f7" font-size="8" font-family="JetBrains Mono">✓ stable</text>
+        <!-- Distribution links -->
+        <line x1="180" y1="220" x2="120" y2="270" stroke="rgba(48,54,61,.7)" stroke-width="1.5"/>
+        <line x1="180" y1="220" x2="240" y2="270" stroke="rgba(48,54,61,.7)" stroke-width="1.5"/>
+        <line x1="380" y1="222" x2="380" y2="270" stroke="rgba(210,153,34,.5)" stroke-width="2" stroke-dasharray="5 4"/>
+        <line x1="580" y1="218" x2="500" y2="270" stroke="rgba(48,54,61,.7)" stroke-width="1.5"/>
+        <line x1="580" y1="218" x2="660" y2="270" stroke="rgba(48,54,61,.7)" stroke-width="1.5"/>
+        <!-- Dist switches -->
+        <rect x="88"  y="270" width="64" height="24" rx="6" fill="rgba(31,111,235,.08)" stroke="rgba(47,129,247,.4)" stroke-width="1.5"/>
+        <text x="120" y="285" text-anchor="middle" fill="#2f81f7" font-size="9" font-family="JetBrains Mono" font-weight="600">DIST-SW-W</text>
+        <rect x="208" y="270" width="64" height="24" rx="6" fill="rgba(31,111,235,.08)" stroke="rgba(47,129,247,.4)" stroke-width="1.5"/>
+        <text x="240" y="285" text-anchor="middle" fill="#2f81f7" font-size="9" font-family="JetBrains Mono" font-weight="600">DIST-SW-E</text>
+        <rect x="348" y="270" width="64" height="24" rx="6" fill="rgba(210,153,34,.08)" stroke="rgba(210,153,34,.5)" stroke-width="1.5"/>
+        <text x="380" y="279" text-anchor="middle" fill="#d29922" font-size="9" font-family="JetBrains Mono" font-weight="600">DIST-SW-C</text>
+        <text x="380" y="290" text-anchor="middle" fill="#d29922" font-size="8" font-family="JetBrains Mono">⚠ warn</text>
+        <rect x="468" y="270" width="64" height="24" rx="6" fill="rgba(31,111,235,.08)" stroke="rgba(47,129,247,.4)" stroke-width="1.5"/>
+        <text x="500" y="285" text-anchor="middle" fill="#2f81f7" font-size="9" font-family="JetBrains Mono" font-weight="600">DIST-SW-N</text>
+        <rect x="628" y="270" width="64" height="24" rx="6" fill="rgba(31,111,235,.08)" stroke="rgba(47,129,247,.4)" stroke-width="1.5"/>
+        <text x="660" y="285" text-anchor="middle" fill="#2f81f7" font-size="9" font-family="JetBrains Mono" font-weight="600">DIST-SW-S</text>
+        <!-- Access layer links -->
+        <line x1="120" y1="294" x2="80"  y2="348" stroke="rgba(33,38,45,.9)" stroke-width="1"/>
+        <line x1="120" y1="294" x2="160" y2="348" stroke="rgba(33,38,45,.9)" stroke-width="1"/>
+        <line x1="240" y1="294" x2="200" y2="348" stroke="rgba(33,38,45,.9)" stroke-width="1"/>
+        <line x1="240" y1="294" x2="280" y2="348" stroke="rgba(33,38,45,.9)" stroke-width="1"/>
+        <line x1="380" y1="294" x2="380" y2="348" stroke="rgba(248,81,73,.4)" stroke-width="1.5" stroke-dasharray="4 3"/>
+        <line x1="500" y1="294" x2="480" y2="348" stroke="rgba(33,38,45,.9)" stroke-width="1"/>
+        <line x1="660" y1="294" x2="640" y2="348" stroke="rgba(33,38,45,.9)" stroke-width="1"/>
+        <line x1="660" y1="294" x2="700" y2="348" stroke="rgba(33,38,45,.9)" stroke-width="1"/>
+        <!-- Access switches -->
+        <rect x="60"  y="348" width="40" height="17" rx="4" fill="rgba(63,185,80,.08)"  stroke="rgba(63,185,80,.4)"  stroke-width="1"/>
+        <text x="80"  y="360" text-anchor="middle" fill="#3fb950" font-size="8" font-family="JetBrains Mono">ACC-1</text>
+        <rect x="140" y="348" width="40" height="17" rx="4" fill="rgba(63,185,80,.08)"  stroke="rgba(63,185,80,.4)"  stroke-width="1"/>
+        <text x="160" y="360" text-anchor="middle" fill="#3fb950" font-size="8" font-family="JetBrains Mono">ACC-2</text>
+        <rect x="180" y="348" width="40" height="17" rx="4" fill="rgba(248,81,73,.12)" stroke="rgba(248,81,73,.6)"  stroke-width="1.5"/>
+        <text x="200" y="357" text-anchor="middle" fill="#f85149" font-size="8" font-family="JetBrains Mono">ACC-14</text>
+        <text x="200" y="367" text-anchor="middle" fill="#f85149" font-size="7" font-family="JetBrains Mono">↓DOWN</text>
+        <rect x="260" y="348" width="40" height="17" rx="4" fill="rgba(63,185,80,.08)"  stroke="rgba(63,185,80,.4)"  stroke-width="1"/>
+        <text x="280" y="360" text-anchor="middle" fill="#3fb950" font-size="8" font-family="JetBrains Mono">ACC-3</text>
+        <rect x="460" y="348" width="40" height="17" rx="4" fill="rgba(63,185,80,.08)"  stroke="rgba(63,185,80,.4)"  stroke-width="1"/>
+        <text x="480" y="360" text-anchor="middle" fill="#3fb950" font-size="8" font-family="JetBrains Mono">ACC-5</text>
+        <rect x="620" y="348" width="40" height="17" rx="4" fill="rgba(63,185,80,.08)"  stroke="rgba(63,185,80,.4)"  stroke-width="1"/>
+        <text x="640" y="360" text-anchor="middle" fill="#3fb950" font-size="8" font-family="JetBrains Mono">ACC-6</text>
+        <rect x="680" y="348" width="40" height="17" rx="4" fill="rgba(63,185,80,.08)"  stroke="rgba(63,185,80,.4)"  stroke-width="1"/>
+        <text x="700" y="360" text-anchor="middle" fill="#3fb950" font-size="8" font-family="JetBrains Mono">ACC-7</text>
+        <!-- Legend -->
+        <rect x="12" y="8" width="140" height="75" rx="6" fill="rgba(22,27,34,.95)" stroke="rgba(48,54,61,.8)" stroke-width="1"/>
+        <circle cx="24" cy="22" r="5" fill="rgba(248,81,73,.2)" stroke="#f85149" stroke-width="1.5"/>
+        <text x="34" y="26" fill="#8b949e" font-size="9" font-family="JetBrains Mono">Critical/Down</text>
+        <circle cx="24" cy="38" r="5" fill="rgba(210,153,34,.2)" stroke="#d29922" stroke-width="1.5"/>
+        <text x="34" y="42" fill="#8b949e" font-size="9" font-family="JetBrains Mono">Warning</text>
+        <circle cx="24" cy="54" r="5" fill="rgba(47,129,247,.2)" stroke="#2f81f7" stroke-width="1.5"/>
+        <text x="34" y="58" fill="#8b949e" font-size="9" font-family="JetBrains Mono">Healthy</text>
+        <circle cx="24" cy="70" r="5" fill="rgba(210,153,34,.5)" stroke="#d29922" stroke-width="1"/>
+        <text x="34" y="74" fill="#8b949e" font-size="9" font-family="JetBrains Mono">SPOF detected</text>
+      </svg>
+      </div>
+    </div>""", unsafe_allow_html=True)
 
-      <!-- Internet -->
-      <ellipse cx="380" cy="32" rx="80" ry="22" fill="#f5f3ff" stroke="#8b5cf6" stroke-width="1.5" stroke-dasharray="5 3"/>
-      <text x="380" y="36" text-anchor="middle" fill="#5b21b6" font-size="11" font-family="DM Mono">INTERNET / ISP</text>
+    tq = st.text_input("Ask about topology", placeholder="'Which devices are single points of failure?' · 'Path from Mumbai branch to Azure' · 'OSPF area 0 devices'", key="topo_q")
+    if st.button("🧠 Analyze", type="primary", key="topo_ask") and tq:
+        go(tq, "topology", "Topology workspace — user analyzing network graph")
 
-      <!-- FW -->
-      <line x1="380" y1="54" x2="380" y2="92" stroke="#8b5cf6" stroke-width="1.5"/>
-      <rect x="338" y="92" width="84" height="30" rx="8" fill="#f5f3ff" stroke="#8b5cf6" stroke-width="1.5"/>
-      <text x="380" y="108" text-anchor="middle" fill="#4c1d95" font-size="10" font-family="DM Mono" font-weight="600">FW-EDGE-01</text>
-      <circle cx="414" cy="98" r="5" fill="#fbbf24"/><text x="424" y="102" fill="#92400e" font-size="8" font-family="DM Mono">SPOF</text>
 
-      <!-- Core routers -->
-      <line x1="380" y1="122" x2="180" y2="178" stroke="#e2e8f0" stroke-width="2"/>
-      <line x1="380" y1="122" x2="380" y2="178" stroke="#e2e8f0" stroke-width="2.5"/>
-      <line x1="380" y1="122" x2="580" y2="178" stroke="#e2e8f0" stroke-width="2"/>
-
-      <!-- CORE-RTR-01 - WARNING -->
-      <circle cx="180" cy="200" r="30" fill="#fef3c7" stroke="#f59e0b" stroke-width="2.5"/>
-      <text x="180" y="196" text-anchor="middle" fill="#78350f" font-size="10" font-family="DM Mono" font-weight="600">CORE</text>
-      <text x="180" y="208" text-anchor="middle" fill="#92400e" font-size="8" font-family="DM Mono">RTR-01</text>
-      <text x="180" y="220" text-anchor="middle" fill="#d97706" font-size="8" font-family="DM Mono">CPU 88% ⚠</text>
-
-      <!-- PE-MUM-01 - CRITICAL -->
-      <circle cx="380" cy="200" r="30" fill="#fee2e2" stroke="#ef4444" stroke-width="2.5" filter="url(#glow)"/>
-      <text x="380" y="194" text-anchor="middle" fill="#7f1d1d" font-size="10" font-family="DM Mono" font-weight="600">PE-MUM</text>
-      <text x="380" y="205" text-anchor="middle" fill="#991b1b" font-size="8" font-family="DM Mono">01</text>
-      <text x="380" y="218" text-anchor="middle" fill="#dc2626" font-size="8" font-family="DM Mono">BGP FLAP 🔴</text>
-
-      <!-- PE-DEL-01 - UP -->
-      <circle cx="580" cy="200" r="28" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
-      <text x="580" y="196" text-anchor="middle" fill="#1e3a8a" font-size="10" font-family="DM Mono" font-weight="600">PE-DEL</text>
-      <text x="580" y="208" text-anchor="middle" fill="#1e40af" font-size="8" font-family="DM Mono">01 ✓</text>
-
-      <!-- Distribution layer -->
-      <line x1="180" y1="230" x2="120" y2="290" stroke="#e2e8f0" stroke-width="1.5"/>
-      <line x1="180" y1="230" x2="280" y2="290" stroke="#e2e8f0" stroke-width="1.5"/>
-      <line x1="380" y1="230" x2="380" y2="290" stroke="#f59e0b" stroke-width="2" stroke-dasharray="5 4"/>
-      <line x1="580" y1="228" x2="500" y2="290" stroke="#e2e8f0" stroke-width="1.5"/>
-      <line x1="580" y1="228" x2="660" y2="290" stroke="#e2e8f0" stroke-width="1.5"/>
-
-      <rect x="88"  y="290" width="64" height="26" rx="6" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
-      <text x="120" y="306" text-anchor="middle" fill="#1e40af" font-size="9" font-family="DM Mono" font-weight="600">DIST-SW-W</text>
-      <rect x="248" y="290" width="64" height="26" rx="6" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
-      <text x="280" y="306" text-anchor="middle" fill="#1e40af" font-size="9" font-family="DM Mono" font-weight="600">DIST-SW-E</text>
-      <rect x="348" y="290" width="64" height="26" rx="6" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5"/>
-      <text x="380" y="300" text-anchor="middle" fill="#78350f" font-size="9" font-family="DM Mono" font-weight="600">DIST-SW-C</text>
-      <text x="380" y="311" text-anchor="middle" fill="#d97706" font-size="8" font-family="DM Mono">⚠ warn</text>
-      <rect x="468" y="290" width="64" height="26" rx="6" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
-      <text x="500" y="306" text-anchor="middle" fill="#1e40af" font-size="9" font-family="DM Mono" font-weight="600">DIST-SW-N</text>
-      <rect x="628" y="290" width="64" height="26" rx="6" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
-      <text x="660" y="306" text-anchor="middle" fill="#1e40af" font-size="9" font-family="DM Mono" font-weight="600">DIST-SW-S</text>
-
-      <!-- Access layer -->
-      <line x1="120" y1="316" x2="80"  y2="375" stroke="#f1f5f9" stroke-width="1"/>
-      <line x1="120" y1="316" x2="160" y2="375" stroke="#f1f5f9" stroke-width="1"/>
-      <line x1="280" y1="316" x2="240" y2="375" stroke="#f1f5f9" stroke-width="1"/>
-      <line x1="280" y1="316" x2="320" y2="375" stroke="#f1f5f9" stroke-width="1"/>
-      <line x1="380" y1="316" x2="380" y2="375" stroke="#f87171" stroke-width="1.5" stroke-dasharray="4 3"/>
-      <line x1="500" y1="316" x2="480" y2="375" stroke="#f1f5f9" stroke-width="1"/>
-      <line x1="660" y1="316" x2="640" y2="375" stroke="#f1f5f9" stroke-width="1"/>
-      <line x1="660" y1="316" x2="700" y2="375" stroke="#f1f5f9" stroke-width="1"/>
-
-      <rect x="60"  y="375" width="40" height="18" rx="4" fill="#f0fdf4" stroke="#22c55e" stroke-width="1"/>
-      <text x="80"  y="387" text-anchor="middle" fill="#15803d" font-size="8" font-family="DM Mono">ACC-1</text>
-      <rect x="140" y="375" width="40" height="18" rx="4" fill="#f0fdf4" stroke="#22c55e" stroke-width="1"/>
-      <text x="160" y="387" text-anchor="middle" fill="#15803d" font-size="8" font-family="DM Mono">ACC-2</text>
-      <rect x="220" y="375" width="40" height="18" rx="4" fill="#f0fdf4" stroke="#22c55e" stroke-width="1"/>
-      <text x="240" y="387" text-anchor="middle" fill="#15803d" font-size="8" font-family="DM Mono">ACC-3</text>
-      <rect x="300" y="375" width="40" height="18" rx="4" fill="#f0fdf4" stroke="#22c55e" stroke-width="1"/>
-      <text x="320" y="387" text-anchor="middle" fill="#15803d" font-size="8" font-family="DM Mono">ACC-4</text>
-      <!-- ACC-14 DOWN -->
-      <rect x="360" y="375" width="40" height="18" rx="4" fill="#fef2f2" stroke="#ef4444" stroke-width="1.5"/>
-      <text x="380" y="384" text-anchor="middle" fill="#b91c1c" font-size="8" font-family="DM Mono">ACC-14</text>
-      <text x="380" y="394" text-anchor="middle" fill="#dc2626" font-size="7" font-family="DM Mono">↓DOWN</text>
-      <rect x="460" y="375" width="40" height="18" rx="4" fill="#f0fdf4" stroke="#22c55e" stroke-width="1"/>
-      <text x="480" y="387" text-anchor="middle" fill="#15803d" font-size="8" font-family="DM Mono">ACC-5</text>
-      <rect x="620" y="375" width="40" height="18" rx="4" fill="#f0fdf4" stroke="#22c55e" stroke-width="1"/>
-      <text x="640" y="387" text-anchor="middle" fill="#15803d" font-size="8" font-family="DM Mono">ACC-6</text>
-      <rect x="680" y="375" width="40" height="18" rx="4" fill="#f0fdf4" stroke="#22c55e" stroke-width="1"/>
-      <text x="700" y="387" text-anchor="middle" fill="#15803d" font-size="8" font-family="DM Mono">ACC-7</text>
-
-      <!-- Legend -->
-      <rect x="10" y="8" width="130" height="68" rx="6" fill="white" stroke="#e2e8f0" stroke-width="1"/>
-      <circle cx="22" cy="22" r="5" fill="#fee2e2" stroke="#ef4444" stroke-width="1.5"/>
-      <text x="32" y="26" fill="#374151" font-size="9" font-family="DM Mono">Critical/Down</text>
-      <circle cx="22" cy="38" r="5" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5"/>
-      <text x="32" y="42" fill="#374151" font-size="9" font-family="DM Mono">Warning</text>
-      <circle cx="22" cy="54" r="5" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
-      <text x="32" y="58" fill="#374151" font-size="9" font-family="DM Mono">Healthy</text>
-      <circle cx="22" cy="69" r="5" fill="#fbbf24" stroke="#f59e0b" stroke-width="1"/>
-      <text x="32" y="73" fill="#374151" font-size="9" font-family="DM Mono">SPOF detected</text>
-    </svg>
-    </div></div>""", unsafe_allow_html=True)
-
-    # Knowledge Graph — Object relationships
-    st.markdown("---")
-    st.markdown('<div class="sec-hdr"><div class="sec-title">🔗 Knowledge Graph — Select Object for Relationship Analysis</div><div class="sec-line"></div></div>', unsafe_allow_html=True)
-
-    kg_items = [
-        ("PE-MUM-01", "PE Router", "10.0.1.1 · Mumbai · BGP AS65001", "critical"),
-        ("CORE-RTR-01", "Core Router", "10.0.0.1 · HQ · CPU 88%", "warn"),
-        ("FW-EDGE-01", "Firewall", "192.168.1.1 · DMZ · SPOF", "warn"),
-        ("SW-ACC-14", "Access Switch", "10.2.14.1 · HQ F2 · DOWN", "critical"),
-        ("BGP — AS65002", "Protocol", "ISP peer · flapping · 142 routes", "critical"),
-        ("VLAN 120", "Network", "VLAN 120 · HQ-Floor2 · 47 users", "critical"),
-        ("Mumbai Branch", "Site", "340 users · SaaS degraded", "warn"),
-        ("OSPF Area 0", "Protocol", "Backbone · SPF recalculating", "warn"),
-    ]
-
-    kg_cols = st.columns(4)
-    for i, (name, obj_type, meta, status) in enumerate(kg_items):
-        with kg_cols[i % 4]:
-            selected = st.session_state.kg_selected == name
-            border_color = "#3b82f6" if selected else ("#ef4444" if status=="critical" else "#f59e0b" if status=="warn" else "#e2e8f0")
-            st.markdown(f"""<div class="kg-node {'selected' if selected else ''}" style="border-color:{border_color}">
-              <div class="kg-type">{obj_type}</div>
-              <div class="kg-name">{name}</div>
-              <div class="kg-meta">{meta}</div>
-            </div>""", unsafe_allow_html=True)
-            if st.button(f"Analyze {name[:15]}", key=f"kg_{name}", use_container_width=True):
-                st.session_state.kg_selected = name
-                go_chat(f"Knowledge graph analysis for {name} ({obj_type}): Show all dependencies, affected services, related incidents, risks, operational history, and AI recommendations. Make it comprehensive.", "topology", f"Selected object: {name} | Type: {obj_type} | Status: {status}")
-
-    if st.session_state.kg_selected:
-        tq = st.text_input("Ask about topology", placeholder=f"Ask about {st.session_state.kg_selected} relationships…", key="topo_q")
-        if st.button("🧠 Analyze Relationship", type="primary") and tq:
-            go_chat(tq, "topology", f"Focus on: {st.session_state.kg_selected}")
-
-# ─────────────────────── TROUBLESHOOT WORKSPACE ─────────────
+# ══════════════════════════════════════════════════════════
+# WORKSPACE: TROUBLESHOOT
+# ══════════════════════════════════════════════════════════
 elif ws == "troubleshoot":
-    sec_header("🔧 AI Diagnosis Engine", "4-engine pipeline: NLP → RAG → Incident Memory → Claude reasoning")
+    section_header("🔧 AI Diagnosis Engine", "NLP → RAG → Incident Memory → Claude · 4-engine pipeline")
 
-    ai_insight("Diagnosis Pipeline",
-        "<strong>NLP extracts entities</strong> from your description → <strong>RAG retrieves</strong> relevant runbooks → "
-        "<strong>Incident memory</strong> surfaces past RCAs → <strong>Claude reasons</strong> across all context. "
-        "Every answer shows evidence, confidence, and rollback options.",
-        confidence=None)
+    ai_insight_card(
+        "Diagnosis Pipeline — Active",
+        "<strong>NLP</strong> extracts entities → <strong>RAG</strong> retrieves runbooks → "
+        "<strong>Incident Memory</strong> surfaces past RCAs → <strong>Claude</strong> reasons across all context. "
+        "Every response shows evidence, confidence %, and rollback options.",
+    )
 
-    col_form, col_history = st.columns([0.52, 0.48])
-
+    col_form, col_chat = st.columns([0.48, 0.52])
     with col_form:
-        st.markdown("**Describe the problem (plain English):**")
-        problem = st.text_area("", placeholder="'BGP session keeps flapping to ISP since 2 hours ago. CPU on core router spiked to 88%. OSPF also went down briefly on segment 10.10.40.0/24. No config changes were made.'",
-                               height=120, label_visibility="collapsed", key="trouble_desc")
-        t1, t2 = st.columns(2)
-        vendor = t1.selectbox("Vendor", ["Any","Cisco IOS/IOS-XR","Juniper JunOS","Arista EOS","Palo Alto","Fortinet"])
-        sev = t2.selectbox("Severity", ["Unknown","🔴 P1 — Production down","🟡 P2 — Degraded","🟢 P3 — Low impact"])
-        affected = st.text_input("Affected devices (if known)", placeholder="PE-MUM-01, CORE-RTR-01")
-        if st.button("🧠 Run 4-Engine Diagnosis", type="primary", use_container_width=True) and problem:
-            ctx = f"Vendor:{vendor} | Severity:{sev} | Affected:{affected}"
-            go_chat(f"Diagnose this network issue:\n{problem}\n\nVendor:{vendor}, Severity:{sev}, Affected devices:{affected}\n\nProvide: 1)Root cause with evidence 2)AI confidence % 3)Business impact 4)Step-by-step fix commands 5)Rollback plan 6)Prevention", "troubleshoot", ctx)
+        prob = st.text_area("Describe the problem in plain English",
+                            placeholder="'BGP session keeps flapping to ISP since 2 hours ago. CPU spiked to 88%. OSPF also went down briefly. No config changes made.'",
+                            height=110, key="ts_prob")
+        v, sev = st.columns(2)
+        vendor = v.selectbox("Vendor", ["Any","Cisco IOS/IOS-XR","Juniper JunOS","Arista EOS","Palo Alto","Fortinet"], key="ts_vendor")
+        severity = sev.selectbox("Severity", ["Unknown","🔴 P1 — Production","🟡 P2 — Degraded","🟢 P3 — Minor"], key="ts_sev")
+        affected = st.text_input("Affected devices (optional)", placeholder="PE-MUM-01, CORE-RTR-01", key="ts_devs")
+        if st.button("🧠 Run 4-Engine Diagnosis", type="primary", use_container_width=True, key="ts_go") and prob:
+            go(f"Diagnose: {prob}\nVendor:{vendor} | Severity:{severity} | Devices:{affected}\n\nProvide: 1)Root cause+evidence 2)AI confidence% 3)Business impact 4)Step-by-step CLI fix 5)Rollback plan 6)Prevention",
+               "troubleshoot", f"Vendor:{vendor} Severity:{severity}")
 
-        st.markdown("**Common issues — one click diagnosis:**")
+        st.markdown("**One-click common issues:**")
         issues = [
-            ("BGP stuck Active","BGP neighbor stuck in Active state, TCP session not establishing. Cisco IOS-XR."),
-            ("OSPF EXSTART","OSPF adjacency stuck in EXSTART state, MTU mismatch likely. Give diagnosis and fix."),
-            ("VLAN not passing","VLAN traffic not passing on trunk link. Could be STP or allowed VLAN issue."),
-            ("SD-WAN failover broken","SD-WAN not failing over to backup ISP when primary link fails. Viptela."),
-            ("MPLS packet loss","High packet loss on MPLS backbone. Need to isolate with LSP ping/traceroute."),
-            ("IPSec VPN flapping","IPSec VPN tunnel keeps going down and up. DPD timeout issue."),
-            ("STP loop","Spanning tree loop detected causing broadcast storm on Floor 2 VLAN."),
-            ("BGP route missing","BGP route in table but not being advertised to peer. Route-map issue?"),
+            ("BGP stuck Active","BGP neighbor stuck in Active state Cisco IOS-XR — troubleshoot systematically"),
+            ("OSPF EXSTART","OSPF adjacency stuck in EXSTART — MTU mismatch diagnosis and fix"),
+            ("VLAN trunk issue","VLAN traffic not passing on trunk — STP or allowed VLAN diagnosis"),
+            ("SD-WAN failover","SD-WAN not failing over to backup ISP — Cisco Viptela"),
+            ("MPLS packet loss","High packet loss on MPLS backbone — LSP ping trace diagnosis"),
+            ("IPSec flapping","IPSec VPN tunnel flapping DPD timeout — stabilize"),
+            ("STP loop","Spanning tree loop causing broadcast storm — find and stop"),
+            ("BGP route missing","BGP route in table but not advertised to peer — route-map issue"),
         ]
         ic = st.columns(2)
         for i, (lbl, prompt) in enumerate(issues):
             with ic[i % 2]:
                 if st.button(lbl, key=f"issue_{lbl}", use_container_width=True):
-                    go_chat(prompt, "troubleshoot")
+                    go(prompt, "troubleshoot")
 
-    with col_history:
-        st.markdown("**AI Diagnosis History:**")
+    with col_chat:
+        st.markdown("**AI Diagnosis:**")
         if not st.session_state.chat_msgs:
-            st.info("💡 Diagnose an issue to see AI reasoning here. Every response shows evidence, confidence, and rollback options.")
+            st.info("💡 Describe a problem → AI runs NLP + RAG + Incident Memory + Claude reasoning. Every answer shows evidence and confidence.")
         for msg in st.session_state.chat_msgs[-8:]:
-            render_msg(msg["role"], msg["content"], msg.get("meta"))
+            render_chat_message(msg["role"], msg["content"], msg.get("meta"))
         if st.session_state.chat_msgs:
-            follow = st.text_input("Follow-up question", placeholder="'What if that doesn't fix it?' · 'Show me the CLI' · 'What's the rollback?'", key="ts_followup")
-            if st.button("Ask", key="ts_ask") and follow:
-                go_chat(follow, "troubleshoot")
-            if st.button("🗑 Clear", key="ts_clear"):
-                st.session_state.chat_msgs = []; st.session_state.chat_hist = []; st.rerun()
+            fu = st.text_input("Follow-up", placeholder="'What if that doesn't work?' · 'Show me the rollback CLI'", key="ts_fu")
+            c1, c2 = st.columns([0.7, 0.3])
+            with c1:
+                if st.button("Ask follow-up", key="ts_fu_btn") and fu: go(fu, "troubleshoot")
+            with c2:
+                if st.button("🗑 Clear", key="ts_clr"):
+                    st.session_state.chat_msgs = []; st.session_state.chat_hist = []; st.rerun()
 
-# ─────────────────────── CHANGE WORKSPACE ───────────────────
+
+# ══════════════════════════════════════════════════════════
+# WORKSPACE: CHANGE SAFETY
+# ══════════════════════════════════════════════════════════
 elif ws == "change":
-    sec_header("📋 Change Safety Engine", "AI risk scoring · Digital twin pre-validation · Blast radius prediction · Rollback planning")
+    section_header("📋 Change Safety Engine", "AI risk scoring · Digital twin pre-validation · Blast radius · Rollback planning")
 
-    ai_insight("Change Safety Intelligence",
-        "<strong>3 changes in queue.</strong> IOS-XR firmware upgrade on CORE-RTR-01 scored <strong>72/100 risk — HIGH.</strong> "
-        "AI recommends: digital twin test mandatory, maintenance window required, rollback plan pre-staged. "
-        "<strong>BGP timer change scored 15/100 — LOW RISK</strong>. Safe to proceed during business hours.",
-        confidence=88, sources=["Topology","Incident Memory","Firmware DB"])
+    ai_insight_card(
+        "Change Safety Intelligence",
+        "<strong>3 changes in queue.</strong> IOS-XR firmware upgrade on CORE-RTR-01: <strong>score 72/100 — HIGH RISK</strong>. "
+        "Digital twin test mandatory before production. "
+        "<strong>BGP timer change: 15/100 — LOW RISK</strong>. Safe to proceed during business hours with monitoring.",
+        confidence=88,
+    )
 
     changes = get_changes()
     for chg in changes:
-        risk = chg.get("ai_risk_score", 0)
-        risk_cls = "risk-high" if risk >= 60 else "risk-medium" if risk >= 30 else "risk-low"
-        risk_color = "#b91c1c" if risk >= 60 else "#92400e" if risk >= 30 else "#15803d"
-        status_tag = {"approved":"tag-green","pending":"tag-amber","rejected":"tag-red"}.get(chg["status"],"tag-slate")
+        score = chg.get("ai_risk_score", 0)
+        risk_cls = "risk-low" if score < 30 else "risk-med" if score < 65 else "risk-high"
+        sev_ico = "🟢" if score < 30 else "🟡" if score < 65 else "🔴"
+        tag_cls = {"approved":"tag-green","pending":"tag-amber","rejected":"tag-red"}.get(chg["status"],"tag-slate")
 
-        with st.expander(f"{'🔴' if risk>=60 else '🟡' if risk>=30 else '🟢'} {chg['title']} — Risk: {risk}/100"):
+        with st.expander(f"{sev_ico} {chg['title']} — Risk {score}/100", expanded=chg["severity"] if "severity" in chg else score >= 65):
             cc1, cc2 = st.columns([0.65, 0.35])
             with cc1:
-                st.markdown(f"**Device:** `{chg['device']}` | **Type:** {chg['change_type']} | **By:** {chg.get('created_by','')}")
-                st.markdown(f"**Description:** {chg['description']}")
-                st.markdown(f"""<div class="risk-bar {risk_cls}">
-                  <span style="font-size:12px;color:#64748b;font-family:DM Mono,monospace;width:80px">AI Risk Score</span>
-                  <div class="risk-track" style="flex:1"><div class="risk-fill" style="width:{risk}%"></div></div>
-                  <span class="risk-score">{risk}</span>
-                </div>""", unsafe_allow_html=True)
+                st.markdown(f"**Device:** `{chg['device']}` | **Type:** `{chg['change_type']}` | **By:** {chg.get('created_by','')}")
+                st.markdown(chg["description"])
+                risk_bar(score)
                 st.markdown(f"**AI Recommendation:** {chg.get('ai_recommendation','')}")
+                if chg.get("rollback_plan"):
+                    st.markdown(f"**Rollback:** {chg['rollback_plan']}")
             with cc2:
-                st.markdown(f'<span class="tag {status_tag}">{chg["status"].upper()}</span>', unsafe_allow_html=True)
-                if st.button("🧠 Full AI Risk Analysis", key=f"chg_ai_{chg['id']}", use_container_width=True):
-                    go_chat(f"Full AI risk analysis for change: {chg['title']}. Device: {chg['device']}. Description: {chg['description']}. Provide: 1)Risk breakdown 2)Blast radius 3)Dependencies affected 4)Rollback plan 5)Pre-change validation checklist 6)Post-change validation", "change")
+                st.markdown(f'<span class="nb-tag {tag_cls}">{chg["status"].upper()}</span>', unsafe_allow_html=True)
+                if st.button("🧠 AI Risk Analysis", key=f"chg_ai_{chg['id']}", use_container_width=True):
+                    result = score_change_risk(chg["title"], chg["description"], chg["device"], chg["change_type"])
+                    st.markdown(result["response"])
                 if st.button("👾 Digital Twin Test", key=f"chg_twin_{chg['id']}", use_container_width=True):
-                    go_chat(f"Simulate this change in digital twin: {chg['title']} on {chg['device']}. Show: impact on topology, traffic, services, predicted downtime, and rollback trigger conditions.", "change")
-                if chg["status"] == "pending":
-                    ac1, ac2 = st.columns(2)
-                    with ac1:
+                    go(f"Simulate in digital twin: {chg['title']} on {chg['device']}. Show topology impact, traffic impact, predicted downtime, rollback triggers.", "autonomous")
+                if chg["status"] == "pending" and has_permission("approve_changes"):
+                    a1, a2 = st.columns(2)
+                    with a1:
                         if st.button("✅ Approve", key=f"chg_app_{chg['id']}", use_container_width=True):
-                            con=db(); con.execute(f"UPDATE changes SET status='approved' WHERE id={chg['id']}"); con.commit(); con.close(); st.rerun()
-                    with ac2:
+                            update_record(Change, chg["id"], status="approved")
+                            write_audit(st.session_state.user_name, "approve_change", f"change:{chg['id']}", chg["title"])
+                            st.rerun()
+                    with a2:
                         if st.button("❌ Reject", key=f"chg_rej_{chg['id']}", use_container_width=True):
-                            con=db(); con.execute(f"UPDATE changes SET status='rejected' WHERE id={chg['id']}"); con.commit(); con.close(); st.rerun()
+                            update_record(Change, chg["id"], status="rejected")
+                            write_audit(st.session_state.user_name, "reject_change", f"change:{chg['id']}", chg["title"])
+                            st.rerun()
 
-    # New change
-    with st.expander("➕ Submit Change Request"):
-        nc1, nc2 = st.columns(2)
-        with nc1:
-            chg_title = st.text_input("Change title")
-            chg_device = st.text_input("Target device")
-            chg_type = st.selectbox("Change type", ["config","firmware","vlan","routing","security","hardware"])
-        with nc2:
-            chg_desc = st.text_area("Description", height=80)
-            chg_by = st.text_input("Requested by")
-        if st.button("🧠 Submit + AI Risk Score", type="primary"):
-            if chg_title and chg_device:
-                go_chat(f"Assess risk for this change: '{chg_title}' on {chg_device}. Type: {chg_type}. Description: {chg_desc}. Provide: risk score /100, risk breakdown, blast radius, rollback plan, approval recommendation.", "change")
 
-# ─────────────────────── AUTONOMOUS WORKSPACE ───────────────
+# ══════════════════════════════════════════════════════════
+# WORKSPACE: AUTONOMOUS OPERATIONS
+# ══════════════════════════════════════════════════════════
 elif ws == "autonomous":
-    sec_header("🤖 Autonomous Operations Center", "AI actions · Approval workflows · Self-healing · Autonomous remediation")
+    section_header("🤖 Autonomous Operations Center", "AI detection → recommendation → approval → execution → verification → learning")
 
-    # Mode selector
-    st.markdown("**Autonomy Level:**")
     mode_cols = st.columns(3)
-    modes = [("human","👨‍💼 Human Approval","All AI actions require manual approval","mode-human"),
-             ("semi","🤝 Semi-Autonomous","Low-risk actions auto-execute. High-risk need approval.","mode-semi"),
-             ("full","⚡ Fully Autonomous","AI executes all actions. Human notified only.","mode-full")]
-    for col, (mode_id, label, desc, cls) in zip(mode_cols, modes):
+    modes = [
+        ("human","👨‍💼 Human Approval","ALL AI actions require manual approval before execution."),
+        ("semi", "🤝 Semi-Autonomous", "Low-risk (<30 score) auto-execute. High-risk needs approval."),
+        ("full", "⚡ Fully Autonomous","AI executes all validated actions. Human notified only."),
+    ]
+    for col, (m_id, m_lbl, m_desc) in zip(mode_cols, modes):
         with col:
-            selected = st.session_state.auto_mode == mode_id
-            st.markdown(f"""<div class="auto-mode-btn {cls} {'selected' if selected else ''}" onclick="">
-              <div style="font-size:14px;font-weight:700;margin-bottom:3px">{label}</div>
-              <div style="font-size:11px;color:#64748b;line-height:1.4">{desc}</div>
+            selected = st.session_state.auto_mode == m_id
+            sel_cls = f"selected-{m_id}" if selected else ""
+            st.markdown(f"""<div class="nb-mode-btn {sel_cls}">
+              <div class="nb-mode-title">{m_lbl}</div>
+              <div class="nb-mode-desc">{m_desc}</div>
             </div>""", unsafe_allow_html=True)
-            if st.button(f"Set {label.split()[1]}", key=f"mode_{mode_id}", use_container_width=True,
-                        type="primary" if selected else "secondary"):
-                st.session_state.auto_mode = mode_id; st.rerun()
+            if st.button(f"Set {m_lbl.split()[1]}", key=f"mode_{m_id}", use_container_width=True,
+                         type="primary" if selected else "secondary"):
+                st.session_state.auto_mode = m_id
+                st.rerun()
 
     st.markdown("---")
+    ai_insight_card(
+        "Autonomous Intelligence",
+        f"Mode: <strong>{'Human Approval' if st.session_state.auto_mode=='human' else 'Semi-Autonomous' if st.session_state.auto_mode=='semi' else 'Fully Autonomous'}</strong>. "
+        "<strong>3 actions logged</strong> — 2 executed, 1 pending approval. "
+        "Auto-remediation success rate: <strong>94%</strong> this week. Time saved: <strong>4.2 hours</strong>.",
+        confidence=94,
+    )
 
-    ai_insight("Autonomous Intelligence",
-        f"Current mode: <strong>{'Human Approval' if st.session_state.auto_mode=='human' else 'Semi-Autonomous' if st.session_state.auto_mode=='semi' else 'Fully Autonomous'}</strong>. "
-        "<strong>3 AI actions logged</strong> — 2 executed successfully, 1 pending your approval. "
-        "Auto-remediation success rate this week: <strong>94%</strong>. Time saved: <strong>4.2 hours</strong>.",
-        confidence=94)
-
-    # Metrics
-    amc = st.columns(4)
-    with amc[0]: metric_card("Actions This Week","47","94% success rate","green","up","✅")
-    with amc[1]: metric_card("Auto-Healed","12","Issues resolved autonomously","blue",None,"🤖")
-    with amc[2]: metric_card("Pending Approval","1","BGP timer change","amber",None,"⏳")
-    with amc[3]: metric_card("Time Saved","4.2h","This week","green","up","⚡")
-
-    st.markdown('<div class="sec-hdr"><div class="sec-title">🤖 Autonomous Action Log</div><div class="sec-line"></div></div>', unsafe_allow_html=True)
+    metric_grid([
+        {"label":"Actions This Week","value":"47","meta":"94% success","color":"green","icon":"✅"},
+        {"label":"Auto-Healed","value":"12","meta":"Issues resolved","color":"blue","icon":"🤖"},
+        {"label":"Pending Approval","value":"1","meta":"BGP timer change","color":"amber","icon":"⏳"},
+        {"label":"Time Saved","value":"4.2h","meta":"This week","color":"green","icon":"⚡"},
+    ])
 
     auto_actions = get_auto_actions()
     for a in auto_actions:
-        status = a.get("status","")
-        cls = "aa-exec" if status=="executed" else "aa-pend" if "pending" in status else "aa-fail"
-        ico = "✅" if status=="executed" else "⏳" if "pending" in status else "❌"
-        conf = a.get("ai_confidence",0)
-        conf_cls = "conf-high" if conf>=80 else "conf-med" if conf>=60 else "conf-low"
-        st.markdown(f"""<div class="auto-action">
-          <div class="aa-status {cls}">{ico}</div>
-          <div class="aa-body">
-            <div class="aa-title">{a['action']}</div>
-            <div class="aa-meta">Device: {a.get('device','')} · Trigger: {a.get('trigger','')}</div>
-            <div class="aa-ai">{a.get('result','')}</div>
-            <div class="conf-bar {conf_cls}" style="margin-top:5px"><span class="conf-pct">{conf}%</span><div class="conf-track"><div class="conf-fill" style="width:{conf}%"></div></div><span style="font-size:11px;color:#94a3b8">AI Confidence</span></div>
+        status = a.get("status", "")
+        cls = "aa-exec" if status == "executed" else "aa-pend" if "pending" in status else "aa-fail"
+        ico = "✅" if status == "executed" else "⏳" if "pending" in status else "❌"
+        conf = a.get("ai_confidence", 0)
+        conf_cls = "conf-high" if conf >= 80 else "conf-med" if conf >= 60 else "conf-low"
+
+        st.markdown(f"""<div class="nb-auto-action">
+          <div class="nb-aa-ico {cls}">{ico}</div>
+          <div style="flex:1">
+            <div class="nb-aa-title">{a['action']}</div>
+            <div class="nb-aa-meta">Device: {a.get('device','')} · Trigger: {a.get('trigger','')}</div>
+            <div class="nb-aa-ai">{a.get('result','')}</div>
+            <div class="nb-conf {conf_cls}" style="margin-top:5px">
+              <span class="nb-conf-pct">{conf}%</span>
+              <div class="nb-conf-track"><div class="nb-conf-fill" style="width:{conf}%"></div></div>
+              <span style="font-size:10px;color:var(--text-tertiary)">AI Confidence</span>
+            </div>
           </div>
         </div>""", unsafe_allow_html=True)
-        if "pending" in status:
+        if "pending" in status and has_permission("run_automation"):
             pa1, pa2 = st.columns(2)
             with pa1:
-                if st.button("✅ Approve Action", key=f"auto_app_{a['id']}", use_container_width=True, type="primary"):
-                    con=db(); con.execute(f"UPDATE autonomous_actions SET status='executed' WHERE id={a['id']}"); con.commit(); con.close(); st.rerun()
+                if st.button("✅ Approve", key=f"auto_app_{a['id']}", use_container_width=True, type="primary"):
+                    update_record(AutonomousAction, a["id"], status="executed")
+                    write_audit(st.session_state.user_name, "approve_auto_action", f"action:{a['id']}", a["action"])
+                    st.rerun()
             with pa2:
                 if st.button("❌ Reject", key=f"auto_rej_{a['id']}", use_container_width=True):
-                    con=db(); con.execute(f"UPDATE autonomous_actions SET status='rejected' WHERE id={a['id']}"); con.commit(); con.close(); st.rerun()
+                    update_record(AutonomousAction, a["id"], status="rejected")
+                    st.rerun()
 
-    # AI operations chat
     st.markdown("---")
-    st.markdown("**Ask Autonomous AI:**")
-    auto_q = st.text_input("", placeholder="'What autonomous actions have been taken today?' · 'Generate self-healing policy for BGP flaps' · 'Show automation success rate by device'",
-                           label_visibility="collapsed", key="auto_q")
-    if st.button("🤖 Ask Autonomous AI", type="primary") and auto_q:
-        go_chat(auto_q, "autonomous", "Autonomous operations context — AI-driven network management, self-healing, approval workflows")
+    auto_q = st.text_input("Ask Autonomous AI", placeholder="'Generate self-healing policy for BGP flaps' · 'What actions were taken today?' · 'Simulate autonomous remediation for incident #1'", key="auto_q")
+    if st.button("🤖 Ask", type="primary", key="auto_ask") and auto_q:
+        go(auto_q, "autonomous", "Autonomous operations workspace")
 
-# ─────────────────────── DESIGN WORKSPACE ───────────────────
+
+# ══════════════════════════════════════════════════════════
+# WORKSPACE: MULTI-DEVICE QUERY
+# ══════════════════════════════════════════════════════════
+elif ws == "mdq":
+    section_header("⚡ Multi-Device Query Engine", "System B — Parallel SSH · ThreadPoolExecutor · Retry logic · AI synthesis")
+
+    ai_insight_card(
+        "Netmiko SSH Engine — System B",
+        "Type plain English: <strong>'Show OSPF neighbors on all routers'</strong> · <strong>'BGP Active state anywhere?'</strong> — "
+        "I SSH all devices in parallel (up to 20 concurrent) and synthesise one unified answer.",
+    )
+
+    qr = st.columns(6)
+    quick_mdq = [("BGP summary","Show BGP summary all routers"),("OSPF neighbors","Show OSPF neighbor status all devices"),("CPU usage","Show CPU usage all devices"),("Interface status","Show interface status"),("VLAN status","Show VLAN brief all switches"),("Routing table","Show routing table summary all devices")]
+    for col, (lbl, q) in zip(qr, quick_mdq):
+        with col:
+            if st.button(lbl, key=f"mdq_q_{lbl}", use_container_width=True):
+                st.session_state["_mdqf"] = q
+
+    mdq_inp = st.text_input("Natural language query", value=st.session_state.pop("_mdqf",""),
+                             placeholder='"Which routers have BGP in Active state?" · "Show OSPF neighbors across all devices"', key="mdq_inp")
+
+    if st.button("⚡ Query All Devices", type="primary", key="mdq_run") and mdq_inp.strip():
+        devices = get_devices()
+        with st.spinner(f"⚡ Querying {len(devices)} devices in parallel…"):
+            results = mdq_run(mdq_inp.strip(), devices)
+        synth_prompt = build_synthesis_prompt(mdq_inp.strip(), results)
+        synthesis = call_ai([{"role":"user","content":synth_prompt}], st.session_state.persona)
+        st.session_state.mdq_results = {"results": results, "synthesis": synthesis, "query": mdq_inp.strip()}
+
+    if st.session_state.mdq_results:
+        r = st.session_state.mdq_results
+        ok = sum(1 for d in r["results"] if d.status == "ok")
+        st.success(f"✓ {len(r['results'])} devices queried · {ok} successful · Simulated: {len(r['results'])-ok}")
+        dev_cols = st.columns(min(len(r["results"]), 3))
+        for i, d in enumerate(r["results"]):
+            cls = "nb-dev dev-up" if d.status=="ok" else "nb-dev dev-critical"
+            with dev_cols[i % 3]:
+                st.markdown(f"""<div class="{cls}">
+                  <div class="nb-dev-hn">{d.hostname} ({d.ip})</div>
+                  <div class="nb-dev-role">{d.vendor} · {d.role} · {d.site}</div>
+                  <div style="font-size:10px;color:var(--text-tertiary);font-family:JetBrains Mono,monospace">CMD: {d.command}</div>
+                  <div class="nb-terminal">{d.output[:280]}</div>
+                </div>""", unsafe_allow_html=True)
+        st.markdown("---")
+        st.markdown("**🧠 AI Synthesis — All Devices**")
+        st.markdown(r["synthesis"])
+
+
+# ══════════════════════════════════════════════════════════
+# WORKSPACE: NLP ENGINE
+# ══════════════════════════════════════════════════════════
+elif ws == "nlp":
+    section_header("🧬 NLP Entity Extractor", "System C — 14 intent classes · Entity extraction · Urgency detection · Auto persona")
+
+    samples = {"BGP log": "BGP neighbor 10.0.1.1 AS65002 stuck Active on GigabitEthernet0/0/0 at PE-MUM-01 OSPF area 0 VLAN 100",
+               "OSPF": "OSPF adjacency lost CORE-RTR-01 DIST-SW-W 192.168.1.0/30 area 0 Cisco IOS-XR",
+               "Design": "Design VXLAN EVPN leaf-spine Arista EOS BGP EVPN RoCE GPU cluster AI fabric",
+               "Security": "Lateral movement detected 10.2.14.0/24 Zero Trust micro-segmentation Palo Alto"}
+    sc = st.columns(4)
+    for col, (n, t) in zip(sc, samples.items()):
+        with col:
+            if st.button(n, key=f"nlp_s_{n}", use_container_width=True):
+                st.session_state["_nlpf"] = t
+
+    nlp_txt = st.text_area("Paste networking text", value=st.session_state.pop("_nlpf",""),
+                            placeholder="Any networking query, log, config, alert…", height=90, key="nlp_inp")
+    if st.button("🧬 Extract Entities", type="primary", key="nlp_run") and nlp_txt:
+        st.session_state.nlp_results = nlp_extract(nlp_txt)
+
+    if st.session_state.nlp_results:
+        e = st.session_state.nlp_results
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Intent", e.intent.replace("_"," ").title())
+        m2.metric("Urgency", e.urgency.upper())
+        m3.metric("Persona Hint", e.persona_hint or "Auto")
+        st.divider()
+        cats = [("IPs","ipv4"),("Protocols","protocols"),("Interfaces","interfaces"),("VLANs","vlans"),
+                ("ASNs","asns"),("Vendors","vendors"),("Devices","hostnames"),("VRFs","vrfs"),
+                ("Tickets","tickets"),("OSPF Areas","ospf_areas"),("IPv6","ipv6"),("Ports","ports")]
+        cols = st.columns(4)
+        for i, (lbl, key) in enumerate(cats):
+            items = getattr(e, key, [])
+            with cols[i % 4]:
+                st.markdown(f"**{lbl}**")
+                if items:
+                    st.markdown(" ".join(f'<span style="font-size:11px;padding:2px 7px;border-radius:8px;border:1px solid var(--border-default);color:var(--text-secondary);font-family:JetBrains Mono,monospace;display:inline-block;margin:2px">{x}</span>' for x in items[:8]), unsafe_allow_html=True)
+                else:
+                    st.caption("none detected")
+
+
+# ══════════════════════════════════════════════════════════
+# WORKSPACE: RAG KNOWLEDGE
+# ══════════════════════════════════════════════════════════
+elif ws == "rag":
+    r_stat = rag_status()
+    section_header("📚 RAG Knowledge Base", f"System D — {r_stat['backend']} · {r_stat['doc_count']} indexed · Hybrid semantic search")
+
+    tab1, tab2 = st.tabs(["🔍 Search", "➕ Ingest Document"])
+    with tab1:
+        rq = st.text_input("Search knowledge base", placeholder="BGP troubleshooting · OSPF states · SD-WAN design · MPLS L3VPN · Zero Trust…", key="rag_q")
+        if st.button("📚 Search", type="primary", key="rag_srch") and rq:
+            with st.spinner("Searching…"):
+                results = rag_search(rq, 5)
+            st.session_state.rag_results = results
+        if st.session_state.rag_results:
+            st.markdown(f"**{len(st.session_state.rag_results)} relevant chunks:**")
+            for content, meta in st.session_state.rag_results:
+                topic = meta.get("topic", meta.get("title","Doc"))
+                st.markdown(f"""<div style="background:var(--bg-surface);border:1px solid var(--border-default);border-radius:10px;padding:12px;margin-bottom:8px">
+                  <div style="font-size:10px;font-weight:700;color:var(--accent-teal);font-family:JetBrains Mono,monospace;margin-bottom:5px">📚 {topic} · {meta.get('vendor','general')}</div>
+                  <div style="font-size:12px;color:var(--text-secondary);line-height:1.7">{content[:450]}{'…' if len(content)>450 else ''}</div>
+                </div>""", unsafe_allow_html=True)
+        else:
+            st.markdown("**Pre-loaded knowledge topics:**")
+            tc = st.columns(4)
+            for i, t in enumerate(r_stat["topics"]):
+                with tc[i % 4]:
+                    st.markdown(f'<div style="background:var(--bg-surface);border:1px solid var(--border-default);border-radius:8px;padding:10px;font-size:12px;font-weight:600;color:var(--text-primary)">{t}</div>', unsafe_allow_html=True)
+
+    with tab2:
+        it  = st.text_input("Title", placeholder="Juniper BGP Config Guide", key="ing_title")
+        ic1, ic2 = st.columns(2)
+        iv  = ic1.selectbox("Vendor", ["cisco","juniper","arista","paloalto","fortinet","general"], key="ing_vendor")
+        idt = ic2.selectbox("Type",   ["manual","runbook","design","reference","sop","config","incident"], key="ing_type")
+        ico = st.text_area("Content (paste full document)", placeholder="Paste vendor documentation, runbooks, config examples, SOPs…", height=200, key="ing_content")
+        if st.button("➕ Ingest into Knowledge Base", type="primary", key="ing_btn") and ico and it:
+            with st.spinner("Chunking and indexing…"):
+                n = ingest_document(it, ico, iv, idt)
+            st.success(f"✅ Ingested **{n} chunks** from '{it}' into {'ChromaDB' if r_stat['backend']=='ChromaDB' else 'knowledge base'}")
+
+
+# ══════════════════════════════════════════════════════════
+# WORKSPACE: NETWORK DESIGN
+# ══════════════════════════════════════════════════════════
 elif ws == "design":
-    sec_header("🏗 AI Design Studio", "ChatGPT for network architecture · Requirements → Full design → BOM → Roadmap")
+    section_header("🏗 AI Design Studio", "ChatGPT for network architecture · Requirements → Full design → BOM → Roadmap")
 
-    st.markdown("""<div class="design-studio">
-      <div class="studio-title">🎯 AI Network Design Studio</div>
-      <div class="studio-sub">Describe your requirements in plain English. I generate full architecture, topology, vendor comparison, BOM, and implementation roadmap.</div>
+    st.markdown("""<div class="nb-design-studio">
+      <div class="nb-ds-title">🎯 AI Network Design Studio</div>
+      <div class="nb-ds-sub">Describe requirements in plain English. I generate full architecture, vendor selection, hardware sizing, BOM, and implementation roadmap.</div>
     </div>""", unsafe_allow_html=True)
 
-    # Design templates
-    st.markdown("**Design Blueprints — Start from a template:**")
-    tmpl_cols = st.columns(3)
     templates = [
-        ("🏢","Enterprise Campus","3000 users · 3-tier · SD-Access · Wireless · Zero Trust · HA design",
-         "Design enterprise campus network: 3000 users, 3-tier hierarchy (core-distribution-access), Cisco SD-Access, wireless 802.11ax, Zero Trust security, full redundancy HA. Include: topology diagram description, hardware sizing, BOM, vendor comparison, implementation roadmap."),
-        ("🛣️","SD-WAN Deployment","50 branches · Dual ISP · Azure · SASE · App-SLA · Cloud breakout",
-         "Design SD-WAN for 50 branches: 200 users/branch, dual ISP per branch, Azure cloud integration, SASE (Zscaler ZIA/ZPA), application-aware routing, cloud breakout for SaaS. Include architecture, Cisco Viptela vs Versa comparison, BOM, migration strategy."),
-        ("🏭","AI Datacenter","GPU clusters · VXLAN EVPN · RoCE · Leaf-Spine · 400G · InfiniBand",
-         "Design AI datacenter fabric: 500 GPU servers, leaf-spine topology, VXLAN EVPN, RoCE for GPU all-reduce, 400G links, Arista EOS, lossless networking (PFC+ECN+DCQCN). Include fabric design, BOM, cabling, performance calculations."),
-        ("☁️","Hybrid Cloud","On-prem + AWS + Azure · Direct Connect · ExpressRoute · Multi-cloud HA",
-         "Design hybrid cloud network: 2 on-prem datacenters connecting to AWS and Azure, Direct Connect + ExpressRoute, BGP routing, SD-WAN integration, HA across clouds. Include connectivity options comparison, routing design, security architecture, cost analysis."),
-        ("🔐","Zero Trust","ZTNA · Micro-segmentation · Identity · Palo Alto · Zscaler · SASE",
-         "Design Zero Trust network architecture: ZTNA replacing VPN, micro-segmentation east-west, Palo Alto Prisma + Zscaler ZPA, identity-based access, MFA, continuous verification. Include maturity model, phased implementation, BOM, policy framework."),
-        ("📡","5G / SP Transport","SR-MPLS · SRv6 · Slicing · Mobile backhaul · Metro-E · Nokia/Cisco",
-         "Design 5G transport network: 500 cell sites, SR-MPLS underlay, SRv6 services, network slicing (eMBB/URLLC/mMTC), mobile backhaul and fronthaul, Nokia SR-OS or Cisco IOS-XR. Include transport architecture, timing sync, BOM, migration from LTE."),
+        ("🏢","Enterprise Campus","3000 users · 3-tier · SD-Access · Wireless · Zero Trust · HA",
+         "Design enterprise campus network: 3000 users, 3-tier hierarchy, Cisco SD-Access, 802.11ax wireless, Zero Trust security, full HA redundancy. Include topology, hardware sizing, BOM top 15 items, 90-day roadmap."),
+        ("🛣️","SD-WAN Deployment","50 branches · Dual ISP · Azure · SASE · App-SLA",
+         "Design SD-WAN: 50 branches, 200 users each, dual ISP, Azure integration, Zscaler SASE, app-aware routing. Compare Cisco Viptela vs Versa. Full BOM and migration strategy."),
+        ("🏭","AI Datacenter Fabric","GPU clusters · VXLAN EVPN · RoCE · Leaf-Spine · 400G",
+         "Design AI datacenter: 500 GPU servers, leaf-spine VXLAN EVPN, RoCE lossless networking, 400G uplinks, Arista EOS. Include fabric design, BOM, performance calculations."),
+        ("☁️","Hybrid Cloud","On-prem + AWS + Azure · Direct Connect · ExpressRoute · HA",
+         "Design hybrid cloud: 2 DCs to AWS and Azure, Direct Connect + ExpressRoute, BGP routing, SD-WAN integration, HA. Compare connectivity options, include routing design and security."),
+        ("🔐","Zero Trust Architecture","ZTNA · Micro-seg · Identity · Palo Alto · Zscaler",
+         "Design Zero Trust: ZTNA replacing VPN, micro-segmentation east-west, Palo Alto Prisma + Zscaler ZPA, identity-based access, MFA. Phased implementation, maturity model, BOM."),
+        ("📡","5G Transport / SP","SR-MPLS · SRv6 · Slicing · Backhaul · Nokia/Cisco",
+         "Design 5G transport: 500 cell sites, SR-MPLS underlay, SRv6 services, network slicing eMBB/URLLC/mMTC, Nokia SR-OS or Cisco IOS-XR. Transport architecture, timing sync, BOM."),
     ]
+    dc = st.columns(3)
     for i, (ico, name, desc, prompt) in enumerate(templates):
-        with tmpl_cols[i % 3]:
-            st.markdown(f"""<div style="background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:16px;margin-bottom:12px;cursor:pointer">
-              <div style="font-size:22px;margin-bottom:8px">{ico}</div>
-              <div style="font-size:14px;font-weight:700;color:#0f172a;margin-bottom:4px">{name}</div>
-              <div style="font-size:12px;color:#64748b;line-height:1.5;margin-bottom:10px">{desc}</div>
+        with dc[i % 3]:
+            st.markdown(f"""<div style="background:var(--bg-surface);border:1px solid var(--border-default);border-radius:10px;padding:14px;margin-bottom:10px">
+              <div style="font-size:20px;margin-bottom:7px">{ico}</div>
+              <div style="font-size:13px;font-weight:700;color:var(--text-primary);margin-bottom:3px">{name}</div>
+              <div style="font-size:11px;color:var(--text-secondary);margin-bottom:10px;line-height:1.5">{desc}</div>
             </div>""", unsafe_allow_html=True)
-            if st.button(f"Design {name}", key=f"design_{name}", use_container_width=True):
-                go_chat(prompt, "design")
+            if st.button(f"Design {name}", key=f"ds_{name}", use_container_width=True):
+                with st.spinner(f"🏗 Generating {name} architecture…"):
+                    output = design_network(prompt, st.session_state.persona)
+                st.session_state.design_output = output
+                st.session_state.workspace = "design"
+                st.rerun()
 
-    st.markdown("---")
-    st.markdown("**Custom Design — Describe your requirements:**")
-
+    st.divider()
+    st.markdown("**Custom Design:**")
     d1, d2 = st.columns(2)
     with d1:
-        req_sites    = st.text_input("Locations / sites", placeholder="e.g. 1 HQ + 20 branches + 2 datacenters")
-        req_users    = st.text_input("User count per location", placeholder="e.g. 500 HQ, 100 branch")
-        req_cloud    = st.text_input("Cloud requirements", placeholder="e.g. Azure primary, AWS DR, Microsoft 365")
-        req_security = st.text_input("Security requirements", placeholder="e.g. Zero Trust, SASE, PCI DSS, HIPAA")
+        rs = st.text_input("Sites", placeholder="1 HQ + 20 branches + 2 DCs", key="d_sites")
+        ru = st.text_input("Users per location", placeholder="500 HQ, 100 branch", key="d_users")
+        rc = st.text_input("Cloud", placeholder="Azure primary, AWS DR, M365", key="d_cloud")
+        rsec = st.text_input("Security", placeholder="Zero Trust, SASE, PCI DSS", key="d_sec")
     with d2:
-        req_budget   = st.text_input("Budget (optional)", placeholder="e.g. under $500K CAPEX")
-        req_vendors  = st.text_input("Vendor preference", placeholder="e.g. Cisco preferred, open to Juniper")
-        req_ha       = st.text_input("HA/redundancy", placeholder="e.g. 99.99% uptime, dual ISP, HA pairs")
-        req_special  = st.text_area("Special requirements", height=68, placeholder="e.g. HIPAA compliance, AI workloads, video surveillance, IoT")
+        rb = st.text_input("Budget", placeholder="Under $500K CapEx", key="d_budget")
+        rv = st.text_input("Vendor preference", placeholder="Cisco preferred, open to Juniper", key="d_vendor")
+        rh = st.text_input("HA requirements", placeholder="99.99% uptime, dual ISP", key="d_ha")
+        rsp = st.text_area("Special requirements", height=68, placeholder="HIPAA compliance, AI workloads, IoT, video surveillance…", key="d_special")
 
-    if st.button("🧠 Generate Complete Architecture", type="primary", use_container_width=True):
-        design_prompt = f"""Design a complete network architecture with these requirements:
-- Locations: {req_sites or 'Not specified'}
-- Users: {req_users or 'Not specified'}
-- Cloud: {req_cloud or 'Not specified'}
-- Security: {req_security or 'Not specified'}
-- Budget: {req_budget or 'Not specified'}
-- Vendors: {req_vendors or 'Best recommendation'}
-- HA Requirements: {req_ha or 'Standard HA'}
-- Special: {req_special or 'None'}
+    if st.button("🏗 Generate Full Architecture", type="primary", use_container_width=True, key="ds_custom"):
+        reqs = f"Sites:{rs} | Users:{ru} | Cloud:{rc} | Security:{rsec} | Budget:{rb} | Vendors:{rv} | HA:{rh} | Special:{rsp}"
+        with st.spinner("🧠 Generating architecture…"):
+            output = design_network(reqs, st.session_state.persona)
+        st.session_state.design_output = output
 
-Provide:
-1. Architecture Overview with reasoning
-2. Network topology description (core/dist/access/WAN/cloud layers)
-3. Vendor selection with comparison table
-4. Hardware sizing per layer
-5. Bill of Materials (top 10 items with estimated cost)
-6. Security architecture
-7. 90-day implementation roadmap
-8. Key risks and mitigations"""
-        go_chat(design_prompt, "design")
+    if st.session_state.design_output:
+        st.markdown("---")
+        st.markdown("**🏗 Generated Architecture:**")
+        st.markdown(st.session_state.design_output)
+        st.download_button("⬇ Download as Markdown", st.session_state.design_output, "network_design.md", "text/markdown")
 
-    # Show design output if exists
-    if st.session_state.chat_msgs and st.session_state.workspace == "design":
-        latest = [m for m in st.session_state.chat_msgs if m["role"]=="assistant"]
-        if latest:
-            st.markdown("---")
-            st.markdown("**🏗 Generated Architecture:**")
-            st.markdown(latest[-1]["content"])
-            st.download_button("⬇ Download Architecture", latest[-1]["content"], "network_design.md", "text/markdown")
 
-# ─────────────────────── LEARN WORKSPACE ────────────────────
+# ══════════════════════════════════════════════════════════
+# WORKSPACE: LEARNING
+# ══════════════════════════════════════════════════════════
 elif ws == "learn":
-    sec_header("📖 Adaptive Learning Engine", "AI detects your level automatically · CCNA to CCIE · Context-driven")
+    section_header("📖 Adaptive Learning Hub", "AI detects your level automatically · CCNA → CCNP → CCIE → Expert Architect")
 
-    p_l = {"fresher":"🌱 Fresher","ccna":"🎓 CCNA","noc":"🖥 NOC","architect":"🏗 Architect","manager":"📊 Manager","security":"🔒 Security"}
-    ai_insight("Adaptive NLP Learning",
-        f"Current persona: <strong>{p_l[st.session_state.persona]}</strong>. "
-        "I detect your level from how you phrase questions. Ask <strong>'what is a VLAN?'</strong> → basics with analogy. "
-        "Ask <strong>'explain Q-in-Q double-tagging MTU implications'</strong> → expert level. <strong>No configuration needed.</strong>",
-        confidence=None)
+    ai_insight_card(
+        "Adaptive NLP Learning",
+        f"Persona: <strong>{st.session_state.persona.upper()}</strong>. "
+        "Ask <strong>'what is a VLAN?'</strong> → basics with analogy. "
+        "Ask <strong>'explain Q-in-Q double-tagging MTU implications'</strong> → expert level. "
+        "<strong>No configuration needed — I auto-detect your level.</strong>",
+    )
 
-    # Learning tracks
     tracks = [
-        ("🌐","Routing Fundamentals","OSPF · BGP · EIGRP · IS-IS · Policy · Redistribution · Multicast",65,"blue",
-         "Start a routing fundamentals lesson. Detect my level and adapt. Include OSPF, BGP, EIGRP. Give me practical examples."),
-        ("🔀","Switching & Fabric","VLANs · STP · EtherChannel · RSTP · MSTP · MACsec · SD-Access",40,"green",
-         "Teach me switching and VLANs. Start from my current level. Include STP, EtherChannel, campus design."),
-        ("🛣️","WAN & SD-WAN","MPLS · SD-WAN · DMVPN · IPSec · SASE · Cloud WAN · QoS",20,"amber",
-         "Explain WAN technologies and SD-WAN. Start from basics, then go to Cisco Viptela and SASE architecture."),
-        ("🔒","Network Security","Zero Trust · ZTNA · Firewall · ACL · IPSec · NAC · SASE · IDS/IPS",55,"red",
-         "Teach network security from my level. Zero Trust, ZTNA, firewall policies, ACL, segmentation."),
-        ("🏢","Datacenter Networking","VXLAN · EVPN · Leaf-Spine · ACI · AI Fabric · RoCE · InfiniBand",10,"purple",
-         "Explain datacenter networking. Start with why leaf-spine, then VXLAN EVPN, then AI fabric and RoCE."),
-        ("☁️","Cloud & Hybrid","AWS VPC · Azure VNet · GCP · Transit Gateway · Kubernetes · Container",30,"blue",
-         "Teach cloud networking. AWS VPC, Azure VNet, hybrid connectivity, Kubernetes networking. Start from my level."),
-        ("📡","Service Provider","MPLS L3VPN · L2VPN · SR-MPLS · SRv6 · 5G Transport · BGP-LU",5,"slate",
-         "Explain service provider networking. MPLS L3VPN, SR-MPLS, SRv6, 5G transport. Expert level please."),
-        ("🤖","AI & Automation","Ansible · Terraform · Python · NETCONF · RESTCONF · gRPC · Intent",15,"green",
-         "Teach network automation. Ansible for network, Terraform, Python netmiko, NETCONF/RESTCONF. Practical examples."),
+        ("🌐","Routing Fundamentals","OSPF · BGP · EIGRP · IS-IS · Policy · Redistribution",65,"blue","Start routing lesson. Detect my level. Include OSPF, BGP, EIGRP with practical examples."),
+        ("🔀","Switching & Fabric","VLANs · STP · EtherChannel · RSTP · MACsec · SD-Access",40,"green","Teach switching and VLANs from my level. STP, EtherChannel, campus fabric design."),
+        ("🛣️","WAN & SD-WAN","MPLS · SD-WAN · DMVPN · SASE · QoS · Cloud WAN",20,"amber","Explain WAN technologies. Start basics then Cisco Viptela, SASE, cloud WAN architecture."),
+        ("🔒","Network Security","Zero Trust · ZTNA · Firewall · ACL · IPSec · SASE · NAC",55,"red","Teach network security from my level. Zero Trust, ZTNA, firewall policies, segmentation."),
+        ("🏢","Datacenter","VXLAN · EVPN · Leaf-Spine · ACI · AI Fabric · RoCE",10,"purple","Explain datacenter networking. Why leaf-spine, VXLAN EVPN, AI fabric, RoCE for GPU."),
+        ("☁️","Cloud & Hybrid","AWS VPC · Azure VNet · GCP · Transit Gateway · Kubernetes",30,"blue","Teach cloud networking. AWS VPC, Azure VNet, hybrid connectivity, Kubernetes CNI."),
+        ("📡","Service Provider","MPLS L3VPN · SR-MPLS · SRv6 · 5G Transport · BGP-LU",5,"purple","Explain SP networking. MPLS L3VPN, SR-MPLS, SRv6, 5G transport. Expert level."),
+        ("🤖","Automation","Ansible · Terraform · Python · NETCONF · RESTCONF · gRPC",15,"green","Teach network automation. Ansible, Python netmiko, NETCONF/RESTCONF, practical examples."),
     ]
-
     tc = st.columns(4)
     for i, (ico, name, desc, pct, color, prompt) in enumerate(tracks):
         with tc[i % 4]:
-            pct_color = "#3b82f6" if color=="blue" else "#22c55e" if color=="green" else "#f59e0b" if color=="amber" else "#ef4444" if color=="red" else "#8b5cf6" if color=="purple" else "#64748b"
-            st.markdown(f"""<div style="background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:14px;margin-bottom:4px">
-              <div style="font-size:20px;margin-bottom:6px">{ico}</div>
-              <div style="font-size:13px;font-weight:700;color:#0f172a;margin-bottom:3px">{name}</div>
-              <div style="font-size:11px;color:#64748b;margin-bottom:10px;line-height:1.5">{desc}</div>
-              <div style="height:4px;background:#f1f5f9;border-radius:4px;overflow:hidden;margin-bottom:4px"><div style="height:100%;width:{pct}%;background:{pct_color};border-radius:4px"></div></div>
-              <div style="font-size:10px;color:#94a3b8;font-family:DM Mono,monospace">{pct}% complete</div>
+            color_map = {"blue":"#2f81f7","green":"#3fb950","amber":"#d29922","red":"#f85149","purple":"#bc8cff"}
+            cv = color_map.get(color, "#2f81f7")
+            st.markdown(f"""<div style="background:var(--bg-surface);border:1px solid var(--border-default);border-radius:10px;padding:13px;margin-bottom:4px">
+              <div style="font-size:18px;margin-bottom:6px">{ico}</div>
+              <div style="font-size:13px;font-weight:700;color:var(--text-primary);margin-bottom:2px">{name}</div>
+              <div style="font-size:11px;color:var(--text-secondary);margin-bottom:9px;line-height:1.5">{desc}</div>
+              <div style="height:3px;background:var(--border-default);border-radius:4px;overflow:hidden;margin-bottom:4px"><div style="height:100%;width:{pct}%;background:{cv};border-radius:4px"></div></div>
+              <div style="font-size:10px;color:var(--text-tertiary);font-family:JetBrains Mono,monospace">{pct}% complete</div>
             </div>""", unsafe_allow_html=True)
-            if st.button(f"Start", key=f"track_{name}", use_container_width=True):
-                go_chat(prompt, "learn")
+            if st.button(f"Start", key=f"tk_{name}", use_container_width=True):
+                go(prompt, "learn")
 
-    st.markdown("---")
+    st.divider()
+    lq = st.text_input("Ask anything to learn", placeholder="'What is BGP?' · 'Explain OSPF DR election' · 'How does VXLAN work?' · 'Compare SD-WAN vs MPLS'", key="lq")
+    if st.button("📖 Learn", type="primary", key="learn_ask") and lq:
+        go(lq, "learn")
 
-    # Free learning
-    learn_q = st.text_input("Ask anything to learn", placeholder="'What is BGP?' · 'Explain OSPF DR election with analogy' · 'How does VXLAN work?' · 'Compare SD-WAN vs MPLS'", key="learn_q")
-    if st.button("📖 Learn", type="primary") and learn_q:
-        go_chat(learn_q, "learn")
-
-    # Show latest learning response
-    ai_learns = [m for m in st.session_state.chat_msgs if m["role"]=="assistant"]
+    ai_learns = [m for m in st.session_state.chat_msgs if m["role"] == "assistant"]
     if ai_learns:
         with st.expander("📖 Latest Learning Response", expanded=True):
-            render_msg("assistant", ai_learns[-1]["content"], ai_learns[-1].get("meta"))
+            render_chat_message("assistant", ai_learns[-1]["content"], ai_learns[-1].get("meta"))
+
 
 # ══════════════════════════════════════════════════════════
-# FLOATING AI CHAT (always available at bottom)
+# WORKSPACE: DEVICE MANAGER
 # ══════════════════════════════════════════════════════════
-if ws not in ["troubleshoot","learn"]:
+elif ws == "devices":
+    section_header("🖧 Device Manager", "Add SSH devices for multi-device query engine · Encrypted credential storage")
+
+    t1, t2 = st.tabs(["📋 All Devices", "➕ Add Device"])
+    with t1:
+        devs = get_devices()
+        if devs:
+            df = pd.DataFrame(devs)[["hostname","ip","vendor","role","site","status","cpu","memory","port"]]
+            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.caption(f"**{len(devs)} devices** · SSH {'live' if NETMIKO_OK else '⚡ simulation mode'} · Passwords stored encrypted (Fernet)")
+        else:
+            st.info("No devices. Add below.")
+    with t2:
+        if has_permission("manage_devices"):
+            c1, c2, c3 = st.columns(3)
+            hn   = c1.text_input("Hostname", placeholder="CORE-RTR-01")
+            ip   = c1.text_input("IP Address", placeholder="10.0.0.1")
+            ven  = c2.selectbox("Vendor", ["cisco_ios","cisco_ios_xe","cisco_ios_xr","cisco_nxos","juniper_junos","arista_eos","paloalto_panos","fortinet","huawei_vrp"])
+            role = c2.text_input("Role", placeholder="Core Router")
+            usr  = c3.text_input("SSH Username", placeholder="admin")
+            pwd  = c3.text_input("SSH Password", type="password")
+            site = c3.text_input("Site", placeholder="HQ")
+            port = c3.number_input("Port", value=22, min_value=1, max_value=65535)
+            if st.button("➕ Add Device (encrypted)", type="primary"):
+                if hn and ip:
+                    add_device(hn, ip, ven, usr, pwd, int(port), role, site)
+                    write_audit(st.session_state.user_name, "add_device", f"device:{hn}", f"IP:{ip}")
+                    st.success(f"✅ Added {hn} — password encrypted with Fernet")
+                    st.rerun()
+                else:
+                    st.error("Hostname and IP required")
+        else:
+            st.warning("🔒 Insufficient permissions to add devices")
+
+
+# ══════════════════════════════════════════════════════════
+# WORKSPACE: EXECUTIVE
+# ══════════════════════════════════════════════════════════
+elif ws == "executive":
+    section_header("📈 Executive Dashboard", "Business impact · SLA performance · Risk scores · Board-ready metrics")
+
+    metric_grid([
+        {"label":"Network Uptime","value":"99.94%","meta":"SLA target 99.9% ✅","color":"green","icon":"✅"},
+        {"label":"MTTR","value":"18m","meta":"↓ 40% vs last quarter","color":"blue","icon":"⚡"},
+        {"label":"Risk Score","value":"Medium","meta":"14 CVEs · 2 threats","color":"amber","icon":"⚠"},
+        {"label":"Automation Rate","value":"78%","meta":"↑ 12% this quarter","color":"green","icon":"🤖"},
+    ])
+
+    col_l, col_r = st.columns(2)
+    with col_l:
+        st.markdown("**📊 Operational Health**")
+        metrics_data = {"SLA Performance":"99.94%","MTTR Reduction":"↓ 40%","Change Success":"97.3%","Auto-Remediation":"94%","Incidents Resolved":"2/2"}
+        for k, v in metrics_data.items():
+            st.markdown(f'<div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border-subtle)"><span style="color:var(--text-secondary);font-size:13px">{k}</span><span style="color:var(--text-primary);font-weight:700;font-size:13px">{v}</span></div>', unsafe_allow_html=True)
+    with col_r:
+        st.markdown("**💰 Business Value**")
+        biz_data = {"Time Saved This Week":"4.2 hours","Outages Prevented":"3","Auto-Actions Executed":"47","Approx. Cost Saving":"$8,400","Engineers Upskilled":"8"}
+        for k, v in biz_data.items():
+            st.markdown(f'<div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border-subtle)"><span style="color:var(--text-secondary);font-size:13px">{k}</span><span style="color:var(--accent-green);font-weight:700;font-size:13px">{v}</span></div>', unsafe_allow_html=True)
+
+    if st.button("🧠 Generate Board Report", type="primary"):
+        with st.spinner("Generating executive report…"):
+            report = call_ai([{"role":"user","content":"Generate concise executive board report: network health uptime MTTR risks automation ROI investments needed 90-day outlook. Business language only."}], "manager", max_tokens=1500)
+        st.markdown(report)
+        st.download_button("⬇ Download Report", report, "exec_report.md", "text/markdown")
+
+
+# ══════════════════════════════════════════════════════════
+# WORKSPACE: AUDIT LOG
+# ══════════════════════════════════════════════════════════
+elif ws == "audit":
+    if not require_permission("view_audit"):
+        st.stop()
+    section_header("🔐 Audit Log", "Complete audit trail · All user actions · Security events")
+
+    logs = get_audit_logs(100)
+    if logs:
+        df = pd.DataFrame(logs)
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.caption(f"{len(logs)} audit entries shown")
+    else:
+        st.info("No audit events recorded yet.")
+
+
+# ══════════════════════════════════════════════════════════
+# WORKSPACE: OBSERVABILITY
+# ══════════════════════════════════════════════════════════
+elif ws == "observe":
+    section_header("📡 Observability", "Live telemetry · Anomaly detection · SaaS monitoring · NetFlow · Syslog")
+
+    telemetry = get_live_telemetry()
+    anomalies = detect_anomalies(telemetry)
+
+    if anomalies:
+        crit = [a for a in anomalies if a["severity"] == "critical"]
+        warn = [a for a in anomalies if a["severity"] == "warning"]
+        ai_insight_card(
+            "Anomaly Detection — Live",
+            f"<strong>{len(crit)} critical</strong> and <strong>{len(warn)} warning</strong> anomalies detected. "
+            + (f"Top: {crit[0]['message']} — {crit[0]['ai_hint']}" if crit else "No critical anomalies."),
+            confidence=91,
+        )
+
+    # Metrics
+    metric_grid([
+        {"label":"Devices Monitored","value":str(len(telemetry)),"meta":"Live telemetry","color":"blue","icon":"📡"},
+        {"label":"Active Anomalies","value":str(len(anomalies)),"meta":f"{len([a for a in anomalies if a['severity']=='critical'])} critical","color":"red" if anomalies else "green","icon":"⚠"},
+        {"label":"Avg CPU","value":f"{int(sum(t['cpu'] for t in telemetry)/max(1,len(telemetry)))}%","meta":"Across all devices","color":"amber","icon":"💻"},
+        {"label":"Avg Latency","value":"14ms","meta":"Network baseline","color":"green","icon":"⚡"},
+    ])
+
+    tab_live, tab_saas, tab_flow, tab_syslog = st.tabs(["📊 Live Telemetry","🌐 SaaS Health","🔄 NetFlow","📋 Syslog"])
+
+    with tab_live:
+        st.markdown("**Device Telemetry — Refreshes every 15s**")
+        dev_cols = st.columns(4)
+        for i, t in enumerate(telemetry):
+            cpu, mem = t.get("cpu",0), t.get("memory",0)
+            status = t.get("status","up")
+            cpu_cls = "mv-crit" if cpu >= 85 else "mv-warn" if cpu >= 70 else "mv-ok"
+            mem_cls = "mv-crit" if mem >= 80 else "mv-warn" if mem >= 60 else "mv-ok"
+            with dev_cols[i % 4]:
+                st.markdown(f"""<div class="nb-dev dev-{status}">
+                  <div class="nb-dev-hn">{t['hostname']}</div>
+                  <div class="nb-dev-role">{t['role']}</div>
+                  <div class="nb-dev-metrics">
+                    <div class="nb-dev-m"><div class="nb-dev-mv {cpu_cls}">{f"{cpu}%" if cpu else "—"}</div><div class="nb-dev-ml">CPU</div></div>
+                    <div class="nb-dev-m"><div class="nb-dev-mv {mem_cls}">{f"{mem}%" if mem else "—"}</div><div class="nb-dev-ml">MEM</div></div>
+                    <div class="nb-dev-m"><div class="nb-dev-mv {'mv-crit' if t.get('packet_loss',0)>0.5 else 'mv-ok'}">{t.get('packet_loss',0)}%</div><div class="nb-dev-ml">LOSS</div></div>
+                    <div class="nb-dev-m"><div class="nb-dev-mv mv-ok">{t.get('latency_ms',0)}ms</div><div class="nb-dev-ml">RTT</div></div>
+                  </div>
+                </div>""", unsafe_allow_html=True)
+
+        if anomalies:
+            st.markdown("**🔍 Detected Anomalies:**")
+            for a in anomalies:
+                sev_ico = "🔴" if a["severity"] == "critical" else "🟡"
+                st.markdown(f"""<div class="nb-timeline-item">
+                  <div class="nb-tl-dot {'tl-crit' if a['severity']=='critical' else 'tl-warn'}">{sev_ico}</div>
+                  <div class="nb-tl-body">
+                    <div class="nb-tl-title">{a['message']}</div>
+                    <div class="nb-tl-meta">{a['device']} · {a['type']} · value: {a['value']}</div>
+                    <div class="nb-tl-ai">🧠 {a['ai_hint']}</div>
+                  </div>
+                </div>""", unsafe_allow_html=True)
+            if st.button("🧠 AI Anomaly Analysis", type="primary"):
+                anomaly_desc = "\n".join(f"- {a['message']} ({a['severity']})" for a in anomalies[:5])
+                go(f"Analyze these network anomalies and correlate root causes:\n{anomaly_desc}", "troubleshoot")
+
+    with tab_saas:
+        saas = get_saas_health()
+        st.markdown("**SaaS Application Health — Internet Experience Monitoring**")
+        saas_cols = st.columns(4)
+        for i, svc in enumerate(saas):
+            score = svc["score"]
+            color = "var(--accent-green)" if score >= 85 else "var(--accent-amber)" if score >= 60 else "var(--accent-red)"
+            status_text = "Healthy" if score >= 85 else "Degraded" if score >= 60 else "Critical"
+            with saas_cols[i % 4]:
+                st.markdown(f"""<div class="nb-dev dev-{'up' if score>=85 else 'warn' if score>=60 else 'critical'}">
+                  <div style="font-size:18px;margin-bottom:4px">{svc['icon']}</div>
+                  <div class="nb-dev-hn" style="font-size:12px">{svc['name']}</div>
+                  <div class="nb-dev-metrics">
+                    <div class="nb-dev-m"><div class="nb-dev-mv" style="color:{color}">{score}</div><div class="nb-dev-ml">Score</div></div>
+                    <div class="nb-dev-m"><div class="nb-dev-mv {'mv-warn' if svc['latency_ms']>150 else 'mv-ok'}">{svc['latency_ms']}ms</div><div class="nb-dev-ml">Latency</div></div>
+                    <div class="nb-dev-m"><div class="nb-dev-mv {'mv-crit' if svc['loss_pct']>0.5 else 'mv-ok'}">{svc['loss_pct']}%</div><div class="nb-dev-ml">Loss</div></div>
+                  </div>
+                </div>""", unsafe_allow_html=True)
+        degraded = [s for s in saas if s["score"] < 85]
+        if degraded:
+            if st.button("🧠 AI SaaS Analysis", type="primary"):
+                desc = "\n".join(f"- {s['name']}: score {s['score']}, latency {s['latency_ms']}ms" for s in degraded)
+                go(f"Analyze SaaS degradation:\n{desc}\nIs this caused by our BGP issues on PE-MUM-01?", "troubleshoot")
+
+    with tab_flow:
+        nf = get_netflow_summary()
+        col_nf1, col_nf2 = st.columns(2)
+        with col_nf1:
+            st.markdown("**Top Talkers**")
+            for t in nf["top_talkers"]:
+                st.markdown(f"""<div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border-subtle)">
+                  <div><span style="font-family:JetBrains Mono,monospace;font-size:12px;color:var(--text-primary)">{t['src']}</span>
+                  <span style="font-size:11px;color:var(--text-tertiary);margin:0 6px">→</span>
+                  <span style="font-size:11px;color:var(--accent-blue)">{t['app']}</span></div>
+                  <span style="font-family:JetBrains Mono,monospace;font-size:12px;font-weight:700;color:var(--accent-amber)">{t['mbps']} Mbps</span>
+                </div>""", unsafe_allow_html=True)
+        with col_nf2:
+            st.markdown("**Traffic Summary**")
+            st.metric("Total Throughput", f"{nf['total_gbps']} Gbps")
+            st.metric("Flow Rate", f"{nf['flows_per_sec']:,} flows/s")
+            for proto, pct in list(nf["protocol_mix"].items())[:5]:
+                st.markdown(f'<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--border-subtle)"><span style="color:var(--text-secondary);font-size:12px">{proto}</span><span style="font-family:JetBrains Mono,monospace;font-size:12px;color:var(--text-primary)">{pct}%</span></div>', unsafe_allow_html=True)
+
+    with tab_syslog:
+        logs = get_recent_syslogs(15)
+        st.markdown("**Recent Syslog Events**")
+        for log in logs:
+            sev = log["severity"]
+            ico = "🔴" if sev == "critical" else "🟡" if sev == "warning" else "ℹ️"
+            dot_cls = "tl-crit" if sev == "critical" else "tl-warn" if sev == "warning" else "tl-info"
+            st.markdown(f"""<div class="nb-timeline-item">
+              <div class="nb-tl-dot {dot_cls}">{ico}</div>
+              <div class="nb-tl-body">
+                <div class="nb-tl-title" style="font-family:JetBrains Mono,monospace;font-size:12px">{log['message']}</div>
+                <div class="nb-tl-meta">{log['ts']} · {log['device']}</div>
+              </div>
+            </div>""", unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════
+# WORKSPACE: DIGITAL TWIN
+# ══════════════════════════════════════════════════════════
+elif ws == "twin":
+    section_header("👾 Digital Twin", "Topology clone · Failure simulation · Change validation · What-if analysis")
+
+    twin_stat = get_twin_status()
+    ai_insight_card(
+        "Digital Twin Engine",
+        "Ask: <strong>'What happens if PE-MUM-01 fails?'</strong> → I simulate failure, show affected services, "
+        "calculate failover time, and recommend mitigation — <strong>before it happens in production.</strong> "
+        "Every change is tested here first.",
+        confidence=99,
+    )
+
+    metric_grid([
+        {"label":"Devices Cloned","value":str(twin_stat["cloned_devices"]),"meta":"From live topology","color":"blue","icon":"👾"},
+        {"label":"Config Accuracy","value":f"{twin_stat['accuracy_pct']}%","meta":f"Last sync {twin_stat['last_sync_s']}s ago","color":"green","icon":"✅"},
+        {"label":"Active Simulations","value":str(twin_stat["active_simulations"]),"meta":"Running now","color":"amber","icon":"⚡"},
+        {"label":"Changes Tested","value":str(twin_stat["changes_tested"]),"meta":"This month","color":"green","icon":"🧪"},
+    ])
+
+    col_sim, col_result = st.columns([0.45, 0.55])
+
+    with col_sim:
+        st.markdown("**⚡ Failure Simulation**")
+        devices = get_devices()
+        dev_names = [d["hostname"] for d in devices]
+        sim_device = st.selectbox("Select device to simulate failure", dev_names, key="twin_dev")
+        if st.button("▶ Simulate Failure", type="primary", use_container_width=True, key="twin_sim"):
+            with st.spinner(f"Simulating {sim_device} failure…"):
+                result = simulate_failure(sim_device)
+            st.session_state["twin_result"] = result
+            st.session_state["twin_type"] = "failure"
+
+        st.markdown("---")
+        st.markdown("**🔧 Change Simulation**")
+        chg_dev  = st.selectbox("Device", dev_names, key="twin_chg_dev")
+        chg_type = st.selectbox("Change type", ["firmware","config","vlan","routing","hardware"], key="twin_chg_type")
+        chg_desc = st.text_input("Change description", placeholder="e.g. Upgrade IOS-XR 7.5.2 → 7.7.1", key="twin_chg_desc")
+        if st.button("▶ Simulate Change", use_container_width=True, key="twin_chg_sim"):
+            with st.spinner("Simulating change impact…"):
+                result = simulate_change(chg_dev, chg_type, chg_desc or f"{chg_type} on {chg_dev}")
+            st.session_state["twin_result"] = result
+            st.session_state["twin_type"] = "change"
+
+        st.markdown("---")
+        st.markdown("**🤖 AI What-If Scenarios**")
+        for scenario, prompt in [
+            ("PE-MUM-01 failure", "Simulate complete failure of PE-MUM-01. What services fail? Failover? Recommendations?"),
+            ("ISP link drops", "What if the ISP link on PE-MUM-01 to AS65002 goes completely down?"),
+            ("CORE-RTR-01 firmware", "Simulate firmware upgrade on CORE-RTR-01 from 7.5.2 to 7.7.1. Risk and downtime?"),
+            ("Add OSPF area 10", "Validate adding OSPF area 10 with 5 new subnets before production. What are risks?"),
+        ]:
+            if st.button(f"▶ {scenario}", key=f"twin_{scenario}", use_container_width=True):
+                go(prompt, "twin", "Digital Twin workspace — what-if simulation")
+
+    with col_result:
+        st.markdown("**📊 Simulation Result**")
+        result = st.session_state.get("twin_result")
+        twin_type = st.session_state.get("twin_type", "failure")
+
+        if not result:
+            st.info("Run a simulation on the left to see results here.")
+        elif twin_type == "failure":
+            sev_color = "var(--accent-red)" if result.get("severity") == "critical" else "var(--accent-amber)"
+            st.markdown(f"""<div style="background:var(--bg-surface);border:1px solid var(--border-default);border-radius:10px;padding:16px;margin-bottom:10px">
+              <div style="font-size:14px;font-weight:700;color:{sev_color};margin-bottom:12px">⚡ Failure: {result.get('failed_device','')}</div>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+                <div><div style="font-size:10px;color:var(--text-tertiary);font-family:JetBrains Mono,monospace;text-transform:uppercase;margin-bottom:3px">Criticality</div><div style="font-size:16px;font-weight:700;color:{sev_color}">{result.get('criticality',0)}/10</div></div>
+                <div><div style="font-size:10px;color:var(--text-tertiary);font-family:JetBrains Mono,monospace;text-transform:uppercase;margin-bottom:3px">Users Impacted</div><div style="font-size:16px;font-weight:700;color:var(--accent-red)">{result.get('affected_users',0)}</div></div>
+                <div><div style="font-size:10px;color:var(--text-tertiary);font-family:JetBrains Mono,monospace;text-transform:uppercase;margin-bottom:3px">Failover</div><div style="font-size:13px;font-weight:600;color:var(--accent-green)">{'✅ ' + result['failover_device'] + f' ({result[\"estimated_rto_s\"]}s)' if result.get('failover_possible') else '❌ No failover — SPOF'}</div></div>
+                <div><div style="font-size:10px;color:var(--text-tertiary);font-family:JetBrains Mono,monospace;text-transform:uppercase;margin-bottom:3px">SPOF</div><div style="font-size:13px;font-weight:600;color:{'var(--accent-red)' if result.get('is_spof') else 'var(--accent-green)'}">{'⚠️ YES' if result.get('is_spof') else '✅ No'}</div></div>
+              </div>
+              <div style="margin-bottom:8px"><div style="font-size:10px;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.8px;font-family:JetBrains Mono,monospace;margin-bottom:5px">Affected Services</div>{"".join(f'<span style="font-size:11px;padding:2px 7px;border-radius:8px;background:var(--accent-red-subtle);color:var(--accent-red);margin:2px;display:inline-block">{s}</span>' for s in result.get("affected_services",[]))}</div>
+              <div><div style="font-size:10px;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.8px;font-family:JetBrains Mono,monospace;margin-bottom:5px">AI Recommendations</div>{"".join(f'<div style="font-size:12px;color:var(--text-primary);padding:4px 0;border-bottom:1px solid var(--border-subtle)">{r}</div>' for r in result.get("recommendations",[]))}</div>
+            </div>""", unsafe_allow_html=True)
+        else:
+            score = result.get("risk_score", 0)
+            risk_cls = "risk-low" if score < 30 else "risk-med" if score < 65 else "risk-high"
+            st.markdown(f"""<div style="background:var(--bg-surface);border:1px solid var(--border-default);border-radius:10px;padding:16px">
+              <div style="font-size:14px;font-weight:700;color:var(--text-primary);margin-bottom:12px">🔧 Change: {result.get('device','')} — {result.get('change_type','')}</div>
+              <div style="margin-bottom:10px"><div style="font-size:10px;color:var(--text-tertiary);text-transform:uppercase;font-family:JetBrains Mono,monospace;margin-bottom:4px">Risk Score</div></div>
+            </div>""", unsafe_allow_html=True)
+            risk_bar(score)
+            st.markdown(f"**Downtime:** {result.get('predicted_downtime',0)}s &nbsp;|&nbsp; **Users:** {result.get('affected_users',0)}")
+            st.markdown(f"**Maintenance window required:** {'✅ Yes' if result.get('maintenance_window_required') else '❌ No'}")
+            if result.get("risks"):
+                st.markdown("**Risks:**")
+                for r in result["risks"]:
+                    st.markdown(f"- {r}")
+            if result.get("rollback_steps"):
+                with st.expander("📋 Rollback Plan"):
+                    for step in result["rollback_steps"]:
+                        st.markdown(f"`{step}`")
+
+
+# ══════════════════════════════════════════════════════════
+# WORKSPACE: SECURITY OPERATIONS
+# ══════════════════════════════════════════════════════════
+elif ws == "security":
+    section_header("🔒 Security Operations", "Zero Trust · Threat correlation · Firewall intelligence · Posture analysis")
+
+    ai_insight_card(
+        "Security Intelligence",
+        "<strong>Lateral movement detected</strong> from 10.2.14.0/24 (SW-ACC-14 segment) — "
+        "port scan pattern, 23 hosts probed in 4 minutes. "
+        "<strong>Zero Trust score: 62%</strong> — micro-segmentation gap in access layer. "
+        "<strong>14 unpatched CVEs</strong> on edge devices — 3 critical severity.",
+        confidence=89, sources=["Firewall","SIEM","Threat Intel"],
+    )
+
+    metric_grid([
+        {"label":"Active Threats","value":"2","meta":"Lateral movement + CVEs","color":"red","icon":"🚨"},
+        {"label":"CVEs Unpatched","value":"14","meta":"3 critical severity","color":"amber","icon":"⚠"},
+        {"label":"FW Rule Health","value":"98%","meta":"Shadow rules cleaned","color":"green","icon":"🛡"},
+        {"label":"Zero Trust Score","value":"62%","meta":"Improving +8% this month","color":"blue","icon":"🔐"},
+    ])
+
+    tab_threats, tab_fw, tab_zt, tab_vuln = st.tabs(["🚨 Threats","🛡 Firewall","🔐 Zero Trust","⚠ Vulnerabilities"])
+
+    with tab_threats:
+        threats = [
+            {"sev":"critical","type":"Lateral Movement","src":"10.2.14.45","dst":"10.1.0.0/16","detail":"Port scan 23 hosts in 4 min on SW-ACC-14 segment. Possible credential theft following interface failure.","action":"Isolate 10.2.14.45. Check for compromised credentials. Enable 802.1X."},
+            {"sev":"warning","type":"Unusual Egress","src":"10.1.100.87","dst":"45.141.87.0/24","detail":"DNS queries to known C2 domain (IOC match). Volume 2x baseline.","action":"Block at DNS layer (Umbrella). Investigate endpoint 10.1.100.87."},
+        ]
+        for t in threats:
+            st.markdown(f"""<div class="nb-warroom">
+              <div class="nb-wr-hdr" style="background:{'linear-gradient(135deg,#3d0f0a,#5c1a12)' if t['sev']=='critical' else 'linear-gradient(135deg,#3d2b00,#6b4a00)'}">
+                <div class="nb-wr-pulse"></div>
+                <div class="nb-wr-title">{'🔴' if t['sev']=='critical' else '🟡'} {t['type']}</div>
+              </div>
+              <div style="padding:14px 18px">
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+                  <div><div style="font-size:10px;color:var(--text-tertiary);text-transform:uppercase;font-family:JetBrains Mono,monospace;margin-bottom:3px">Source → Destination</div><div style="font-size:13px;font-family:JetBrains Mono,monospace;color:var(--accent-red)">{t['src']} → {t['dst']}</div></div>
+                  <div><div style="font-size:10px;color:var(--text-tertiary);text-transform:uppercase;font-family:JetBrains Mono,monospace;margin-bottom:3px">Detail</div><div style="font-size:12px;color:var(--text-primary)">{t['detail']}</div></div>
+                </div>
+                <div style="margin-top:8px;padding:8px;background:rgba(47,129,247,.06);border-radius:6px;font-size:12px;color:var(--accent-blue)">🧠 Recommended: {t['action']}</div>
+              </div>
+            </div>""", unsafe_allow_html=True)
+            if st.button(f"🧠 AI Threat Analysis", key=f"threat_{t['type']}", use_container_width=True):
+                go(f"Security threat: {t['type']} — {t['detail']}. Source: {t['src']}. Analyze attack path, lateral movement risk, and provide containment actions.", "security")
+
+    with tab_fw:
+        st.markdown("**Firewall Rule Health — FW-EDGE-01**")
+        fw_stats = [
+            ("Total rules","284","Rule base size"),("Shadow rules","0","Cleaned last week"),
+            ("Unused rules","12","No traffic in 90 days"),("Any-Any rules","2","High risk — review needed"),
+            ("Expired rules","4","Past end-date"),("Rules without logs","8","Compliance gap"),
+        ]
+        fc = st.columns(3)
+        for i, (label, val, meta) in enumerate(fw_stats):
+            with fc[i % 3]:
+                color = "var(--accent-red)" if "risk" in meta.lower() or "gap" in meta.lower() else "var(--accent-green)" if val == "0" else "var(--text-primary)"
+                st.markdown(f"""<div style="background:var(--bg-surface);border:1px solid var(--border-default);border-radius:8px;padding:12px;text-align:center;margin-bottom:8px">
+                  <div style="font-size:10px;color:var(--text-tertiary);text-transform:uppercase;font-family:JetBrains Mono,monospace;margin-bottom:4px">{label}</div>
+                  <div style="font-size:22px;font-weight:700;font-family:Fraunces,serif;color:{color}">{val}</div>
+                  <div style="font-size:11px;color:var(--text-tertiary)">{meta}</div>
+                </div>""", unsafe_allow_html=True)
+        if st.button("🧠 AI Firewall Optimization", type="primary"):
+            go("Analyze firewall rule base: shadow rules, unused rules, any-any rules, missing logs. Provide cleanup recommendations prioritized by risk.", "security")
+
+    with tab_zt:
+        st.markdown("**Zero Trust Maturity Assessment**")
+        pillars = [
+            ("Identity","80%","MFA enforced. Conditional access configured.","green"),
+            ("Devices","65%","MDM enrolled. Some unmanaged devices remain.","amber"),
+            ("Networks","50%","Micro-segmentation partial. VXLAN in DC only.","amber"),
+            ("Applications","70%","ZTNA deployed for 60% of apps. VPN still used.","amber"),
+            ("Data","45%","DLP partial. Shadow IT uncontrolled.","red"),
+            ("Visibility","75%","SIEM active. NDR deployed. Some gaps in cloud.","green"),
+        ]
+        pc = st.columns(3)
+        for i, (pillar, score, desc, color) in enumerate(pillars):
+            pct = int(score.rstrip("%"))
+            bar_color = {"green":"var(--accent-green)","amber":"var(--accent-amber)","red":"var(--accent-red)"}[color]
+            with pc[i % 3]:
+                st.markdown(f"""<div style="background:var(--bg-surface);border:1px solid var(--border-default);border-radius:10px;padding:13px;margin-bottom:8px">
+                  <div style="font-size:12px;font-weight:700;color:var(--text-primary);margin-bottom:3px">{pillar}</div>
+                  <div style="font-size:18px;font-weight:700;font-family:Fraunces,serif;color:{bar_color};margin-bottom:6px">{score}</div>
+                  <div style="height:3px;background:var(--border-default);border-radius:4px;overflow:hidden;margin-bottom:6px"><div style="height:100%;width:{pct}%;background:{bar_color}"></div></div>
+                  <div style="font-size:11px;color:var(--text-tertiary)">{desc}</div>
+                </div>""", unsafe_allow_html=True)
+        if st.button("🧠 Zero Trust Gap Analysis", type="primary"):
+            go("Full Zero Trust maturity assessment. Top 5 gaps to close, prioritized by risk reduction impact. Practical implementation steps for each.", "security")
+
+    with tab_vuln:
+        vulns = [
+            ("CVE-2024-20399","Cisco IOS-XR","9.8 Critical","FW-EDGE-01, PE-MUM-01","Patch available — schedule immediately"),
+            ("CVE-2024-3400", "Palo Alto PAN-OS","10.0 Critical","FW-EDGE-01","Emergency patch — exploited in wild"),
+            ("CVE-2023-44487","HTTP/2","7.5 High","WLC-HQ-01","Apply workaround — vendor patch pending"),
+            ("CVE-2024-21893","Fortinet","8.2 High","No Fortinet devices","N/A in your environment"),
+        ]
+        for v in vulns[:3]:
+            sev_color = "var(--accent-red)" if "Critical" in v[2] else "var(--accent-amber)"
+            st.markdown(f"""<div style="background:var(--bg-surface);border:1px solid var(--border-default);border-left:3px solid {sev_color};border-radius:0 10px 10px 0;padding:12px;margin-bottom:8px;display:flex;gap:12px;align-items:flex-start">
+              <div style="flex:1">
+                <div style="font-family:JetBrains Mono,monospace;font-size:12px;font-weight:600;color:{sev_color}">{v[0]} — {v[1]}</div>
+                <div style="font-size:13px;color:var(--text-primary);margin:3px 0">CVSS: {v[2]} · Affected: {v[3]}</div>
+                <div style="font-size:11px;color:var(--accent-blue)">🧠 {v[4]}</div>
+              </div>
+            </div>""", unsafe_allow_html=True)
+        if st.button("🧠 AI Vulnerability Prioritization", type="primary"):
+            go("Prioritize 14 unpatched CVEs on network devices. Which to patch first based on CVSS score, exposure, and our specific network topology? Provide patch schedule.", "security")
+
+
+# ══════════════════════════════════════════════════════════
+# WORKSPACE: COMPLIANCE
+# ══════════════════════════════════════════════════════════
+elif ws == "compliance":
+    section_header("🛡 Compliance & Posture", "CIS · NIST · PCI DSS · ISO 27001 · Zero Trust · Automated validation")
+
+    ai_insight_card(
+        "Compliance Intelligence",
+        "<strong>Overall posture: 84%</strong> across all frameworks. "
+        "Top gap: <strong>NIST CSF Identity pillar (72%)</strong> — incomplete MFA rollout. "
+        "<strong>PCI DSS cardholder environment</strong> correctly isolated. "
+        "<strong>14 CVEs</strong> create compliance risk — remediate within 30 days per policy.",
+        confidence=91,
+    )
+
+    # Framework scores
+    frameworks = [
+        ("CIS Benchmark","91%",91,"23 violations of 256 controls","green"),
+        ("NIST CSF 2.0","78%",78,"Identity + Govern pillars gap","amber"),
+        ("PCI DSS 4.0","96%",96,"Cardholder network isolated","green"),
+        ("ISO 27001","88%",88,"Audit trail complete","green"),
+        ("Zero Trust","62%",62,"Micro-segmentation partial","amber"),
+        ("Firmware CVEs","14 open",14,"3 critical unpatched → compliance risk","red"),
+    ]
+    fc = st.columns(3)
+    for i, (name, score, pct, desc, color) in enumerate(frameworks):
+        bar_color = {"green":"var(--accent-green)","amber":"var(--accent-amber)","red":"var(--accent-red)"}[color]
+        bar_w = min(100, pct)
+        with fc[i % 3]:
+            st.markdown(f"""<div style="background:var(--bg-surface);border:1px solid var(--border-default);border-radius:10px;padding:14px;margin-bottom:10px">
+              <div style="font-size:11px;font-weight:700;color:var(--text-tertiary);text-transform:uppercase;letter-spacing:.8px;font-family:JetBrains Mono,monospace;margin-bottom:5px">{name}</div>
+              <div style="font-size:24px;font-weight:700;font-family:Fraunces,serif;color:{bar_color};margin-bottom:6px">{score}</div>
+              <div style="height:4px;background:var(--border-default);border-radius:4px;overflow:hidden;margin-bottom:6px"><div style="height:100%;width:{bar_w}%;background:{bar_color}"></div></div>
+              <div style="font-size:11px;color:var(--text-tertiary)">{desc}</div>
+            </div>""", unsafe_allow_html=True)
+
     st.markdown("---")
-    with st.expander("💬 AI Copilot — Ask anything (always available)", expanded=False):
+
+    # Remediation priorities
+    st.markdown("**🔧 Top Remediation Priorities**")
+    priorities = [
+        ("🔴","P1","Patch CVE-2024-3400 on FW-EDGE-01","PAN-OS critical — exploited in wild. Emergency maintenance window.","3 days"),
+        ("🔴","P1","Complete MFA rollout for NIST CSF","18% of users lack MFA. NIST CSF Identity gap.","7 days"),
+        ("🟡","P2","Remove unused firewall rules (12)","PCI DSS 1.2.1 requires rule review quarterly.","14 days"),
+        ("🟡","P2","Enable logging on 8 firewall rules","Compliance requires all rules logged.","7 days"),
+        ("🟢","P3","Micro-segmentation — access layer","Zero Trust maturity gap. Implement 802.1X.","60 days"),
+    ]
+    for sev, pri, title, detail, deadline in priorities:
+        st.markdown(f"""<div style="background:var(--bg-surface);border:1px solid var(--border-default);border-radius:10px;padding:12px;margin-bottom:8px;display:flex;align-items:flex-start;gap:12px">
+          <div style="font-size:18px;flex-shrink:0">{sev}</div>
+          <div style="flex:1">
+            <div style="font-size:13px;font-weight:600;color:var(--text-primary);margin-bottom:2px">{title}</div>
+            <div style="font-size:12px;color:var(--text-secondary)">{detail}</div>
+          </div>
+          <div style="font-size:11px;font-family:JetBrains Mono,monospace;color:var(--text-tertiary);flex-shrink:0">Due: {deadline}</div>
+        </div>""", unsafe_allow_html=True)
+
+    col_c1, col_c2 = st.columns(2)
+    with col_c1:
+        if st.button("🧠 AI Gap Analysis", type="primary", use_container_width=True):
+            go("Full compliance gap analysis across CIS Benchmark, NIST CSF 2.0, PCI DSS 4.0, Zero Trust. Top 5 gaps with business risk, remediation steps, and implementation timeline.", "compliance")
+    with col_c2:
+        if st.button("📋 Generate Audit Report", use_container_width=True):
+            go("Generate a formal compliance audit report suitable for CISO and board presentation. Include all frameworks, scores, gaps, risks, and remediation roadmap.", "compliance")
+
+
+# ══════════════════════════════════════════════════════════
+# WORKSPACE: FINOPS
+# ══════════════════════════════════════════════════════════
+elif ws == "finops":
+    section_header("💰 FinOps & Cost Intelligence", "License optimization · Cloud cost · Hardware lifecycle · ROI tracking")
+
+    ai_insight_card(
+        "Cost Intelligence",
+        "<strong>$380K savings identified</strong> this quarter. Top opportunities: "
+        "<strong>18% unused Cisco licenses</strong> ($142K), "
+        "<strong>34 EoL devices</strong> nearing support expiry ($220K refresh avoided with timing), "
+        "<strong>SD-WAN replacing MPLS</strong> at 3 branches saves $45K/year.",
+        confidence=84,
+    )
+
+    metric_grid([
+        {"label":"Annual Network Spend","value":"$4.2M","meta":"Within approved budget","color":"blue","icon":"💰"},
+        {"label":"Identified Savings","value":"$380K","meta":"License + cloud rightsizing","color":"green","icon":"📉"},
+        {"label":"EoL Hardware","value":"34","meta":"Devices need replacement","color":"amber","icon":"⚠"},
+        {"label":"Wasted Licenses","value":"18%","meta":"Unused entitlements","color":"red","icon":"🔓"},
+    ])
+
+    col_f1, col_f2 = st.columns(2)
+    with col_f1:
+        st.markdown("**💡 Savings Opportunities**")
+        opps = [
+            ("Cisco Smart Licensing","$142K/yr","18% of DNA licenses unused. Rightsizing recommended.","green"),
+            ("MPLS → SD-WAN migration","$45K/yr","3 branches still on MPLS. SD-WAN at half the cost.","green"),
+            ("Cloud egress optimization","$28K/yr","Suboptimal routing increases AWS egress charges.","amber"),
+            ("Hardware EoL planning","$220K total","Early refresh of 12 critical devices saves premium support.","amber"),
+            ("Redundant WAN links","$18K/yr","2 backup circuits unused >99% of time.","red"),
+        ]
+        for item, savings, detail, color in opps:
+            bar_color = {"green":"var(--accent-green)","amber":"var(--accent-amber)","red":"var(--accent-red)"}[color]
+            st.markdown(f"""<div style="background:var(--bg-surface);border:1px solid var(--border-default);border-radius:10px;padding:12px;margin-bottom:8px">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px">
+                <div style="font-size:13px;font-weight:600;color:var(--text-primary)">{item}</div>
+                <div style="font-size:14px;font-weight:700;color:{bar_color};font-family:Fraunces,serif">{savings}</div>
+              </div>
+              <div style="font-size:12px;color:var(--text-secondary)">{detail}</div>
+            </div>""", unsafe_allow_html=True)
+
+    with col_f2:
+        st.markdown("**📊 Spend Breakdown**")
+        breakdown = [
+            ("Hardware CapEx","$1.8M","43%"),("Software Licenses","$920K","22%"),
+            ("MPLS/WAN Circuits","$680K","16%"),("Cloud Connectivity","$420K","10%"),
+            ("Maintenance & Support","$280K","7%"),("Professional Services","$100K","2%"),
+        ]
+        for item, amount, pct in breakdown:
+            st.markdown(f"""<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border-subtle)">
+              <span style="font-size:13px;color:var(--text-secondary)">{item}</span>
+              <div style="text-align:right">
+                <span style="font-size:13px;font-weight:700;color:var(--text-primary);margin-right:10px">{amount}</span>
+                <span style="font-size:11px;font-family:JetBrains Mono,monospace;color:var(--text-tertiary)">{pct}</span>
+              </div>
+            </div>""", unsafe_allow_html=True)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("**📈 Automation ROI**")
+        roi_data = [
+            ("Hours saved (automation)","4.2 hrs/week"),("Incidents auto-resolved","12 this month"),
+            ("MTTR reduction","↓ 40% vs last year"),("Estimated cost saving","$8,400/month"),
+        ]
+        for label, val in roi_data:
+            st.markdown(f'<div style="display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--border-subtle)"><span style="color:var(--text-secondary);font-size:12px">{label}</span><span style="color:var(--accent-green);font-weight:700;font-size:12px">{val}</span></div>', unsafe_allow_html=True)
+
+    st.markdown("---")
+    if st.button("🧠 AI Cost Optimization Analysis", type="primary"):
+        go("Analyze network cost structure and identify top 5 optimization opportunities: license consolidation, hardware refresh timing, WAN modernization, cloud cost reduction, automation ROI. Include 3-year TCO comparison.", "finops")
+
+
+# ══════════════════════════════════════════════════════════
+# FLOATING AI COPILOT (non-primary workspaces)
+# ══════════════════════════════════════════════════════════
+if ws not in ["troubleshoot", "learn", "design"]:
+    st.markdown("---")
+    with st.expander("💬 AI Copilot — Always available", expanded=False):
         if st.session_state.chat_msgs:
             for msg in st.session_state.chat_msgs[-4:]:
-                render_msg(msg["role"], msg["content"], msg.get("meta"))
+                render_chat_message(msg["role"], msg["content"], msg.get("meta"))
 
-        chat_cols = st.columns([0.82, 0.1, 0.08])
-        with chat_cols[0]:
-            chat_inp = st.text_input("", placeholder="Ask anything about your network…", label_visibility="collapsed", key="float_chat")
-        with chat_cols[1]:
-            if st.button("Send", use_container_width=True, type="primary", key="float_send") and chat_inp:
-                go_chat(chat_inp, ws)
-        with chat_cols[2]:
-            if st.button("🗑", use_container_width=True, key="float_clear"):
-                st.session_state.chat_msgs=[]; st.session_state.chat_hist=[]; st.rerun()
+        ci, cb, ccl = st.columns([0.80, 0.12, 0.08])
+        with ci:
+            fi = st.text_input("", placeholder="Ask anything about your network…",
+                               label_visibility="collapsed", key="float_inp")
+        with cb:
+            if st.button("Send", use_container_width=True, type="primary", key="float_send") and fi:
+                go(fi, ws)
+        with ccl:
+            if st.button("🗑", use_container_width=True, key="float_clr"):
+                st.session_state.chat_msgs = []; st.session_state.chat_hist = []; st.rerun()
