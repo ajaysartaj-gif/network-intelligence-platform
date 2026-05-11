@@ -1,7 +1,7 @@
 """Workspace registry used by the top navigation."""
 
 WORKSPACES = [
-    ('operations', '⚡', 'Operations'),
+    ('Net Ops', '⚡', 'Net Ops'),
     ('incident', '🚨', 'Incidents'),
     ('topology', '🗺', 'Topology'),
     ('observe', '📡', 'Observability'),
