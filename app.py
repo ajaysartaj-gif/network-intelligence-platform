@@ -1,9 +1,43 @@
  (cd "$(git rev-parse --show-toplevel)" && git apply --3way <<'EOF' 
 diff --git a/app.py b/app.py
-index 63f04e39cd9bc1d42534e252668d8fc282648737..785c648f7abbeabddc6b5dfc742cfb219ef86b9a 100644
+index 63f04e39cd9bc1d42534e252668d8fc282648737..28779cbc4299f76972ac66c9ea3eb8958a2a6b5a 100644
 --- a/app.py
 +++ b/app.py
-@@ -1670,104 +1670,67 @@ def build_synthesis_prompt(query: str, results: List[DeviceResult]) -> str:
+@@ -1,29 +1,33 @@
+ """
+ NetBrain AI — Autonomous Network Operating System
+ app.py — Main entry point (Streamlit)
+ 
++Operational note:
++  This file must contain Python source only. Do not paste git apply / shell
++  patch commands into app.py; apply patch snippets from a terminal instead.
++
+ Architecture:
+   app.py                    ← This file (entry, routing, state)
+   core/ai_engine.py         ← OpenRouter AI + personas
+   core/nlp_engine.py        ← NLP entity extraction + intent
+   core/rag_engine.py        ← RAG knowledge base (ChromaDB/keyword)
+   core/mdq_engine.py        ← Multi-device parallel query
+   database/models.py        ← SQLAlchemy ORM models
+   database/database.py      ← DB manager, encryption, seeding
+   security/rbac.py          ← Role-based access control
+   ui/components.py          ← Design system + component library
+ """
+ 
+ # ── MUST be first Streamlit call ──────────────────────────
+ import streamlit as st
+ st.set_page_config(
+     page_title="NetBrain AI",
+     page_icon="🧠",
+     layout="wide",
+     initial_sidebar_state="collapsed",
+     menu_items={"About": "NetBrain AI — Autonomous Network Operating System v2.0"},
+ )
+ 
+ # ── Stdlib + 3rd-party imports ────────────────────────────
+ import sys, os, logging, re, hashlib, time, threading, copy, random
+ from pathlib import Path
+@@ -1670,104 +1674,67 @@ def build_synthesis_prompt(query: str, results: List[DeviceResult]) -> str:
                     f"Status: {r.status}\n"
                     f"{r.output}")
          device_sections.append(section)
@@ -116,7 +150,7 @@ index 63f04e39cd9bc1d42534e252668d8fc282648737..785c648f7abbeabddc6b5dfc742cfb21
      messages: list,
      persona: str = "noc",
      max_tokens: int = 2000,
-@@ -3221,559 +3184,59 @@ def get_service_impact(device_id: str) -> List[KGNode]:
+@@ -3221,559 +3188,59 @@ def get_service_impact(device_id: str) -> List[KGNode]:
      """Find all services affected if a device fails."""
      affected = []
      for node in NODES:
@@ -685,7 +719,7 @@ index 63f04e39cd9bc1d42534e252668d8fc282648737..785c648f7abbeabddc6b5dfc742cfb21
      "mdq_results":   None,
      "nlp_results":   None,
      "rag_results":   [],
-@@ -3892,78 +3355,62 @@ def render_topbar():
+@@ -3892,78 +3359,62 @@ def render_topbar():
      st.markdown(f"""
      <div class="nb-topbar">
        <div class="nb-logo">
