@@ -26,6 +26,7 @@ import time
 import random
 import logging
 from typing import List, Dict
+from database.seed import *
 
 import pandas as pd
 
@@ -33,7 +34,7 @@ import pandas as pd
 # From
 # ====
 
-from database.seed import *
+ 
 
 # =========================================================
 # SAFE OPTIONAL IMPORTS
