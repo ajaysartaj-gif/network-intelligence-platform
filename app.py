@@ -341,6 +341,3 @@ for incident in sample_incidents:
 st.divider()
 
 st.caption("NetBrain AI v2.0")
-```
-
----
