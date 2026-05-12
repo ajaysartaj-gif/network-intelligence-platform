@@ -1,10 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
-<<<<<<< HEAD
 from typing import Dict, List, Optional
-=======
-from typing import Dict, List
->>>>>>> 5cb6d67eba2e3f48a4a6ba132b7fab89cc51e00a
 
 
 @dataclass

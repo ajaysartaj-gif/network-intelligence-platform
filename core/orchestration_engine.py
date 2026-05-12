@@ -35,6 +35,7 @@ class OperationsOrchestrator:
         self.self_heal = SelfHealingEngine()
         self.query_history: List[QueryRecord] = []
         self._seed_default_documents()
+        self._seed_knowledge_graph()
 
     def _seed_default_documents(self) -> None:
         self.rag.seed_documents([
@@ -60,6 +61,27 @@ class OperationsOrchestrator:
                 "content": "Track memory growth over time, identify leaked kernel buffers, and validate process memory allocations.",
             },
         ])
+
+    def _seed_knowledge_graph(self) -> None:
+        # Seed basic network topology relationships
+        devices = ["DEL-CORE-01", "MUM-EDGE-01", "BLR-FW-01", "HYD-LEAF-02"]
+        services = ["Internet", "Intranet", "Database", "Web"]
+        
+        for device in devices:
+            self.kg.add_node(device, "Device", {"type": "network_device", "vendor": "Cisco"})
+        
+        for service in services:
+            self.kg.add_node(service, "Service", {"type": "business_service"})
+        
+        # Add dependencies
+        self.kg.add_relationship("DEL-CORE-01", "MUM-EDGE-01", "connects_to", 1.0, {"link_type": "MPLS"})
+        self.kg.add_relationship("MUM-EDGE-01", "BLR-FW-01", "connects_to", 1.0, {"link_type": "Internet"})
+        self.kg.add_relationship("BLR-FW-01", "HYD-LEAF-02", "connects_to", 1.0, {"link_type": "LAN"})
+        
+        self.kg.add_relationship("DEL-CORE-01", "Internet", "provides_access", 0.8)
+        self.kg.add_relationship("MUM-EDGE-01", "Intranet", "provides_access", 0.9)
+        self.kg.add_relationship("BLR-FW-01", "Database", "secures", 1.0)
+        self.kg.add_relationship("HYD-LEAF-02", "Web", "hosts", 0.7)
 
     def record_query(self, query: str, response: str, source: str = "user") -> None:
         self.query_history.append(QueryRecord(query=query, response=response, source=source))
