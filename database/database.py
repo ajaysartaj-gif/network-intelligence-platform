@@ -8,7 +8,10 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from database.models import (
     Base,
+<<<<<<< HEAD
     AIQuery,
+=======
+>>>>>>> 5cb6d67eba2e3f48a4a6ba132b7fab89cc51e00a
     ChangeRequest,
     ComplianceRule,
     Device,
@@ -45,6 +48,10 @@ def create_db() -> None:
 def seed_database() -> bool:
     create_db()
     from database.seed import seed_database as run_seed
+<<<<<<< HEAD
+=======
+
+>>>>>>> 5cb6d67eba2e3f48a4a6ba132b7fab89cc51e00a
     return run_seed()
 
 
@@ -159,6 +166,7 @@ def write_audit(*args, **kwargs) -> bool:
     return True
 
 
+<<<<<<< HEAD
 def log_ai_query(query: str, response: str, source: str = "user") -> AIQuery:
     with get_session() as session:
         record = AIQuery(query=query, response=response, source=source)
@@ -183,5 +191,7 @@ def get_ai_history(limit: int = 20) -> List[Dict[str, object]]:
         ]
 
 
+=======
+>>>>>>> 5cb6d67eba2e3f48a4a6ba132b7fab89cc51e00a
 def get_audit_logs(limit: int = 100) -> List[Dict[str, object]]:
     return []

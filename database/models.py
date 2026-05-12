@@ -67,6 +67,7 @@ class ComplianceRule(Base):
     last_validated = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+<<<<<<< HEAD
 class AIQuery(Base):
     __tablename__ = "ai_queries"
 
@@ -77,6 +78,8 @@ class AIQuery(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+=======
+>>>>>>> 5cb6d67eba2e3f48a4a6ba132b7fab89cc51e00a
 class NetworkLink(Base):
     __tablename__ = "network_links"
 

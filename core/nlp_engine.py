@@ -1,5 +1,9 @@
 import re
+<<<<<<< HEAD
 from typing import Dict, List
+=======
+from typing import Dict, List, Tuple
+>>>>>>> 5cb6d67eba2e3f48a4a6ba132b7fab89cc51e00a
 
 VENDORS = [
     "cisco",
