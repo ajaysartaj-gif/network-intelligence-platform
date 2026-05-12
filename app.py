@@ -22,6 +22,7 @@ st.set_page_config(
 
 import os
 from core.ai_engine import ask_ai, get_api_key
+from core.orchestration_engine import OperationsOrchestrator
 import time
 import random
 import logging
@@ -110,6 +111,8 @@ if DATABASE_AVAILABLE:
         seed_database()
     except Exception as e:
         logger.warning(f"Database seed failed: {e}")
+
+orchestrator = OperationsOrchestrator()
 
 # =========================================================
 # AI CONFIG
@@ -281,8 +284,6 @@ with col4:
 # AI SEARCH
 # =========================================================
 
-from core.ai_engine import ask_ai
-
 st.divider()
 
 query = st.text_input(
@@ -292,10 +293,28 @@ query = st.text_input(
 
 if query:
 
+    topology_data = orchestrator.get_sample_topology()
+    device_states = get_devices() if DATABASE_AVAILABLE else orchestrator.get_sample_devices()
+    incidents_data = get_incidents() if DATABASE_AVAILABLE else []
+
     with st.spinner("Analyzing telemetry and topology..."):
         time.sleep(2)
         ai_response = ask_ai(query)
+        orchestrator_result = orchestrator.ai_troubleshoot(
+            query,
+            device_states,
+            topology_data["interfaces"],
+            topology_data["bgp_peers"],
+            incidents_data,
+            topology_data["links"],
+        )
 
+    st.markdown("## AI Diagnostics")
+    st.write(orchestrator_result.get("root_cause"))
+    st.write("### Key Entities")
+    st.write(orchestrator_result.get("entities"))
+    st.write("### Executive Summary")
+    st.write(orchestrator_result.get("executive_summary"))
     st.markdown("## AI Analysis")
     st.write(ai_response)
 # =========================================================

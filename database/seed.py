@@ -1,169 +1,203 @@
-from database.database import SessionLocal, engine
-from database.models import *
+import random
+from datetime import datetime, timedelta
+from typing import List
 
-Base.metadata.create_all(bind=engine)
+from database.database import create_db, get_session
+from database.models import ChangeRequest, ComplianceRule, Device, Incident, NetworkLink, Telemetry
 
-db = SessionLocal()
 
-# =========================================================
-# DEVICES
-# =========================================================
+def _device_samples() -> List[dict]:
+    return [
+        {
+            "hostname": "DEL-CORE-01",
+            "ip_address": "10.1.0.1",
+            "vendor": "Cisco",
+            "model": "IOS-XR",
+            "role": "Core Router",
+            "site": "DEL",
+            "os_version": "7.5.3",
+            "status": "healthy",
+        },
+        {
+            "hostname": "MUM-EDGE-01",
+            "ip_address": "10.1.1.1",
+            "vendor": "Juniper",
+            "model": "MX480",
+            "role": "Edge Router",
+            "site": "MUM",
+            "os_version": "20.4R3",
+            "status": "warning",
+        },
+        {
+            "hostname": "BLR-FW-01",
+            "ip_address": "10.1.2.1",
+            "vendor": "Fortinet",
+            "model": "FortiGate-600C",
+            "role": "Firewall",
+            "site": "BLR",
+            "os_version": "7.2.0",
+            "status": "critical",
+        },
+        {
+            "hostname": "HYD-LEAF-02",
+            "ip_address": "10.1.3.2",
+            "vendor": "Arista",
+            "model": "7280R",
+            "role": "Leaf Switch",
+            "site": "HYD",
+            "os_version": "4.29.2F",
+            "status": "healthy",
+        },
+    ]
 
-devices = [
 
-    Device(
-        hostname="DEL-CORE-01",
-        ip_address="10.1.1.1",
-        vendor="Cisco",
-        model="ASR1001-X",
-        role="Core Router",
-        site="Delhi DC",
-        os_version="IOS-XE 17.9",
-        status="online",
-        latitude=28.6139,
-        longitude=77.2090,
-    ),
+def _incident_samples() -> List[dict]:
+    return [
+        {
+            "title": "BGP neighbor flapping on MUM-EDGE-01",
+            "severity": "high",
+            "status": "investigating",
+            "assigned_to": "noc-team",
+            "affected_service": "WAN Transit",
+            "description": "BGP session to upstream provider is unstable and causing route withdraws.",
+        },
+        {
+            "title": "Firewall policy mismatch on BLR-FW-01",
+            "severity": "critical",
+            "status": "mitigating",
+            "assigned_to": "security-team",
+            "affected_service": "Internet Egress",
+            "description": "Duplicate policy entries detected with conflicting source NAT behavior.",
+        },
+    ]
 
-    Device(
-        hostname="MUM-CORE-01",
-        ip_address="10.2.1.1",
-        vendor="Juniper",
-        model="MX480",
-        role="Core Router",
-        site="Mumbai DC",
-        os_version="Junos 22.1",
-        status="online",
-        latitude=19.0760,
-        longitude=72.8777,
-    ),
 
-    Device(
-        hostname="BLR-FW-01",
-        ip_address="10.3.1.1",
-        vendor="Palo Alto",
-        model="PA-5220",
-        role="Firewall",
-        site="Bangalore DC",
-        os_version="PAN-OS 11",
-        status="degraded",
-        latitude=12.9716,
-        longitude=77.5946,
-    ),
-]
+def _telemetry_samples(device_ids: List[int]) -> List[dict]:
+    samples: List[dict] = []
+    base_time = datetime.utcnow()
+    for device_id in device_ids:
+        samples.extend(
+            [
+                {
+                    "device_id": device_id,
+                    "timestamp": base_time - timedelta(minutes=idx * 5),
+                    "metric_name": "cpu",
+                    "value": random.uniform(28.0, 92.0),
+                    "unit": "%",
+                    "tags": "performance",
+                }
+                for idx in range(3)
+            ]
+        )
+        samples.extend(
+            [
+                {
+                    "device_id": device_id,
+                    "timestamp": base_time - timedelta(minutes=idx * 5),
+                    "metric_name": "memory",
+                    "value": random.uniform(34.0, 88.0),
+                    "unit": "%",
+                    "tags": "performance",
+                }
+                for idx in range(3)
+            ]
+        )
+    return samples
 
-db.add_all(devices)
 
-# =========================================================
-# BGP PEERS
-# =========================================================
+def _compliance_rules() -> List[dict]:
+    return [
+        {
+            "name": "password-encryption",
+            "description": "Ensure password encryption is enabled for management access.",
+            "vendor": None,
+            "severity": "high",
+            "enabled": True,
+        },
+        {
+            "name": "ssh-only-management",
+            "description": "Management plane must use SSH only.",
+            "vendor": None,
+            "severity": "medium",
+            "enabled": True,
+        },
+        {
+            "name": "ntp-servers",
+            "description": "Devices must have at least one NTP server configured.",
+            "vendor": None,
+            "severity": "low",
+            "enabled": True,
+        },
+    ]
 
-bgp = [
 
-    BGPPeer(
-        local_device="DEL-CORE-01",
-        peer_ip="192.168.100.1",
-        peer_asn="65002",
-        state="Established",
-        prefixes_received=850000,
-        flaps=0,
-    ),
+def _network_links() -> List[dict]:
+    return [
+        {
+            "source_device": "DEL-CORE-01",
+            "destination_device": "MUM-EDGE-01",
+            "link_type": "mpls",
+            "status": "up",
+            "bandwidth_mbps": 1000.0,
+        },
+        {
+            "source_device": "DEL-CORE-01",
+            "destination_device": "HYD-LEAF-02",
+            "link_type": "evpn",
+            "status": "up",
+            "bandwidth_mbps": 1000.0,
+        },
+        {
+            "source_device": "BLR-FW-01",
+            "destination_device": "MUM-EDGE-01",
+            "link_type": "internet",
+            "status": "warning",
+            "bandwidth_mbps": 500.0,
+        },
+    ]
 
-    BGPPeer(
-        local_device="MUM-CORE-01",
-        peer_ip="192.168.200.1",
-        peer_asn="65003",
-        state="Idle",
-        prefixes_received=0,
-        flaps=17,
-    ),
-]
 
-db.add_all(bgp)
+def seed_database() -> bool:
+    create_db()
+    with get_session() as session:
+        if session.query(Device).count() > 0:
+            return True
 
-# =========================================================
-# INCIDENTS
-# =========================================================
+        devices = [Device(**entry) for entry in _device_samples()]
+        session.add_all(devices)
+        session.flush()
 
-incidents = [
+        device_ids = [device.id for device in devices]
+        telemetries = [Telemetry(**entry) for entry in _telemetry_samples(device_ids)]
+        session.add_all(telemetries)
 
-    Incident(
-        title="BGP Flapping Mumbai WAN",
-        severity="critical",
-        status="active",
-        assigned_to="Ajay",
-        affected_service="MPLS WAN",
-        description="Repeated BGP resets observed on WAN edge router.",
-    ),
+        incidents = [Incident(**entry) for entry in _incident_samples()]
+        session.add_all(incidents)
 
-    Incident(
-        title="High CPU Firewall",
-        severity="major",
-        status="investigating",
-        assigned_to="NOC Team",
-        affected_service="Internet Edge",
-        description="Firewall CPU utilization above 90%.",
-    ),
-]
+        rules = [ComplianceRule(**entry) for entry in _compliance_rules()]
+        session.add_all(rules)
 
-db.add_all(incidents)
+        changes = [
+            ChangeRequest(
+                title="Upgrade MUM-EDGE-01 routing policy",
+                status="planning",
+                risk="medium",
+                implementation_date=(datetime.utcnow() + timedelta(days=2)).isoformat(),
+                engineer="netops",
+            ),
+            ChangeRequest(
+                title="BLR-FW-01 HA failover test",
+                status="scheduled",
+                risk="low",
+                implementation_date=(datetime.utcnow() + timedelta(days=5)).isoformat(),
+                engineer="security",
+            ),
+        ]
+        session.add_all(changes)
 
-# =========================================================
-# ALERTS
-# =========================================================
+        links = [NetworkLink(**entry) for entry in _network_links()]
+        session.add_all(links)
 
-alerts = [
+        session.commit()
 
-    Alert(
-        device="MUM-CORE-01",
-        alert_type="BGP",
-        severity="critical",
-        message="BGP peer down",
-    ),
-
-    Alert(
-        device="BLR-FW-01",
-        alert_type="CPU",
-        severity="major",
-        message="CPU exceeded 95%",
-    ),
-]
-
-db.add_all(alerts)
-
-# =========================================================
-# KNOWLEDGE BASE
-# =========================================================
-
-docs = [
-
-    KnowledgeDocument(
-        title="BGP Troubleshooting Guide",
-        vendor="Cisco",
-        protocol="BGP",
-        content=\"\"\"
-Check BGP neighbor state.
-Verify reachability.
-Validate ASN configuration.
-Inspect route advertisements.
-Check flap counters.
-\"\"\",
-    ),
-
-    KnowledgeDocument(
-        title="Firewall High CPU RCA",
-        vendor="Palo Alto",
-        protocol="Security",
-        content=\"\"\"
-Inspect session table.
-Review threat logs.
-Check SSL decryption load.
-Validate policy hit count.
-\"\"\",
-    ),
-]
-
-db.add_all(docs)
-
-db.commit()
-
-print(\"Database seeded successfully\")
+    return True
