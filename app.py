@@ -257,16 +257,35 @@ if workspace == "operations":
     # Operations Dashboard
     st.header("🚀 Operations Center")
     
+    # Run simulation cycle button
+    if st.button("🔄 Run Autonomous Cycle", type="primary"):
+        with st.spinner("Running simulation cycle..."):
+            cycle_result = orchestrator.run_cycle()
+            if cycle_result["status"] == "success":
+                st.success(f"Cycle {cycle_result['cycle']} completed in {cycle_result['duration_seconds']:.2f}s")
+                st.info(f"Anomalies: {cycle_result['anomalies_detected']}, Incidents: {cycle_result['incidents_created']}")
+            else:
+                st.error(f"Cycle failed: {cycle_result.get('error', 'Unknown error')}")
+        st.rerun()
+    
+    # Get live operational status
+    status = orchestrator.get_operational_status()
+    topology = orchestrator.simulator.get_topology_summary()
+    
     # Key metrics
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("Active Devices", "248", "12")
+        active_devices = topology.get("total_devices", 0)
+        st.metric("Active Devices", active_devices)
     with col2:
-        st.metric("Critical Incidents", "3", "-1")
+        critical_incidents = status["incidents"]["by_status"].get("new", 0) + status["incidents"]["by_status"].get("investigating", 0)
+        st.metric("Critical Incidents", critical_incidents)
     with col3:
-        st.metric("Automation Rate", "87%", "+2%")
+        automation_rate = "87%"  # Placeholder, could calculate from events
+        st.metric("Automation Rate", automation_rate)
     with col4:
-        st.metric("MTTR", "45min", "-5min")
+        mttr = "45min"  # Placeholder
+        st.metric("MTTR", mttr)
 
     # AI Search
     st.subheader("🤖 AI Diagnostics")
@@ -348,52 +367,67 @@ if workspace == "operations":
 elif workspace == "incident":
     st.header("🚨 Incident Management")
     
+    # Get live incident data
+    status = orchestrator.get_operational_status()
+    incidents_data = status["incidents"]
+    
     # Incident metrics
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("Open Incidents", "12", "2")
+        open_incidents = incidents_data["by_status"].get("new", 0) + incidents_data["by_status"].get("investigating", 0)
+        st.metric("Open Incidents", open_incidents)
     with col2:
-        st.metric("Critical", "3", "0")
+        critical_count = sum(1 for inc in orchestrator.state.get_all_incidents().values() if inc.get("severity") == "critical")
+        st.metric("Critical", critical_count)
     with col3:
-        st.metric("Resolved Today", "8", "+3")
+        resolved_today = incidents_data["by_status"].get("resolved", 0)  # Placeholder, could track daily
+        st.metric("Resolved Today", resolved_today)
     
     # Active incidents
     st.subheader("Active Incidents")
-    incidents = [
-        {"id": "INC-001", "title": "BGP flap detected in Mumbai", "severity": "high", "status": "investigating"},
-        {"id": "INC-002", "title": "Firewall CPU high in Bangalore", "severity": "critical", "status": "mitigating"},
-        {"id": "INC-003", "title": "WAN latency spike in Delhi", "severity": "medium", "status": "new"},
-    ]
+    all_incidents = orchestrator.state.get_all_incidents()
     
-    for inc in incidents:
-        severity_color = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(inc["severity"], "⚪")
-        st.error(f"{severity_color} **{inc['id']}**: {inc['title']} - {inc['status']}")
+    if all_incidents:
+        for inc_id, inc in all_incidents.items():
+            if inc["status"] in ["new", "investigating"]:
+                severity_color = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(inc["severity"], "⚪")
+                st.error(f"{severity_color} **{inc_id}**: {inc['title']} - {inc['status']}")
+    else:
+        st.info("No active incidents")
 
 elif workspace == "topology":
     st.header("🗺 Network Topology")
     
+    # Get live topology data
+    topology = orchestrator.simulator.get_topology_summary()
+    
     # Topology metrics
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("Nodes", "156")
+        st.metric("Nodes", topology.get("total_devices", 0))
     with col2:
-        st.metric("Links", "234")
+        st.metric("Links", topology.get("total_links", 0))
     with col3:
-        st.metric("Sites", "12")
+        st.metric("Sites", len(topology.get("sites", {})))
     with col4:
-        st.metric("Regions", "3")
+        healthy = topology.get("healthy_devices", 0)
+        total = topology.get("total_devices", 1)
+        health_pct = int((healthy / total) * 100) if total > 0 else 0
+        st.metric("Health", f"{health_pct}%")
     
     st.subheader("Topology Visualization")
     st.info("Interactive topology map would be displayed here")
     
-    # Sample topology data
+    # Live topology data
     st.subheader("Network Links")
     links_data = [
-        {"source": "DEL-CORE-01", "target": "MUM-EDGE-01", "type": "MPLS", "status": "up"},
-        {"source": "MUM-EDGE-01", "target": "BLR-FW-01", "type": "Internet", "status": "up"},
-        {"source": "BLR-FW-01", "target": "HYD-LEAF-02", "type": "LAN", "status": "warning"},
+        {"source": link.source, "target": link.destination, "type": link.link_type, "status": link.status}
+        for link in orchestrator.simulator.links[:10]  # Show first 10 links
     ]
-    st.dataframe(pd.DataFrame(links_data))
+    if links_data:
+        st.dataframe(pd.DataFrame(links_data))
+    else:
+        st.info("No links available")
 
 elif workspace == "security":
     st.header("🔒 Security Operations")

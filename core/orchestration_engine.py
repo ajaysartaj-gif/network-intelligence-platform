@@ -1,7 +1,8 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
+import logging
 
 from core.compliance_engine import ComplianceEngine
 from core.digital_twin_engine import DigitalTwinEngine, DeviceState, TopologyLink
@@ -11,6 +12,12 @@ from core.nlp_engine import NLPEngine
 from core.observability_engine import ObservabilityEngine
 from core.rag_engine import KnowledgeDocument, RAGEngine
 from core.self_healing_engine import RemediationAction, SelfHealingEngine
+from core.state_manager import StateManager
+from core.simulation_engine import SimulationEngine
+from core.telemetry_engine import TelemetryEngine
+from core.event_engine import EventEngine
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -22,9 +29,15 @@ class QueryRecord:
 
 
 class OperationsOrchestrator:
-    """Orchestrates network operations engines for diagnostics, impact analysis, and AI workflows."""
+    """
+    Orchestrates network operations engines for diagnostics, impact analysis, and AI workflows.
+    Integrates both legacy analysis engines and new event-driven autonomous engines.
+    """
 
     def __init__(self, documents: Optional[List[Dict[str, str]]] = None) -> None:
+        logger.info("Initializing OperationsOrchestrator with all engines...")
+        
+        # Legacy analysis engines
         self.nlp = NLPEngine()
         self.rag = RAGEngine(documents or [])
         self.obs = ObservabilityEngine()
@@ -33,9 +46,25 @@ class OperationsOrchestrator:
         self.comp = ComplianceEngine()
         self.kg = KnowledgeGraph()
         self.self_heal = SelfHealingEngine()
+        
+        # New event-driven autonomous engines
+        self.state = StateManager()
+        self.simulator = SimulationEngine()
+        self.telemetry = TelemetryEngine(self.simulator, self.state)
+        self.events = EventEngine(self.state, self.telemetry)
+        
+        # Tracking
         self.query_history: List[QueryRecord] = []
+        self.run_count = 0
+        self.last_update = datetime.utcnow().isoformat()
+        
+        # Initialize all systems
         self._seed_default_documents()
         self._seed_knowledge_graph()
+        self._initialize_service_topology()
+        self.events.register_standard_handlers()
+        
+        logger.info("OperationsOrchestrator initialized successfully")
 
     def _seed_default_documents(self) -> None:
         self.rag.seed_documents([
@@ -82,6 +111,24 @@ class OperationsOrchestrator:
         self.kg.add_relationship("MUM-EDGE-01", "Intranet", "provides_access", 0.9)
         self.kg.add_relationship("BLR-FW-01", "Database", "secures", 1.0)
         self.kg.add_relationship("HYD-LEAF-02", "Web", "hosts", 0.7)
+
+    def _initialize_service_topology(self) -> None:
+        """Initialize enterprise service dependency topology."""
+        services = {
+            "Email Service": ["dc1-delhi", "dc1-mumbai"],
+            "Finance Portal": ["dc1-delhi", "sw1-delhi", "fw-delhi"],
+            "Customer Portal": ["dc2-delhi", "dc1-mumbai"],
+            "Data Warehouse": ["dc1-delhi", "dc2-delhi"],
+            "VoIP Service": ["rtr-delhi", "fw-delhi"],
+            "Remote Access VPN": ["wan-delhi", "fw-delhi"],
+            "Backup Service": ["dc2-delhi", "sw2-delhi"],
+            "NTP/DNS": ["dc1-delhi", "rtr-delhi"],
+        }
+
+        for service, devices in services.items():
+            self.state.register_service_dependency(service, devices)
+
+        logger.info(f"Initialized {len(services)} service dependencies")
 
     def record_query(self, query: str, response: str, source: str = "user") -> None:
         self.query_history.append(QueryRecord(query=query, response=response, source=source))
@@ -265,6 +312,209 @@ class OperationsOrchestrator:
 
     def simulate_change_impact(self, hostname: str, action: str) -> Dict[str, object]:
         return self.twin.simulate_change(hostname, action)
+
+    # ═══════════════════════════════════════════════════════════════
+    # AUTONOMOUS ORCHESTRATION CYCLE
+    # ═══════════════════════════════════════════════════════════════
+
+    def run_cycle(self) -> Dict[str, Any]:
+        """
+        Execute one operational orchestration cycle.
+        This is the main event loop that drives autonomous workflows.
+        """
+        self.run_count += 1
+        cycle_start = datetime.utcnow()
+
+        try:
+            # 1. SIMULATION STEP
+            simulation_changes = self.simulator.step()
+
+            # 2. COLLECT TELEMETRY
+            telemetry = self.telemetry.collect_all_telemetry()
+
+            # 3. DETECT ANOMALIES
+            anomalies = self.telemetry.detect_anomalies()
+            
+            # 4. PROCESS ANOMALIES → EVENTS → INCIDENTS
+            incident_ids = self.events.process_anomalies(anomalies)
+
+            # 5. PROCESS PENDING EVENTS
+            while True:
+                event = self.state.dequeue_event()
+                if not event:
+                    break
+                self.events.emit_event(event)
+
+            # 6. UPDATE SERVICE IMPACT
+            critical_devices = self.state.get_critical_devices()
+            impact = self.state.calculate_service_impact(critical_devices)
+
+            # 7. CALCULATE HEALTH METRICS
+            health_metrics = self.telemetry.get_health_metrics()
+            operational_summary = self.state.get_operational_summary()
+
+            # 8. UPDATE TOPOLOGY STATE
+            topology_state = {
+                "devices": self.simulator.get_topology_summary(),
+                "links": len(self.simulator.links),
+                "critical_devices": critical_devices,
+            }
+            self.state.update_topology(topology_state)
+
+            # 9. UPDATE DIGITAL TWIN
+            for hostname, device in self.simulator.devices.items():
+                dt_device = DeviceState(
+                    hostname=hostname,
+                    vendor=device.vendor,
+                    model=device.model,
+                    os_version=device.os_version,
+                    status=device.status,
+                    cpu=device.cpu,
+                    memory=device.memory,
+                    interfaces=device.interfaces,
+                )
+                self.twin.add_device(dt_device)
+
+            cycle_duration = (datetime.utcnow() - cycle_start).total_seconds()
+            self.last_update = datetime.utcnow().isoformat()
+
+            return {
+                "status": "success",
+                "cycle": self.run_count,
+                "duration_seconds": cycle_duration,
+                "timestamp": self.last_update,
+                "anomalies_detected": len(anomalies),
+                "incidents_created": len(incident_ids),
+                "critical_devices": len(critical_devices),
+                "operational_summary": operational_summary,
+            }
+
+        except Exception as e:
+            logger.error(f"Error in orchestration cycle: {e}", exc_info=True)
+            return {
+                "status": "error",
+                "cycle": self.run_count,
+                "error": str(e),
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+
+    def get_operational_status(self) -> Dict[str, Any]:
+        """Get current operational status."""
+        return {
+            "timestamp": self.last_update,
+            "cycle": self.run_count,
+            "operational_summary": self.state.get_operational_summary(),
+            "critical_devices": self.state.get_critical_devices(),
+            "incidents": {
+                "total": len(self.state.incidents),
+                "by_status": {
+                    status: len(self.state.get_incidents_by_status(status))
+                    for status in ["new", "investigating", "resolved", "closed"]
+                },
+            },
+            "topology": self.state.get_topology(),
+        }
+
+    def get_ai_context(self, query: str = "") -> Dict[str, Any]:
+        """
+        Get context for AI engines (for RCA, recommendations, etc.)
+        This provides comprehensive operational state to AI engines.
+        """
+        current_incidents = self.state.get_incidents_by_status("new")
+        critical_devices = self.state.get_critical_devices()
+
+        context = {
+            "query": query,
+            "timestamp": datetime.utcnow().isoformat(),
+            "operational_state": {
+                "overall_health_score": self.state.global_operational_score,
+                "critical_devices": critical_devices,
+                "total_incidents": len(self.state.incidents),
+                "open_incidents": len(current_incidents),
+            },
+            "recent_events": self.events.get_event_history(limit=20),
+            "critical_incidents": [
+                {
+                    "id": inc["id"],
+                    "title": inc["title"],
+                    "severity": inc["severity"],
+                    "affected_devices": inc.get("affected_devices", []),
+                }
+                for inc in current_incidents[:5]
+            ],
+            "telemetry": {
+                device: {
+                    "cpu": metrics.cpu,
+                    "memory": metrics.memory,
+                    "latency_ms": metrics.latency_ms,
+                }
+                for device, metrics in self.state.get_all_device_metrics().items()
+            },
+            "recent_anomalies": self.telemetry.detect_anomalies()[:10],
+        }
+
+        return context
+
+    def export_orchestration_state(self) -> Dict[str, Any]:
+        """Export complete orchestrator state."""
+        return {
+            "timestamp": self.last_update,
+            "cycle": self.run_count,
+            "state": self.state.export_state(),
+            "telemetry": self.telemetry.export_telemetry_state(),
+            "events": self.events.export_event_state(),
+        }
+
+    def get_topology(self) -> Dict[str, Any]:
+        """Get network topology."""
+        return {
+            "devices": [
+                {
+                    "hostname": d.hostname,
+                    "vendor": d.vendor,
+                    "model": d.model,
+                    "type": d.device_type,
+                    "site": d.site,
+                    "role": d.role,
+                    "status": d.status,
+                    "cpu": d.cpu,
+                    "memory": d.memory,
+                }
+                for d in self.simulator.devices.values()
+            ],
+            "links": [
+                {
+                    "source": l.source,
+                    "destination": l.destination,
+                    "type": l.link_type,
+                    "status": l.status,
+                    "bandwidth_mbps": l.bandwidth_mbps,
+                }
+                for l in self.simulator.links
+            ],
+            "summary": self.simulator.get_topology_summary(),
+        }
+
+    def health_check(self) -> Dict[str, Any]:
+        """Perform health check on orchestrator."""
+        checks = {
+            "state_manager": "ok" if self.state else "error",
+            "simulator": "ok" if self.simulator and self.simulator.devices else "error",
+            "telemetry": "ok" if self.telemetry else "error",
+            "event_engine": "ok" if self.events else "error",
+        }
+
+        all_ok = all(v == "ok" for v in checks.values())
+
+        return {
+            "status": "healthy" if all_ok else "degraded",
+            "timestamp": datetime.utcnow().isoformat(),
+            "components": checks,
+            "run_count": self.run_count,
+            "devices": len(self.simulator.devices),
+            "incidents": len(self.state.incidents),
+        }
+
 
     def get_sample_devices(self) -> List[Dict[str, object]]:
         return [
