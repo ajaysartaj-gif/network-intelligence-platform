@@ -1,5 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
+import time
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 import logging
@@ -57,6 +58,8 @@ class OperationsOrchestrator:
         self.query_history: List[QueryRecord] = []
         self.run_count = 0
         self.last_update = datetime.utcnow().isoformat()
+        self.current_demo: Optional[str] = None
+        self.demo_scenarios = self._load_demo_scenarios()
         
         # Initialize all systems
         self._seed_default_documents()
@@ -65,6 +68,302 @@ class OperationsOrchestrator:
         self.events.register_standard_handlers()
         
         logger.info("OperationsOrchestrator initialized successfully")
+
+    def _load_demo_scenarios(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "id": "bgp_flapping",
+                "label": "BGP Flapping",
+                "description": "Simulate Delhi data center BGP instability with packet loss and service blast radius.",
+                "workflow_steps": [
+                    "BGP session instability",
+                    "Packet loss escalation",
+                    "WAN latency spike",
+                    "Incident creation",
+                    "AI RCA generation",
+                ],
+            },
+            {
+                "id": "wan_outage",
+                "label": "WAN Outage",
+                "description": "Simulate a Delhi WAN degradation affecting regional services and connectivity.",
+                "workflow_steps": [
+                    "WAN link degradation",
+                    "Regional service impact",
+                    "Incident creation",
+                    "Executive alert",
+                ],
+            },
+            {
+                "id": "high_cpu_storm",
+                "label": "High CPU Storm",
+                "description": "Simulate a CPU and memory storm across Delhi infrastructure with auto-escalation.",
+                "workflow_steps": [
+                    "CPU spike",
+                    "Memory pressure",
+                    "Application degradation",
+                    "Incident escalation",
+                ],
+            },
+            {
+                "id": "packet_loss_cascade",
+                "label": "Packet Loss Cascade",
+                "description": "Simulate packet drops that trigger interface degradation and BGP impact.",
+                "workflow_steps": [
+                    "Interface packet loss",
+                    "BGP instability",
+                    "Incident creation",
+                    "Remediation recommendation",
+                ],
+            },
+            {
+                "id": "compliance_drift",
+                "label": "Compliance Failure",
+                "description": "Simulate a compliance drift event that raises a security and operational alert.",
+                "workflow_steps": [
+                    "Compliance drift",
+                    "Config risk detected",
+                    "Incident created",
+                    "AI recommendation",
+                ],
+            },
+            {
+                "id": "service_dependency_failure",
+                "label": "Service Dependency Failure",
+                "description": "Simulate service blast radius from a critical Delhi device failure.",
+                "workflow_steps": [
+                    "Service dependency degradation",
+                    "Service impact calculated",
+                    "Incident created",
+                    "Executive summary generated",
+                ],
+            },
+        ]
+
+    def get_demo_scenarios(self) -> List[Dict[str, Any]]:
+        return self.demo_scenarios.copy()
+
+    def launch_demo_scenario(self, scenario_id: str) -> Dict[str, Any]:
+        scenario = next((s for s in self.demo_scenarios if s["id"] == scenario_id), None)
+        if not scenario:
+            return {"status": "error", "message": f"Scenario '{scenario_id}' not found"}
+
+        self.current_demo = scenario_id
+        workflow_id = f"demo-{scenario_id}-{int(time.time())}"
+        self.state.start_workflow(
+            workflow_id=workflow_id,
+            name=scenario["label"],
+            triggered_by="demo_mode",
+            total_steps=len(scenario["workflow_steps"]),
+        )
+
+        self.events.emit_event({
+            "type": "demo_started",
+            "severity": "info",
+            "source": "demo_mode",
+            "description": scenario["description"],
+            "data": {"scenario_id": scenario_id},
+        })
+
+        self._inject_demo_scenario(scenario_id)
+
+        cycle_results: List[Dict[str, Any]] = []
+        for step_index in range(3):
+            result = self.run_cycle()
+            self.state.update_workflow(
+                workflow_id,
+                step_completed=True,
+                data={"step": step_index + 1, "cycle_result": result},
+            )
+            cycle_results.append(result)
+
+        self.state.update_workflow(workflow_id, status="completed", data={"completed_at": datetime.utcnow().isoformat()})
+
+        return {
+            "status": "success",
+            "scenario": scenario,
+            "workflow_id": workflow_id,
+            "cycle_results": cycle_results,
+            "event_history": self.events.get_event_history(limit=15),
+        }
+
+    def _inject_demo_scenario(self, scenario_id: str) -> None:
+        def _find_device(hostname: str):
+            return self.simulator.get_device(hostname)
+
+        def _find_link(source: str, destination: str):
+            return next(
+                (link for link in self.simulator.links if link.source == source and link.destination == destination),
+                None,
+            )
+
+        if scenario_id == "bgp_flapping":
+            target = _find_device("rtr-delhi") or _find_device("dc1-delhi")
+            if target:
+                target.cpu = 92.0
+                target.memory = 76.0
+                target.status = "warning"
+                if not target.bgp_sessions:
+                    target.bgp_sessions = [{"peer_ip": "192.168.254.1", "peer_asn": target.bgp_asn or 65000, "state": "Idle"}]
+                for session in target.bgp_sessions:
+                    session["state"] = "Idle" if session.get("state") == "Established" else "Established"
+                self.telemetry.baseline_metrics[target.hostname]["packet_loss_pct"] = 6.5
+                self.telemetry.baseline_metrics[target.hostname]["latency_ms"] = 120.0
+
+            link = _find_link("dc1-delhi", "dc1-mumbai")
+            if link:
+                link.status = "warning"
+                link.current_latency_ms = 180.0
+
+            self.events.emit_event({
+                "type": "bgp_flap_detected",
+                "severity": "critical",
+                "source": "demo_mode",
+                "description": "Delhi BGP session became unstable under packet loss.",
+                "data": {"device": target.hostname if target else "rtr-delhi"},
+            })
+
+        elif scenario_id == "wan_outage":
+            wan_device = _find_device("wan-delhi")
+            if wan_device:
+                wan_device.cpu = 68.0
+                wan_device.memory = 61.0
+                wan_device.status = "warning"
+                self.telemetry.baseline_metrics[wan_device.hostname]["latency_ms"] = 210.0
+                self.telemetry.baseline_metrics[wan_device.hostname]["packet_loss_pct"] = 8.2
+
+            for link in self.simulator.links:
+                if "wan-delhi" in {link.source, link.destination}:
+                    link.status = "down"
+                    link.current_latency_ms = 250.0
+
+            impacted = self.state.get_dependent_services("wan-delhi")
+            for svc in impacted:
+                if svc in self.state.service_dependencies:
+                    self.state.service_dependencies[svc].status = "degraded"
+
+            self.events.emit_event({
+                "type": "wan_degradation_detected",
+                "severity": "high",
+                "source": "demo_mode",
+                "description": "Delhi WAN link outage causing regional service degradation.",
+                "data": {"device": "wan-delhi", "impacted_services": impacted},
+            })
+
+        elif scenario_id == "high_cpu_storm":
+            for device in self.simulator.devices.values():
+                if device.site == "delhi":
+                    device.cpu = min(99.0, device.cpu + 30.0)
+                    device.memory = min(96.0, device.memory + 25.0)
+                    device.status = "critical"
+                    self.telemetry.baseline_metrics[device.hostname]["latency_ms"] = self.telemetry.baseline_metrics[device.hostname].get("latency_ms", 10) + 20.0
+
+            self.events.emit_event({
+                "type": "cpu_spike_detected",
+                "severity": "critical",
+                "source": "demo_mode",
+                "description": "High CPU storm in Delhi datacenter affecting core infrastructure.",
+                "data": {"site": "delhi"},
+            })
+
+        elif scenario_id == "packet_loss_cascade":
+            target = _find_device("fw-delhi") or _find_device("sw1-delhi")
+            if target:
+                self.telemetry.baseline_metrics[target.hostname]["packet_loss_pct"] = 12.0
+                self.telemetry.baseline_metrics[target.hostname]["latency_ms"] = 140.0
+                target.status = "warning"
+                target.cpu = min(95.0, target.cpu + 18.0)
+
+            self.events.emit_event({
+                "type": "packet_loss_detected",
+                "severity": "high",
+                "source": "demo_mode",
+                "description": "Packet loss cascade observed on Delhi firewall.",
+                "data": {"device": target.hostname if target else "fw-delhi"},
+            })
+
+        elif scenario_id == "compliance_drift":
+            self.state.update_compliance_status(
+                "compliance-drift-delhi",
+                {
+                    "status": "degraded",
+                    "description": "Configuration drift detected on Delhi security and network infrastructure.",
+                    "risk": "high",
+                },
+            )
+            self.events.emit_event({
+                "type": "incident_created",
+                "severity": "high",
+                "source": "demo_mode",
+                "description": "Compliance drift triggered a security alert.",
+                "data": {"issue": "compliance_drift"},
+            })
+
+        elif scenario_id == "service_dependency_failure":
+            device = _find_device("dc1-delhi")
+            if device:
+                device.status = "critical"
+                device.cpu = 94.0
+                device.memory = 82.0
+                self.telemetry.baseline_metrics[device.hostname]["latency_ms"] = 130.0
+                self.telemetry.baseline_metrics[device.hostname]["packet_loss_pct"] = 7.5
+
+            impacted = self.state.get_dependent_services(device.hostname if device else "dc1-delhi")
+            for svc in impacted:
+                if svc in self.state.service_dependencies:
+                    self.state.service_dependencies[svc].status = "down"
+
+            self.events.emit_event({
+                "type": "service_impact_calculated",
+                "severity": "critical",
+                "source": "demo_mode",
+                "description": "Service dependency failure from Delhi data center node.",
+                "data": {"impacted_services": impacted},
+            })
+
+        else:
+            self.events.emit_event({
+                "type": "demo_generic",
+                "severity": "info",
+                "source": "demo_mode",
+                "description": f"Running demo scenario {scenario_id}.",
+            })
+
+    def generate_operational_ai_summary(self) -> Dict[str, Any]:
+        incidents = self.state.get_all_incidents()
+        critical_incidents = [inc for inc in incidents.values() if inc["severity"] in {"critical", "high"}]
+        critical_devices = self.state.get_critical_devices()
+        score = self.state.global_operational_score
+        service_impact = self.state.calculate_service_impact(critical_devices)
+
+        root_cause = "No active issues detected." if not critical_incidents else f"Root cause appears to be {critical_incidents[0]['title']} affecting {', '.join(critical_incidents[0].get('affected_devices', [])) or 'core infrastructure'}." 
+        executive = (
+            "Operational risk is elevated as Delhi services are under stress and a critical incident is active. "
+            "AI recommends focused remediation on the affected device and service dependency chain."
+        ) if critical_incidents else "Network health is stable with no critical incidents."
+
+        return {
+            "root_cause": root_cause,
+            "executive_summary": executive,
+            "recommendation": (
+                "Validate BGP state, restore degraded WAN links, and prioritize remediation for impacted services."
+                if critical_incidents else "Continue monitoring and maintain current automation posture."
+            ),
+            "service_impact": service_impact,
+            "critical_incidents": [inc["title"] for inc in critical_incidents[:3]],
+            "health_score": score,
+        }
+
+    def get_demo_events(self, limit: int = 20) -> List[Dict[str, Any]]:
+        return self.events.get_event_history(limit=limit)
+
+    def get_demo_status(self) -> Dict[str, Any]:
+        return {
+            "current_demo": self.current_demo,
+            "health_score": self.state.global_operational_score,
+            "active_workflows": [wf.name for wf in self.state.get_active_workflows()],
+            "pending_events": self.state.get_pending_events(),
+        }
 
     def _seed_default_documents(self) -> None:
         self.rag.seed_documents([

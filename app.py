@@ -254,115 +254,104 @@ with st.sidebar:
 workspace = st.session_state.workspace
 
 if workspace == "operations":
-    # Operations Dashboard
-    st.header("🚀 Operations Center")
-    
-    # Run simulation cycle button
-    if st.button("🔄 Run Autonomous Cycle", type="primary"):
-        with st.spinner("Running simulation cycle..."):
-            cycle_result = orchestrator.run_cycle()
-            if cycle_result["status"] == "success":
-                st.success(f"Cycle {cycle_result['cycle']} completed in {cycle_result['duration_seconds']:.2f}s")
-                st.info(f"Anomalies: {cycle_result['anomalies_detected']}, Incidents: {cycle_result['incidents_created']}")
-            else:
-                st.error(f"Cycle failed: {cycle_result.get('error', 'Unknown error')}")
-        st.rerun()
-    
-    # Get live operational status
+    st.header("🚀 Autonomous Operations Center")
+    st.markdown("### Demo Mode — Live Operational Storytelling")
+
+    if "demo_result" not in st.session_state:
+        st.session_state["demo_result"] = {}
+
+    demo_options = orchestrator.get_demo_scenarios()
+    demo_labels = [scenario["label"] for scenario in demo_options]
+    selected_demo_label = st.selectbox("Choose a demo scenario", demo_labels, key="demo_scenario_select")
+    selected_demo_id = next((scenario["id"] for scenario in demo_options if scenario["label"] == selected_demo_label), demo_options[0]["id"])
+
+    if st.button("▶️ Launch Demo Scenario", type="primary"):
+        with st.spinner("Launching autonomous demo scenario..."):
+            demo_result = orchestrator.launch_demo_scenario(selected_demo_id)
+            st.session_state["demo_result"] = demo_result
+            st.session_state["demo_selected"] = selected_demo_label
+
     status = orchestrator.get_operational_status()
     topology = orchestrator.simulator.get_topology_summary()
-    
-    # Key metrics
+    ai_summary = orchestrator.generate_operational_ai_summary()
+    demo_result = st.session_state.get("demo_result", {})
+
+    health_score = status["operational_summary"]["operational_score"]
+    critical_incidents = status["incidents"]["by_status"].get("new", 0) + status["incidents"]["by_status"].get("investigating", 0)
+    pending_events = status["operational_summary"]["events_pending"]
+    workflows_active = status["operational_summary"]["workflows_active"]
+
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        active_devices = topology.get("total_devices", 0)
-        st.metric("Active Devices", active_devices)
+        st.metric("Active Devices", topology.get("total_devices", 0), delta=f"{topology.get('healthy_devices', 0)} healthy")
     with col2:
-        critical_incidents = status["incidents"]["by_status"].get("new", 0) + status["incidents"]["by_status"].get("investigating", 0)
-        st.metric("Critical Incidents", critical_incidents)
+        st.metric("Critical Incidents", critical_incidents, delta=f"{workflows_active} workflows")
     with col3:
-        automation_rate = "87%"  # Placeholder, could calculate from events
-        st.metric("Automation Rate", automation_rate)
+        st.metric("Health Score", f"{health_score:.0f}%", delta=f"{pending_events} pending events")
     with col4:
-        mttr = "45min"  # Placeholder
-        st.metric("MTTR", mttr)
+        st.metric("Demo Scenario", selected_demo_label)
 
-    # AI Search
-    st.subheader("🤖 AI Diagnostics")
-    query = st.text_input(
-        "Ask NetBrain AI",
-        placeholder="Why is BGP flapping in Delhi DC?",
-        key="ops_query"
-    )
+    st.progress(int(max(0, min(100, health_score))))
 
-    # Input validation
-    if query and len(query.strip()) < 5:
-        st.warning("Please enter a more detailed question (at least 5 characters)")
-        query = ""
-    elif query and not any(keyword in query.lower() for keyword in ["why", "what", "how", "when", "where", "bgp", "cpu", "memory", "interface", "link", "packet", "latency"]):
-        st.info("💡 Tip: Try asking about network issues like BGP, CPU, memory, interfaces, or links")
-    
-    if query:
-        try:
-            with st.spinner("Analyzing telemetry and topology..."):
-                time.sleep(1)
-                topology_data = orchestrator.get_sample_topology()
-                device_states = get_devices() if DATABASE_AVAILABLE else orchestrator.get_sample_devices()
-                incidents_data = get_incidents() if DATABASE_AVAILABLE else []
-                
-                ai_response = ask_ai(query)
-                
-                # Log AI query to database
-                if DATABASE_AVAILABLE:
-                    try:
-                        from database.database import log_ai_query
-                        log_ai_query(query, ai_response)
-                    except Exception:
-                        pass  # Non-critical, continue
-                
-                orchestrator_result = orchestrator.ai_troubleshoot(
-                    query,
-                    device_states,
-                    topology_data["interfaces"],
-                    topology_data["bgp_peers"],
-                    incidents_data,
-                    topology_data["links"],
-                )
+    with st.expander("🔎 Current AI Operational Insights", expanded=True):
+        st.markdown(f"**Root Cause:** {ai_summary['root_cause']}")
+        st.markdown(f"**Executive Summary:** {ai_summary['executive_summary']}")
+        st.markdown(f"**Recommendation:** {ai_summary['recommendation']}")
+        if ai_summary.get("critical_incidents"):
+            st.markdown(f"**Active Critical Incidents:** {', '.join(ai_summary['critical_incidents'])}")
 
-            col1, col2 = st.columns([2, 1])
-            with col1:
-                st.markdown("### 🔍 Root Cause Analysis")
-                root_cause = orchestrator_result.get("root_cause", "Analysis incomplete")
-                if "No obvious root cause" in root_cause:
-                    st.warning(root_cause)
-                else:
-                    st.info(root_cause)
-                
-                st.markdown("### 📋 Key Entities")
-                entities = orchestrator_result.get("entities", {})
-                if entities.get("devices"):
-                    st.write("**Devices:**", ", ".join(entities["devices"]))
-                if entities.get("protocols"):
-                    st.write("**Protocols:**", ", ".join(entities["protocols"]))
-                if entities.get("vendors"):
-                    st.write("**Vendors:**", ", ".join(entities["vendors"]))
-                if not any(entities.values()):
-                    st.write("*No specific entities detected*")
-                    
-            with col2:
-                st.markdown("### 📊 Executive Summary")
-                exec_summary = orchestrator_result.get("executive_summary", "Summary unavailable")
-                st.success(exec_summary)
-                
-                st.markdown("### 🤖 AI Response")
-                if ai_response and not ai_response.startswith("ERROR"):
-                    st.write(ai_response)
-                else:
-                    st.error("AI response unavailable. Check API configuration.")
-                    
-        except Exception as e:
-            st.error(f"Analysis failed: {str(e)}")
-            st.info("Try rephrasing your question or check system status.")
+    if demo_result and demo_result.get("status") == "success":
+        st.success(f"Demo '{st.session_state.get('demo_selected', selected_demo_label)}' launched successfully")
+        st.markdown("#### 🔔 Demo Event Timeline")
+        event_rows = [
+            {
+                "timestamp": event.get("timestamp"),
+                "event": event.get("type"),
+                "severity": event.get("severity"),
+                "description": event.get("description"),
+            }
+            for event in demo_result.get("event_history", [])
+        ]
+        if event_rows:
+            st.dataframe(pd.DataFrame(event_rows).sort_values(by="timestamp", ascending=False).head(10))
+
+    st.divider()
+    st.markdown("### Live Operational Dashboard")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("#### Network Telemetry")
+        telemetry = orchestrator.telemetry.get_health_metrics()
+        st.metric("Average CPU", f"{telemetry['cpu']['average']:.1f}%", delta=f"{telemetry['cpu']['high_count']} high")
+        st.metric("Average Memory", f"{telemetry['memory']['average']:.1f}%", delta=f"{telemetry['memory']['high_count']} high")
+        st.metric("Avg Latency", f"{telemetry['latency_ms']['average']:.1f}ms", delta=f"{telemetry['packet_loss_pct']['high_count']} packet loss alerts")
+    with col2:
+        st.markdown("#### Impact Summary")
+        st.metric("Services Healthy", f"{status['operational_summary']['services']['healthy']}")
+        st.metric("Services Degraded", f"{status['operational_summary']['services']['degraded']}")
+        st.metric("Services Down", f"{status['operational_summary']['services']['down']}")
+
+    st.divider()
+    st.markdown("### Active Incidents")
+    active_incidents = [inc for inc in orchestrator.state.get_all_incidents().values() if inc['status'] in {'new', 'investigating'}]
+    if active_incidents:
+        for inc in active_incidents:
+            severity_color = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(inc["severity"], "⚪")
+            st.markdown(f"{severity_color} **{inc['id']}** — {inc['title']} — Status: {inc['status']}")
+            if inc.get("affected_devices"):
+                st.markdown(f"_Affected devices:_ {', '.join(inc['affected_devices'])}")
+    else:
+        st.info("No active incidents right now.")
+
+    st.divider()
+    st.markdown("### Topology Impact Snapshot")
+    link_rows = [
+        {"source": link.source, "target": link.destination, "type": link.link_type, "status": link.status}
+        for link in orchestrator.simulator.links[:10]
+    ]
+    if link_rows:
+        st.dataframe(pd.DataFrame(link_rows))
+    else:
+        st.info("No topology data to display.")
 
 elif workspace == "incident":
     st.header("🚨 Incident Management")

@@ -123,15 +123,6 @@ class EventEngine:
         }
         self.event_history.append(event_record)
 
-        # Also enqueue in state manager
-        self.state.enqueue_event(
-            event_type=event_type,
-            severity=event.get("severity", "info"),
-            source=event.get("source", "event_engine"),
-            description=event.get("description", ""),
-            data=event.get("data", {}),
-        )
-
         # Execute handlers
         downstream_events = []
         handlers = self.handlers.get(event_type, [])
@@ -176,6 +167,13 @@ class EventEngine:
                 if anomaly.get("severity") in ["high", "critical"]:
                     incident_id = self._create_incident_from_anomaly(anomaly)
                     incident_ids.append(incident_id)
+                    self.emit_event({
+                        "type": "incident_created",
+                        "severity": anomaly.get("severity", "high"),
+                        "source": "event_engine",
+                        "description": f"Incident {incident_id} created for {anomaly.get('type')}",
+                        "data": {"incident_id": incident_id, "anomaly": anomaly},
+                    })
 
         return incident_ids
 
@@ -359,9 +357,35 @@ class EventEngine:
 
         return downstream
 
+    def _handle_incident_created(self, event: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Handle incident creation to continue the workflow."""
+        downstream = []
+        downstream.append({
+            "type": "service_impact_calculated",
+            "severity": "high",
+            "source": "event_engine",
+            "description": "Calculating service blast radius for created incident",
+            "data": event.get("data", {}),
+        })
+        downstream.append({
+            "type": "rca_triggered",
+            "severity": "high",
+            "source": "event_engine",
+            "description": "AI RCA triggered for incident",
+            "data": event.get("data", {}),
+        })
+        downstream.append({
+            "type": "remediation_recommended",
+            "severity": "high",
+            "source": "event_engine",
+            "description": "Remediation recommendations generated",
+            "data": event.get("data", {}),
+        })
+        return downstream
+
     # ═══════════════════════════════════════════════════════════════
     # REGISTER STANDARD HANDLERS
-    # ═══════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════
 
     def register_standard_handlers(self) -> None:
         """Register all standard event handlers."""
@@ -389,6 +413,11 @@ class EventEngine:
             "wan_degradation_detected",
             self._handle_wan_degradation_detected,
             priority=10,
+        )
+        self.register_handler(
+            "incident_created",
+            self._handle_incident_created,
+            priority=20,
         )
 
     # ═══════════════════════════════════════════════════════════════

@@ -165,6 +165,7 @@ class SimulationEngine:
 
         # Create inter-site links (full mesh of core devices)
         self._create_intersite_links()
+        self._initialize_protocol_sessions()
 
     def _create_interfaces(self, hostname: str, count: int) -> None:
         """Create interfaces for a device."""
@@ -198,6 +199,37 @@ class SimulationEngine:
                         bandwidth_mbps=100000,
                     )
                     self.links.append(link)
+
+    def _initialize_protocol_sessions(self) -> None:
+        """Create initial BGP and OSPF state across the simulated network."""
+        routers = [d for d in self.devices.values() if d.device_type in {"router", "data_center_device", "wan_device"}]
+        for router in routers:
+            self._create_bgp_sessions(router)
+
+        for device in self.devices.values():
+            if device.device_type in {"switch", "firewall", "data_center_device"}:
+                self._create_ospf_neighbors(device)
+
+    def _create_bgp_sessions(self, device: SimulatedDevice) -> None:
+        """Create BGP sessions with remote peers."""
+        peers = [d for d in self.devices.values() if d.bgp_asn and d.hostname != device.hostname]
+        selected = random.sample(peers, min(2, len(peers)))
+        for peer in selected:
+            session = {
+                "peer_ip": f"10.{abs(hash(device.hostname)) % 254}.{abs(hash(peer.hostname)) % 254}.{random.randint(1, 254)}",
+                "peer_asn": peer.bgp_asn,
+                "state": "Established" if random.random() > 0.2 else "Idle",
+                "prefixes": random.randint(100, 1200),
+            }
+            device.bgp_sessions.append(session)
+
+    def _create_ospf_neighbors(self, device: SimulatedDevice) -> None:
+        """Create OSPF neighbors for devices."""
+        neighbors = [d for d in self.devices.values() if d.site == device.site and d.hostname != device.hostname]
+        selected = random.sample(neighbors, min(2, len(neighbors)))
+        for neighbor in selected:
+            if neighbor.hostname not in device.ospf_neighbors:
+                device.ospf_neighbors.append(neighbor.hostname)
 
     # ═══════════════════════════════════════════════════════════════
     # STATE UPDATES
