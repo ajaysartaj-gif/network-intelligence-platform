@@ -239,6 +239,22 @@ class EventEngine:
                 "description": f"WAN degradation: {anomaly.get('latency_ms', 'unknown')}ms latency",
                 "data": anomaly,
             }
+        elif atype == "voice_degradation":
+            return {
+                "type": "voice_degradation_detected",
+                "severity": severity,
+                "source": "telemetry_engine",
+                "description": f"Voice traffic degradation: {anomaly.get('latency_ms', 'unknown')}ms latency affecting MOS scores",
+                "data": anomaly,
+            }
+        elif atype == "critical_incident":
+            return {
+                "type": "critical_incident_detected",
+                "severity": severity,
+                "source": "telemetry_engine",
+                "description": f"Critical incident triggered: {anomaly.get('description', 'Multiple services affected')}",
+                "data": anomaly,
+            }
 
         return None
 
@@ -256,14 +272,21 @@ class EventEngine:
             "latency_spike": f"Latency spike on {device}",
             "bgp_instability": f"BGP instability on {device}",
             "wan_degradation": "WAN link degradation",
+            "voice_degradation": f"Voice traffic degradation on {device}",
+            "critical_incident": "Critical Network Incident",
         }
 
         title = title_map.get(atype, f"Network anomaly: {atype}")
-        description = f"Anomaly detected: {anomaly.get('description', str(anomaly))}"
+        description = anomaly.get("description", f"Anomaly detected: {str(anomaly)}")
         
         incident_id = f"INC-{int(datetime.utcnow().timestamp())}"
         
-        affected_devices = [device] if device != "unknown" else []
+        # For critical incidents, get all affected devices
+        if atype == "critical_incident":
+            affected_devices = anomaly.get("devices", [device])
+        else:
+            affected_devices = [device] if device != "unknown" else []
+        
         affected_services = self.state.calculate_service_impact(affected_devices).get("impacted_services", [])
 
         self.state.create_incident(
@@ -360,6 +383,45 @@ class EventEngine:
 
         return downstream
 
+    def _handle_voice_degradation_detected(self, event: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Handle voice degradation event."""
+        downstream = []
+        
+        # Voice degradation leads to service impact
+        downstream.append({
+            "type": "service_impact_calculated",
+            "severity": "critical",
+            "source": "event_engine",
+            "description": "Voice service degradation impacting business communications",
+            "data": event.get("data", {}),
+        })
+
+        return downstream
+
+    def _handle_critical_incident_detected(self, event: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Handle critical incident detection."""
+        downstream = []
+        
+        # Critical incident triggers executive alert
+        downstream.append({
+            "type": "executive_alert_triggered",
+            "severity": "critical",
+            "source": "event_engine",
+            "description": "Executive alert generated for critical incident",
+            "data": event.get("data", {}),
+        })
+
+        # Also trigger AI RCA
+        downstream.append({
+            "type": "ai_rca_triggered",
+            "severity": "critical",
+            "source": "event_engine",
+            "description": "AI root cause analysis initiated for critical incident",
+            "data": event.get("data", {}),
+        })
+
+        return downstream
+
     def _handle_incident_created(self, event: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Handle incident creation to continue the workflow."""
         downstream = []
@@ -415,6 +477,16 @@ class EventEngine:
         self.register_handler(
             "wan_degradation_detected",
             self._handle_wan_degradation_detected,
+            priority=10,
+        )
+        self.register_handler(
+            "voice_degradation_detected",
+            self._handle_voice_degradation_detected,
+            priority=10,
+        )
+        self.register_handler(
+            "critical_incident_detected",
+            self._handle_critical_incident_detected,
             priority=10,
         )
         self.register_handler(

@@ -74,6 +74,9 @@ class SimulationEngine:
         self.links: List[SimulatedLink] = []
         self.time_step: int = 0
         self.anomalies: List[Dict[str, Any]] = []
+        self.workflow_stage: int = 0  # Track the cascading workflow stage
+        self.workflow_active: bool = True  # Continuous workflow flag
+        self.last_stage_change: int = 0  # Track when we last changed stages
         self._initialize_enterprise_topology()
 
     # ═══════════════════════════════════════════════════════════════
@@ -236,7 +239,7 @@ class SimulationEngine:
     # ═══════════════════════════════════════════════════════════════
 
     def step(self) -> Dict[str, Any]:
-        """Simulate one time step and return changes."""
+        """Simulate one time step with cascading packet loss workflow."""
         self.time_step += 1
         changes = {
             "time_step": self.time_step,
@@ -244,7 +247,11 @@ class SimulationEngine:
             "anomalies": [],
         }
 
-        # Update device metrics
+        # Continuous cascading workflow: Packet Loss → WAN Latency → BGP Instability → Voice Degradation → Critical Incident
+        if self.workflow_active:
+            self._advance_cascading_workflow(changes)
+
+        # Update device metrics with normal drift
         for hostname, device in self.devices.items():
             old_state = {
                 "cpu": device.cpu,
@@ -256,8 +263,8 @@ class SimulationEngine:
             device.cpu = max(5, min(98, device.cpu + random.uniform(-5, 8)))
             device.memory = max(10, min(95, device.memory + random.uniform(-3, 6)))
 
-            # Simulate occasional interface flaps
-            if random.random() < 0.02:
+            # Simulate occasional interface flaps (reduced frequency)
+            if random.random() < 0.005:  # Reduced from 0.02
                 iface_idx = random.randint(0, len(device.interfaces) - 1)
                 iface = device.interfaces[iface_idx]
                 iface["status"] = "down" if iface["status"] == "up" else "up"
@@ -267,8 +274,8 @@ class SimulationEngine:
                     "interface": iface["name"],
                 })
 
-            # Simulate BGP flaps occasionally
-            if device.bgp_sessions and random.random() < 0.01:
+            # Simulate BGP flaps occasionally (reduced frequency)
+            if device.bgp_sessions and random.random() < 0.003:  # Reduced from 0.01
                 session_idx = random.randint(0, len(device.bgp_sessions) - 1)
                 session = device.bgp_sessions[session_idx]
                 session["state"] = "Established" if session["state"] == "Idle" else "Idle"
@@ -279,16 +286,275 @@ class SimulationEngine:
                     "state": session["state"],
                 })
 
-        # Simulate anomalies
-        if random.random() < 0.03:  # 3% chance of anomaly per step
-            anomaly = self._simulate_anomaly()
-            if anomaly:
-                changes["anomalies"].append(anomaly)
-                self.anomalies.append(anomaly)
-
         return changes
 
+    def _advance_cascading_workflow(self, changes: Dict[str, Any]) -> None:
+        """Advance the cascading packet loss workflow."""
+        stages_elapsed = self.time_step - self.last_stage_change
+
+        # Stage 0: Normal operation (5-10 cycles)
+        if self.workflow_stage == 0:
+            if stages_elapsed > random.randint(5, 10):
+                self.workflow_stage = 1
+                self.last_stage_change = self.time_step
+                self._inject_packet_loss_anomaly(changes)
+
+        # Stage 1: Packet Loss on WAN edge (3-5 cycles)
+        elif self.workflow_stage == 1:
+            if stages_elapsed > random.randint(3, 5):
+                self.workflow_stage = 2
+                self.last_stage_change = self.time_step
+                self._inject_wan_latency_anomaly(changes)
+
+        # Stage 2: WAN Latency Increase (2-4 cycles)
+        elif self.workflow_stage == 2:
+            if stages_elapsed > random.randint(2, 4):
+                self.workflow_stage = 3
+                self.last_stage_change = self.time_step
+                self._inject_bgp_instability_anomaly(changes)
+
+        # Stage 3: BGP Neighbor Instability (2-3 cycles)
+        elif self.workflow_stage == 3:
+            if stages_elapsed > random.randint(2, 3):
+                self.workflow_stage = 4
+                self.last_stage_change = self.time_step
+                self._inject_voice_degradation_anomaly(changes)
+
+        # Stage 4: Voice Traffic Degradation (1-2 cycles)
+        elif self.workflow_stage == 4:
+            if stages_elapsed > random.randint(1, 2):
+                self.workflow_stage = 5
+                self.last_stage_change = self.time_step
+                self._inject_critical_incident_anomaly(changes)
+
+        # Stage 5: Critical Incident Active (10-15 cycles, then reset)
+        elif self.workflow_stage == 5:
+            if stages_elapsed > random.randint(10, 15):
+                self.workflow_stage = 0
+                self.last_stage_change = self.time_step
+                self._reset_workflow_anomalies()
+
+    def _inject_packet_loss_anomaly(self, changes: Dict[str, Any]) -> None:
+        """Inject packet loss on WAN edge device."""
+        wan_device = self._find_device_by_type_and_site("wan_device", "delhi")
+        if wan_device:
+            # Increase packet loss on WAN device
+            wan_device.status = "warning"
+            wan_device.cpu = min(95.0, wan_device.cpu + 15.0)
+
+            anomaly = {
+                "type": "packet_loss",
+                "device": wan_device.hostname,
+                "loss_pct": 8.5,
+                "severity": "high",
+                "description": f"Packet loss detected on WAN edge {wan_device.hostname}",
+            }
+            changes["anomalies"].append(anomaly)
+            self.anomalies.append(anomaly)
+
+    def _inject_wan_latency_anomaly(self, changes: Dict[str, Any]) -> None:
+        """Inject WAN latency increase."""
+        wan_device = self._find_device_by_type_and_site("wan_device", "delhi")
+        if wan_device:
+            # Further increase latency
+            wan_device.status = "critical"
+
+            # Affect WAN links
+            for link in self.links:
+                if "wan-delhi" in {link.source, link.destination}:
+                    link.current_latency_ms = min(link.max_latency_ms, link.current_latency_ms + 80.0)
+                    link.status = "warning"
+
+            anomaly = {
+                "type": "latency_spike",
+                "device": wan_device.hostname,
+                "latency_ms": 120.0,
+                "severity": "high",
+                "description": f"WAN latency spike on {wan_device.hostname}",
+            }
+            changes["anomalies"].append(anomaly)
+            self.anomalies.append(anomaly)
+
+    def _inject_bgp_instability_anomaly(self, changes: Dict[str, Any]) -> None:
+        """Inject BGP neighbor instability."""
+        dc_device = self._find_device_by_type_and_site("data_center_device", "delhi")
+        if dc_device and dc_device.bgp_sessions:
+            # Set BGP sessions to Idle
+            for session in dc_device.bgp_sessions:
+                session["state"] = "Idle"
+
+            dc_device.status = "critical"
+
+            anomaly = {
+                "type": "bgp_instability",
+                "device": dc_device.hostname,
+                "down_sessions": len(dc_device.bgp_sessions),
+                "severity": "critical",
+                "description": f"BGP neighbor instability on {dc_device.hostname}",
+            }
+            changes["anomalies"].append(anomaly)
+            self.anomalies.append(anomaly)
+
+    def _inject_voice_degradation_anomaly(self, changes: Dict[str, Any]) -> None:
+        """Inject voice traffic degradation."""
+        rtr_device = self._find_device_by_hostname("rtr-delhi")
+        if rtr_device:
+            # Voice services are impacted by routing instability
+            rtr_device.status = "critical"
+
+            anomaly = {
+                "type": "voice_degradation",
+                "device": rtr_device.hostname,
+                "latency_ms": 180.0,
+                "severity": "critical",
+                "description": f"Voice traffic degradation due to routing instability on {rtr_device.hostname}",
+            }
+            changes["anomalies"].append(anomaly)
+            self.anomalies.append(anomaly)
+
+    def _inject_critical_incident_anomaly(self, changes: Dict[str, Any]) -> None:
+        """Inject critical incident escalation."""
+        # Multiple devices affected
+        affected_devices = []
+        for hostname in ["wan-delhi", "dc1-delhi", "rtr-delhi"]:
+            device = self.devices.get(hostname)
+            if device:
+                device.status = "critical"
+                affected_devices.append(device)
+
+        anomaly = {
+            "type": "critical_incident",
+            "devices": [d.hostname for d in affected_devices],
+            "severity": "critical",
+            "description": "Critical incident: WAN outage affecting Delhi data center and voice services",
+        }
+        changes["anomalies"].append(anomaly)
+        self.anomalies.append(anomaly)
+
+    def _reset_workflow_anomalies(self) -> None:
+        """Reset workflow anomalies to normal state."""
+        for hostname, device in self.devices.items():
+            if hostname in ["wan-delhi", "dc1-delhi", "rtr-delhi"]:
+                device.status = "healthy"
+                device.cpu = max(10, device.cpu - 20)
+                device.memory = max(15, device.memory - 15)
+
+                # Reset BGP sessions
+                for session in device.bgp_sessions:
+                    session["state"] = "Established"
+
+        # Reset link statuses
+        for link in self.links:
+            if "wan-delhi" in {link.source, link.destination}:
+                link.status = "up"
+                link.current_latency_ms = link.max_latency_ms * 0.3  # Reset to normal
+
+    def _find_device_by_type_and_site(self, device_type: str, site: str) -> Optional[SimulatedDevice]:
+        """Find a device by type and site."""
+        for device in self.devices.values():
+            if device.device_type == device_type and device.site == site:
+                return device
+        return None
+
+    def _find_device_by_hostname(self, hostname: str) -> Optional[SimulatedDevice]:
+        """Find a device by hostname."""
+        return self.devices.get(hostname)
+
+    # ═══════════════════════════════════════════════════════════════
+    # LEGACY ANOMALY SIMULATION (KEPT FOR COMPATIBILITY)
+    # ═══════════════════════════════════════════════════════════════
+
     def _simulate_anomaly(self) -> Optional[Dict[str, Any]]:
+        """Simulate a network anomaly (legacy method)."""
+        anomaly_types = [
+            "cpu_spike",
+            "memory_exhaustion",
+            "interface_flap",
+            "packet_loss",
+            "latency_spike",
+            "bgp_instability",
+            "wan_degradation",
+        ]
+        
+        anomaly_type = random.choice(anomaly_types)
+        device = random.choice(list(self.devices.values()))
+        
+        if anomaly_type == "cpu_spike":
+            device.cpu = min(98, device.cpu + random.uniform(20, 40))
+            return {
+                "type": "cpu_spike",
+                "device": device.hostname,
+                "value": device.cpu,
+                "severity": "high" if device.cpu > 85 else "medium",
+            }
+        
+        elif anomaly_type == "memory_exhaustion":
+            device.memory = min(98, device.memory + random.uniform(15, 35))
+            return {
+                "type": "memory_exhaustion",
+                "device": device.hostname,
+                "value": device.memory,
+                "severity": "high" if device.memory > 85 else "medium",
+            }
+        
+        elif anomaly_type == "interface_flap":
+            if device.interfaces:
+                iface = random.choice(device.interfaces)
+                iface["status"] = "down"
+                return {
+                    "type": "interface_flap",
+                    "device": device.hostname,
+                    "interface": iface["name"],
+                    "severity": "high",
+                }
+        
+        elif anomaly_type == "packet_loss":
+            if device.interfaces:
+                iface = random.choice(device.interfaces)
+                loss = random.uniform(1, 10)
+                return {
+                    "type": "packet_loss",
+                    "device": device.hostname,
+                    "interface": iface["name"],
+                    "loss_pct": loss,
+                    "severity": "high" if loss > 5 else "medium",
+                }
+        
+        elif anomaly_type == "latency_spike":
+            latency = random.uniform(50, 200)
+            return {
+                "type": "latency_spike",
+                "device": device.hostname,
+                "latency_ms": latency,
+                "severity": "medium" if latency < 100 else "high",
+            }
+        
+        elif anomaly_type == "bgp_instability":
+            if device.bgp_sessions:
+                session = random.choice(device.bgp_sessions)
+                session["state"] = "Idle"
+                return {
+                    "type": "bgp_instability",
+                    "device": device.hostname,
+                    "peer": session.get("peer_ip"),
+                    "severity": "high",
+                }
+        
+        elif anomaly_type == "wan_degradation":
+            wan_link = next(
+                (l for l in self.links if "wan" in l.source.lower() or "wan" in l.destination.lower()),
+                None,
+            )
+            if wan_link:
+                wan_link.current_latency_ms = min(wan_link.max_latency_ms, wan_link.current_latency_ms + 100)
+                return {
+                    "type": "wan_degradation",
+                    "link": f"{wan_link.source}→{wan_link.destination}",
+                    "latency_ms": wan_link.current_latency_ms,
+                    "severity": "high",
+                }
+        
+        return None
         """Simulate a network anomaly."""
         anomaly_types = [
             "cpu_spike",

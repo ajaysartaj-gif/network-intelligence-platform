@@ -128,6 +128,15 @@ class StateManager:
             ],
         }
 
+        # Update service status based on incident severity
+        for service in affected_services:
+            if service in self.service_dependencies:
+                if severity == "critical":
+                    self.service_dependencies[service].status = "down"
+                elif severity == "high":
+                    self.service_dependencies[service].status = "degraded"
+                # For medium/low, keep as healthy or set to degraded if not already down
+
     def update_incident(
         self, incident_id: str, status: str = None, note: str = None
     ) -> None:

@@ -336,25 +336,50 @@ class OperationsOrchestrator:
         score = self.state.global_operational_score
         service_impact = self.state.calculate_service_impact(critical_devices)
 
+        # Get current simulation stage for context
+        current_stage = self.simulator.workflow_stage
+        workflow_context = {
+            0: "Network operating normally with stable BGP and WAN connectivity.",
+            1: "Packet loss detected on WAN edge affecting link quality.",
+            2: "WAN latency spike causing routing performance degradation.",
+            3: "BGP neighbor instability leading to routing convergence issues.",
+            4: "Voice traffic experiencing jitter and MOS degradation.",
+            5: "Critical incident active with multiple services impacted."
+        }
+
         if critical_incidents:
             incident = critical_incidents[0]
             affected_devices = incident.get("affected_devices", [])
             impacted_services = service_impact.get("impacted_services", [])
             impacted_text = ", ".join(impacted_services) if impacted_services else "downstream services"
             device_text = ", ".join(affected_devices) if affected_devices else "core infrastructure"
-            root_cause = (
-                f"{incident['title']} on {device_text} is causing service impact to {impacted_text}. "
-                "Telemetry indicates elevated latency and packet loss on the affected WAN path."
-            )
-            executive = (
-                f"Critical incident '{incident['title']}' is active. Impact analysis shows {impacted_text} are degraded and BGP/WAN stability must be restored immediately. "
-                "Prioritize route convergence, reset the affected peering session, and stabilize the service dependency chain."
-            )
-            recommendation = (
-                "Review BGP neighbor state on the affected router, validate WAN circuit quality, and restore traffic-engineered paths for impacted services."
-            )
+            
+            if current_stage == 1:
+                root_cause = f"Packet loss on WAN edge router {device_text} is causing interface utilization spikes and link quality degradation."
+                executive = f"Packet loss detected on WAN circuits affecting {impacted_text}. Immediate investigation required to prevent BGP instability."
+                recommendation = "Validate WAN circuit quality, check for interface errors, and monitor for BGP adjacency flaps."
+            elif current_stage == 2:
+                root_cause = f"WAN latency increase from {device_text} is causing routing protocol timeouts and path selection issues."
+                executive = f"WAN latency spike impacting {impacted_text} with elevated packet loss. BGP sessions at risk of flapping."
+                recommendation = "Reroute traffic via secondary WAN paths and validate MPLS provider performance."
+            elif current_stage == 3:
+                root_cause = f"BGP neighbor instability on {device_text} causing routing table churn and service path changes."
+                executive = f"BGP adjacency flaps affecting {impacted_text}. Voice and data services experiencing intermittent connectivity."
+                recommendation = "Reset BGP peering sessions, validate route policies, and stabilize routing convergence."
+            elif current_stage == 4:
+                root_cause = f"Voice traffic degradation due to routing instability on {device_text} with elevated jitter and latency."
+                executive = f"Voice services experiencing MOS degradation affecting {impacted_text}. Critical business communications impacted."
+                recommendation = "Prioritize voice traffic QoS, stabilize BGP routing, and validate WAN circuit performance."
+            elif current_stage == 5:
+                root_cause = f"Critical incident: WAN outage on {device_text} causing complete service disruption for {impacted_text}."
+                executive = f"Critical network incident active. Multiple services down affecting business operations. Executive escalation required."
+                recommendation = "Activate disaster recovery procedures, failover to backup WAN circuits, and engage vendor support."
+            else:
+                root_cause = f"{incident['title']} on {device_text} is causing service impact to {impacted_text}."
+                executive = f"Critical incident '{incident['title']}' is active. Impact analysis shows {impacted_text} are degraded."
+                recommendation = "Review BGP neighbor state, validate WAN circuit stability, and restore service paths."
         else:
-            root_cause = "Network is stable with no critical incidents detected."
+            root_cause = workflow_context.get(current_stage, "Network is stable with no critical incidents detected.")
             executive = "Operational metrics are healthy and no active outages are present. Continue monitoring core BGP, WAN, and service dependencies."
             recommendation = "Maintain current automation posture and verify SLAs on the next maintenance window."
 
@@ -365,6 +390,7 @@ class OperationsOrchestrator:
             "service_impact": service_impact,
             "critical_incidents": [inc["title"] for inc in critical_incidents[:3]],
             "health_score": score,
+            "workflow_stage": current_stage,
         }
 
     def get_demo_events(self, limit: int = 20) -> List[Dict[str, Any]]:
@@ -645,10 +671,12 @@ class OperationsOrchestrator:
             telemetry = self.telemetry.collect_all_telemetry()
 
             # 3. DETECT ANOMALIES
-            anomalies = self.telemetry.detect_anomalies()
+            telemetry_anomalies = self.telemetry.detect_anomalies()
+            simulation_anomalies = simulation_changes.get("anomalies", [])
+            all_anomalies = telemetry_anomalies + simulation_anomalies
             
             # 4. PROCESS ANOMALIES → EVENTS → INCIDENTS
-            incident_ids = self.events.process_anomalies(anomalies)
+            incident_ids = self.events.process_anomalies(all_anomalies)
 
             # 5. PROCESS PENDING EVENTS
             while True:
@@ -695,7 +723,7 @@ class OperationsOrchestrator:
                 "cycle": self.run_count,
                 "duration_seconds": cycle_duration,
                 "timestamp": self.last_update,
-                "anomalies_detected": len(anomalies),
+                "anomalies_detected": len(all_anomalies),
                 "incidents_created": len(incident_ids),
                 "critical_devices": len(critical_devices),
                 "operational_summary": operational_summary,

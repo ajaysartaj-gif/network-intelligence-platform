@@ -77,8 +77,21 @@ class TelemetryEngine:
         # Apply some random drift to simulate real metrics
         cpu = max(2, min(98, device.cpu + random.uniform(-2, 3)))
         memory = max(5, min(98, device.memory + random.uniform(-1, 2)))
-        latency = baseline.get("latency_ms", 10) + random.uniform(-1, 5)
-        packet_loss = baseline.get("packet_loss_pct", 0) + random.uniform(-0.1, 0.3)
+        
+        # Dynamic latency and packet loss based on device status and workflow
+        base_latency = baseline.get("latency_ms", 10)
+        base_packet_loss = baseline.get("packet_loss_pct", 0)
+        
+        # Adjust metrics based on workflow stage and device status
+        if device.status == "warning":
+            latency = base_latency + random.uniform(20, 50)
+            packet_loss = base_packet_loss + random.uniform(2, 8)
+        elif device.status == "critical":
+            latency = base_latency + random.uniform(80, 150)
+            packet_loss = base_packet_loss + random.uniform(8, 20)
+        else:
+            latency = max(0, base_latency + random.uniform(-1, 5))
+            packet_loss = max(0, min(100, base_packet_loss + random.uniform(-0.1, 0.3)))
 
         # Count BGP and OSPF state
         bgp_up = sum(1 for s in device.bgp_sessions if s.get("state") == "Established")
@@ -220,6 +233,24 @@ class TelemetryEngine:
                     "severity": "high",
                     "device": hostname,
                     "down_sessions": metrics.bgp_sessions_down,
+                })
+
+        # Check for workflow-specific anomalies from simulation
+        for anomaly in self.simulation.anomalies[-10:]:  # Check recent anomalies
+            if anomaly.get("type") == "voice_degradation" and anomaly.get("device") == hostname:
+                anomalies.append({
+                    "type": "voice_degradation",
+                    "severity": "critical",
+                    "device": hostname,
+                    "latency_ms": anomaly.get("latency_ms", 180),
+                    "description": "Voice traffic experiencing jitter and degraded MOS scores",
+                })
+            elif anomaly.get("type") == "critical_incident" and hostname in anomaly.get("devices", []):
+                anomalies.append({
+                    "type": "critical_incident",
+                    "severity": "critical",
+                    "device": hostname,
+                    "description": "Part of critical incident affecting multiple services",
                 })
 
         return anomalies

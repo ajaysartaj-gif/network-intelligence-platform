@@ -255,7 +255,7 @@ workspace = st.session_state.workspace
 
 if workspace == "operations":
     st.header("🚀 Autonomous Operations Center")
-    st.markdown("### Demo Mode — Live Operational Storytelling")
+    st.markdown("### Live Operational Storytelling — Continuous Simulation")
 
     if "demo_result" not in st.session_state:
         st.session_state["demo_result"] = {}
@@ -264,12 +264,23 @@ if workspace == "operations":
         orchestrator.run_cycle()
         st.session_state["operations_initialized"] = True
 
+    # Auto-run cycles continuously
+    if "last_cycle_time" not in st.session_state:
+        st.session_state["last_cycle_time"] = time.time()
+    
+    # Run a cycle every 3 seconds automatically
+    current_time = time.time()
+    if current_time - st.session_state["last_cycle_time"] > 3:
+        cycle = orchestrator.run_cycle()
+        st.session_state["demo_result"] = {"last_cycle": cycle}
+        st.session_state["last_cycle_time"] = current_time
+
     demo_options = orchestrator.get_demo_scenarios()
     demo_labels = [scenario["label"] for scenario in demo_options]
     selected_demo_label = st.selectbox("Choose a demo scenario", demo_labels, key="demo_scenario_select")
     selected_demo_id = next((scenario["id"] for scenario in demo_options if scenario["label"] == selected_demo_label), demo_options[0]["id"])
 
-    with st.expander("▶️ Autonomous Demo Controls", expanded=True):
+    with st.expander("▶️ Simulation Controls", expanded=False):
         control_col1, control_col2, control_col3 = st.columns([2, 1, 1])
         with control_col1:
             if st.button("Launch Demo Scenario", type="primary", key="launch_demo"):
@@ -284,10 +295,14 @@ if workspace == "operations":
                 st.session_state["demo_result"] = {"last_cycle": cycle}
                 st.success(f"Completed cycle {cycle['cycle']} — {cycle['anomalies_detected']} anomalies detected.")
         with control_col3:
-            if st.button("Run 3 autonomous cycles", key="run_3_cycles"):
-                cycle_batch = [orchestrator.run_cycle() for _ in range(3)]
-                st.session_state["demo_result"] = {"last_cycle_batch": cycle_batch}
-                st.success("Completed 3 autonomous cycles.")
+            if st.button("Reset Simulation", key="reset_sim"):
+                # Reset simulation state
+                orchestrator.simulator.time_step = 0
+                orchestrator.simulator.workflow_stage = 0
+                orchestrator.simulator.last_stage_change = 0
+                orchestrator.simulator.anomalies = []
+                st.session_state["demo_result"] = {}
+                st.success("Simulation reset to initial state.")
 
     status = orchestrator.get_operational_status()
     topology = orchestrator.simulator.get_topology_summary()
@@ -301,6 +316,19 @@ if workspace == "operations":
     workflows_active = status["operational_summary"]["workflows_active"]
     blast_radius = status["operational_summary"]["services"]["degraded"] + status["operational_summary"]["services"]["down"]
 
+    # Current workflow stage indicator
+    workflow_stage_names = {
+        0: "Normal Operation",
+        1: "Packet Loss Detected",
+        2: "WAN Latency Spike", 
+        3: "BGP Instability",
+        4: "Voice Degradation",
+        5: "Critical Incident"
+    }
+    current_stage = workflow_stage_names.get(orchestrator.simulator.workflow_stage, "Unknown")
+    
+    st.info(f"**Current Simulation Stage:** {current_stage} (Cycle: {orchestrator.simulator.time_step})")
+
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Active Devices", topology.get("total_devices", 0), delta=f"{topology.get('healthy_devices', 0)} healthy")
@@ -313,7 +341,7 @@ if workspace == "operations":
 
     st.progress(int(max(0, min(100, health_score))))
 
-    with st.expander("🔎 Current AI Operational Insights", expanded=True):
+    with st.expander("🔎 AI Operational Intelligence", expanded=True):
         st.markdown(f"**Root Cause:** {ai_summary['root_cause']}")
         st.markdown(f"**Executive Summary:** {ai_summary['executive_summary']}")
         st.markdown(f"**Recommendation:** {ai_summary['recommendation']}")
@@ -324,33 +352,33 @@ if workspace == "operations":
         st.success(f"Demo '{st.session_state.get('demo_selected', selected_demo_label)}' launched successfully")
 
     st.divider()
-    st.markdown("### Live Operational Dashboard")
+    st.markdown("### Live Network Telemetry")
     col1, col2 = st.columns(2)
     with col1:
-        st.markdown("#### Network Telemetry")
+        st.markdown("#### Core Metrics")
         st.metric("Average CPU", f"{telemetry['cpu']['average']:.1f}%", delta=f"{telemetry['cpu']['high_count']} devices >80%")
         st.metric("Average Memory", f"{telemetry['memory']['average']:.1f}%", delta=f"{telemetry['memory']['high_count']} devices >80%")
         st.metric("Avg Latency", f"{telemetry['latency_ms']['average']:.1f}ms", delta=f"{telemetry['latency_ms']['high_count']} >100ms")
     with col2:
-        st.markdown("#### Impact Summary")
+        st.markdown("#### Network Health")
+        st.metric("Packet Loss", f"{telemetry['packet_loss_pct']['average']:.2f}%", delta=f"{telemetry['packet_loss_pct']['high_count']} >3%")
+        st.metric("BGP Sessions Down", f"{telemetry.get('bgp_down_sessions', 0)}", delta=f"{telemetry.get('critical_device_count', 0)} critical devices")
         st.metric("Services Healthy", f"{status['operational_summary']['services']['healthy']}")
-        st.metric("Services Degraded", f"{status['operational_summary']['services']['degraded']}")
-        st.metric("BGP down sessions", f"{telemetry.get('bgp_down_sessions', 0)}", delta=f"{telemetry.get('critical_device_count', 0)} critical devices")
 
     st.divider()
     st.markdown("### Recent Event Timeline")
-    recent_events = orchestrator.get_demo_events(limit=20)
+    recent_events = orchestrator.get_demo_events(limit=15)
     if recent_events:
         event_rows = [
             {
-                "timestamp": event.get("timestamp"),
-                "event": event.get("type"),
-                "severity": event.get("severity"),
-                "description": event.get("description"),
+                "timestamp": event.get("timestamp")[-8:] if event.get("timestamp") else "N/A",  # Show time only
+                "event": event.get("type", "unknown").replace("_", " ").title(),
+                "severity": event.get("severity", "info").upper(),
+                "description": event.get("description", "No description")[:60] + "..." if len(event.get("description", "")) > 60 else event.get("description", "No description"),
             }
-            for event in recent_events
+            for event in recent_events[-12:]
         ]
-        st.dataframe(pd.DataFrame(event_rows).sort_values(by="timestamp", ascending=False).head(12))
+        st.dataframe(pd.DataFrame(event_rows).sort_values(by="timestamp", ascending=False))
     else:
         st.info("No events have been generated yet.")
 
@@ -367,18 +395,27 @@ if workspace == "operations":
                 st.markdown(f"_Affected services:_ {', '.join(inc['affected_services'])}")
             if inc.get("timeline"):
                 for note in inc["timeline"][-2:]:
-                    st.markdown(f"- {note['timestamp']}: {note['note']}")
+                    st.markdown(f"- {note['timestamp'][-8:]}: {note['note']}")
     else:
         st.info("No active incidents right now.")
 
     st.divider()
     st.markdown("### Topology Impact Snapshot")
-    link_rows = [
-        {"source": link.source, "target": link.destination, "type": link.link_type, "status": link.status}
-        for link in orchestrator.simulator.links[:10]
-    ]
-    if link_rows:
-        st.dataframe(pd.DataFrame(link_rows))
+    # Show key devices and their status
+    key_devices = ["wan-delhi", "dc1-delhi", "rtr-delhi", "fw-delhi"]
+    device_status_data = []
+    for hostname in key_devices:
+        device = orchestrator.simulator.devices.get(hostname)
+        if device:
+            device_status_data.append({
+                "Device": hostname,
+                "Status": device.status.upper(),
+                "CPU": f"{device.cpu:.1f}%",
+                "BGP Sessions": f"{sum(1 for s in device.bgp_sessions if s.get('state') == 'Established')}/{len(device.bgp_sessions)}"
+            })
+    
+    if device_status_data:
+        st.dataframe(pd.DataFrame(device_status_data))
     else:
         st.info("No topology data to display.")
 
