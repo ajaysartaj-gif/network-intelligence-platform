@@ -254,29 +254,38 @@ class TelemetryEngine:
         latencies = [m.latency_ms for m in all_metrics.values()]
         packet_losses = [m.packet_loss_pct for m in all_metrics.values()]
 
+        high_cpu = sum(1 for c in cpus if c > 80)
+        high_memory = sum(1 for m in memories if m > 80)
+        high_latency = sum(1 for l in latencies if l > 100)
+        high_packet_loss = sum(1 for p in packet_losses if p > 3)
+        bgp_down = sum(m.bgp_sessions_down for m in all_metrics.values())
+
         return {
             "cpu": {
                 "average": sum(cpus) / len(cpus),
                 "max": max(cpus),
                 "min": min(cpus),
-                "high_count": sum(1 for c in cpus if c > 80),
+                "high_count": high_cpu,
             },
             "memory": {
                 "average": sum(memories) / len(memories),
                 "max": max(memories),
                 "min": min(memories),
-                "high_count": sum(1 for m in memories if m > 80),
+                "high_count": high_memory,
             },
             "latency_ms": {
                 "average": sum(latencies) / len(latencies),
                 "max": max(latencies),
                 "min": min(latencies),
+                "high_count": high_latency,
             },
             "packet_loss_pct": {
                 "average": sum(packet_losses) / len(packet_losses),
                 "max": max(packet_losses),
-                "high_count": sum(1 for p in packet_losses if p > 1),
+                "high_count": high_packet_loss,
             },
+            "bgp_down_sessions": bgp_down,
+            "critical_device_count": len(self.state.get_critical_devices()),
         }
 
     def get_device_health_score(self, hostname: str) -> Dict[str, Any]:

@@ -263,13 +263,16 @@ class EventEngine:
         
         incident_id = f"INC-{int(datetime.utcnow().timestamp())}"
         
+        affected_devices = [device] if device != "unknown" else []
+        affected_services = self.state.calculate_service_impact(affected_devices).get("impacted_services", [])
+
         self.state.create_incident(
             incident_id=incident_id,
             title=title,
             description=description,
             severity=severity,
-            affected_devices=[device] if device != "unknown" else [],
-            affected_services=[],
+            affected_devices=affected_devices,
+            affected_services=affected_services,
         )
 
         return incident_id

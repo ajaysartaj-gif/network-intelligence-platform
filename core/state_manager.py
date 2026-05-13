@@ -120,7 +120,12 @@ class StateManager:
             "affected_services": affected_services,
             "created_at": datetime.utcnow().isoformat(),
             "updated_at": datetime.utcnow().isoformat(),
-            "timeline": [],
+            "timeline": [
+                {
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "note": "Incident opened by autonomous event engine.",
+                }
+            ],
         }
 
     def update_incident(

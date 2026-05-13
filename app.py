@@ -260,26 +260,46 @@ if workspace == "operations":
     if "demo_result" not in st.session_state:
         st.session_state["demo_result"] = {}
 
+    if "operations_initialized" not in st.session_state:
+        orchestrator.run_cycle()
+        st.session_state["operations_initialized"] = True
+
     demo_options = orchestrator.get_demo_scenarios()
     demo_labels = [scenario["label"] for scenario in demo_options]
     selected_demo_label = st.selectbox("Choose a demo scenario", demo_labels, key="demo_scenario_select")
     selected_demo_id = next((scenario["id"] for scenario in demo_options if scenario["label"] == selected_demo_label), demo_options[0]["id"])
 
-    if st.button("▶️ Launch Demo Scenario", type="primary"):
-        with st.spinner("Launching autonomous demo scenario..."):
-            demo_result = orchestrator.launch_demo_scenario(selected_demo_id)
-            st.session_state["demo_result"] = demo_result
-            st.session_state["demo_selected"] = selected_demo_label
+    with st.expander("▶️ Autonomous Demo Controls", expanded=True):
+        control_col1, control_col2, control_col3 = st.columns([2, 1, 1])
+        with control_col1:
+            if st.button("Launch Demo Scenario", type="primary", key="launch_demo"):
+                with st.spinner("Launching autonomous demo scenario..."):
+                    demo_result = orchestrator.launch_demo_scenario(selected_demo_id)
+                    st.session_state["demo_result"] = demo_result
+                    st.session_state["demo_selected"] = selected_demo_label
+                    st.success(f"Demo '{selected_demo_label}' launched.")
+        with control_col2:
+            if st.button("Run next autonomous cycle", key="run_cycle"):
+                cycle = orchestrator.run_cycle()
+                st.session_state["demo_result"] = {"last_cycle": cycle}
+                st.success(f"Completed cycle {cycle['cycle']} — {cycle['anomalies_detected']} anomalies detected.")
+        with control_col3:
+            if st.button("Run 3 autonomous cycles", key="run_3_cycles"):
+                cycle_batch = [orchestrator.run_cycle() for _ in range(3)]
+                st.session_state["demo_result"] = {"last_cycle_batch": cycle_batch}
+                st.success("Completed 3 autonomous cycles.")
 
     status = orchestrator.get_operational_status()
     topology = orchestrator.simulator.get_topology_summary()
     ai_summary = orchestrator.generate_operational_ai_summary()
+    telemetry = orchestrator.telemetry.get_health_metrics()
     demo_result = st.session_state.get("demo_result", {})
 
     health_score = status["operational_summary"]["operational_score"]
     critical_incidents = status["incidents"]["by_status"].get("new", 0) + status["incidents"]["by_status"].get("investigating", 0)
     pending_events = status["operational_summary"]["events_pending"]
     workflows_active = status["operational_summary"]["workflows_active"]
+    blast_radius = status["operational_summary"]["services"]["degraded"] + status["operational_summary"]["services"]["down"]
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
@@ -289,7 +309,7 @@ if workspace == "operations":
     with col3:
         st.metric("Health Score", f"{health_score:.0f}%", delta=f"{pending_events} pending events")
     with col4:
-        st.metric("Demo Scenario", selected_demo_label)
+        st.metric("Service Blast Radius", f"{blast_radius}", delta=f"{status['operational_summary']['services']['down']} down")
 
     st.progress(int(max(0, min(100, health_score))))
 
@@ -302,7 +322,25 @@ if workspace == "operations":
 
     if demo_result and demo_result.get("status") == "success":
         st.success(f"Demo '{st.session_state.get('demo_selected', selected_demo_label)}' launched successfully")
-        st.markdown("#### 🔔 Demo Event Timeline")
+
+    st.divider()
+    st.markdown("### Live Operational Dashboard")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("#### Network Telemetry")
+        st.metric("Average CPU", f"{telemetry['cpu']['average']:.1f}%", delta=f"{telemetry['cpu']['high_count']} devices >80%")
+        st.metric("Average Memory", f"{telemetry['memory']['average']:.1f}%", delta=f"{telemetry['memory']['high_count']} devices >80%")
+        st.metric("Avg Latency", f"{telemetry['latency_ms']['average']:.1f}ms", delta=f"{telemetry['latency_ms']['high_count']} >100ms")
+    with col2:
+        st.markdown("#### Impact Summary")
+        st.metric("Services Healthy", f"{status['operational_summary']['services']['healthy']}")
+        st.metric("Services Degraded", f"{status['operational_summary']['services']['degraded']}")
+        st.metric("BGP down sessions", f"{telemetry.get('bgp_down_sessions', 0)}", delta=f"{telemetry.get('critical_device_count', 0)} critical devices")
+
+    st.divider()
+    st.markdown("### Recent Event Timeline")
+    recent_events = orchestrator.get_demo_events(limit=20)
+    if recent_events:
         event_rows = [
             {
                 "timestamp": event.get("timestamp"),
@@ -310,25 +348,11 @@ if workspace == "operations":
                 "severity": event.get("severity"),
                 "description": event.get("description"),
             }
-            for event in demo_result.get("event_history", [])
+            for event in recent_events
         ]
-        if event_rows:
-            st.dataframe(pd.DataFrame(event_rows).sort_values(by="timestamp", ascending=False).head(10))
-
-    st.divider()
-    st.markdown("### Live Operational Dashboard")
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("#### Network Telemetry")
-        telemetry = orchestrator.telemetry.get_health_metrics()
-        st.metric("Average CPU", f"{telemetry['cpu']['average']:.1f}%", delta=f"{telemetry['cpu']['high_count']} high")
-        st.metric("Average Memory", f"{telemetry['memory']['average']:.1f}%", delta=f"{telemetry['memory']['high_count']} high")
-        st.metric("Avg Latency", f"{telemetry['latency_ms']['average']:.1f}ms", delta=f"{telemetry['packet_loss_pct']['high_count']} packet loss alerts")
-    with col2:
-        st.markdown("#### Impact Summary")
-        st.metric("Services Healthy", f"{status['operational_summary']['services']['healthy']}")
-        st.metric("Services Degraded", f"{status['operational_summary']['services']['degraded']}")
-        st.metric("Services Down", f"{status['operational_summary']['services']['down']}")
+        st.dataframe(pd.DataFrame(event_rows).sort_values(by="timestamp", ascending=False).head(12))
+    else:
+        st.info("No events have been generated yet.")
 
     st.divider()
     st.markdown("### Active Incidents")
@@ -339,6 +363,11 @@ if workspace == "operations":
             st.markdown(f"{severity_color} **{inc['id']}** — {inc['title']} — Status: {inc['status']}")
             if inc.get("affected_devices"):
                 st.markdown(f"_Affected devices:_ {', '.join(inc['affected_devices'])}")
+            if inc.get("affected_services"):
+                st.markdown(f"_Affected services:_ {', '.join(inc['affected_services'])}")
+            if inc.get("timeline"):
+                for note in inc["timeline"][-2:]:
+                    st.markdown(f"- {note['timestamp']}: {note['note']}")
     else:
         st.info("No active incidents right now.")
 
@@ -356,23 +385,20 @@ if workspace == "operations":
 elif workspace == "incident":
     st.header("🚨 Incident Management")
     
-    # Get live incident data
     status = orchestrator.get_operational_status()
     incidents_data = status["incidents"]
-    
-    # Incident metrics
+    open_incidents = incidents_data["by_status"].get("new", 0) + incidents_data["by_status"].get("investigating", 0)
+    critical_count = sum(1 for inc in orchestrator.state.get_all_incidents().values() if inc.get("severity") == "critical")
+    resolved_today = incidents_data["by_status"].get("resolved", 0)
+
     col1, col2, col3 = st.columns(3)
     with col1:
-        open_incidents = incidents_data["by_status"].get("new", 0) + incidents_data["by_status"].get("investigating", 0)
         st.metric("Open Incidents", open_incidents)
     with col2:
-        critical_count = sum(1 for inc in orchestrator.state.get_all_incidents().values() if inc.get("severity") == "critical")
         st.metric("Critical", critical_count)
     with col3:
-        resolved_today = incidents_data["by_status"].get("resolved", 0)  # Placeholder, could track daily
         st.metric("Resolved Today", resolved_today)
     
-    # Active incidents
     st.subheader("Active Incidents")
     all_incidents = orchestrator.state.get_all_incidents()
     
@@ -381,16 +407,22 @@ elif workspace == "incident":
             if inc["status"] in ["new", "investigating"]:
                 severity_color = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(inc["severity"], "⚪")
                 st.error(f"{severity_color} **{inc_id}**: {inc['title']} - {inc['status']}")
+                if inc.get("affected_devices"):
+                    st.markdown(f"_Affected devices:_ {', '.join(inc['affected_devices'])}")
+                if inc.get("affected_services"):
+                    st.markdown(f"_Affected services:_ {', '.join(inc['affected_services'])}")
+                if inc.get("timeline"):
+                    for note in inc["timeline"][-3:]:
+                        st.markdown(f"- {note['timestamp']}: {note['note']}")
     else:
         st.info("No active incidents")
 
 elif workspace == "topology":
     st.header("🗺 Network Topology")
     
-    # Get live topology data
     topology = orchestrator.simulator.get_topology_summary()
+    critical_devices = len(orchestrator.state.get_critical_devices())
     
-    # Topology metrics
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Nodes", topology.get("total_devices", 0))
@@ -399,19 +431,15 @@ elif workspace == "topology":
     with col3:
         st.metric("Sites", len(topology.get("sites", {})))
     with col4:
-        healthy = topology.get("healthy_devices", 0)
-        total = topology.get("total_devices", 1)
-        health_pct = int((healthy / total) * 100) if total > 0 else 0
-        st.metric("Health", f"{health_pct}%")
+        st.metric("Critical Devices", critical_devices)
     
     st.subheader("Topology Visualization")
     st.info("Interactive topology map would be displayed here")
     
-    # Live topology data
     st.subheader("Network Links")
     links_data = [
         {"source": link.source, "target": link.destination, "type": link.link_type, "status": link.status}
-        for link in orchestrator.simulator.links[:10]  # Show first 10 links
+        for link in orchestrator.simulator.links[:10]
     ]
     if links_data:
         st.dataframe(pd.DataFrame(links_data))
@@ -421,69 +449,65 @@ elif workspace == "topology":
 elif workspace == "security":
     st.header("🔒 Security Operations")
     
-    # Security metrics
+    status = orchestrator.get_operational_status()
+    compliance_score = min(100, max(60, int(status["operational_summary"]["operational_score"] + 5)))
+    threat_count = sum(1 for inc in orchestrator.state.get_all_incidents().values() if inc.get("severity") in {"critical", "high"})
+    config_drift = len([cid for cid, comp in orchestrator.state.compliance_status.items() if comp.get("status") != "healthy"])
+    
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("Threats Detected", "24", "+5")
+        st.metric("Threats Detected", threat_count, "+ network-aware")
     with col2:
-        st.metric("Compliance Score", "92%", "+1%")
+        st.metric("Compliance Score", f"{compliance_score}%", "+ operational")
     with col3:
-        st.metric("Blocked Attacks", "156", "+12")
+        st.metric("Config Drift Events", config_drift)
     
     st.subheader("Security Alerts")
-    alerts = [
-        {"type": "Intrusion", "device": "BLR-FW-01", "severity": "high", "description": "Suspicious traffic from unknown IP"},
-        {"type": "Compliance", "device": "HYD-LEAF-02", "severity": "medium", "description": "Configuration drift detected"},
-        {"type": "Anomaly", "device": "DEL-CORE-01", "severity": "low", "description": "Unusual BGP route changes"},
-    ]
-    
-    for alert in alerts:
-        if alert["severity"] == "high":
-            st.error(f"🚨 {alert['type']}: {alert['description']} on {alert['device']}")
-        elif alert["severity"] == "medium":
-            st.warning(f"⚠️ {alert['type']}: {alert['description']} on {alert['device']}")
-        else:
-            st.info(f"ℹ️ {alert['type']}: {alert['description']} on {alert['device']}")
+    for inc in orchestrator.state.get_all_incidents().values():
+        if inc.get("severity") in {"critical", "high"}:
+            st.error(f"🚨 {inc['title']}: {inc['description']}")
+        elif inc.get("severity") == "medium":
+            st.warning(f"⚠️ {inc['title']}: {inc['description']}")
+    if not orchestrator.state.get_all_incidents():
+        st.info("No active security incidents.")
 
 elif workspace == "executive":
     st.header("📈 Executive Dashboard")
     
-    # Executive metrics
+    status = orchestrator.get_operational_status()
+    health_score = status["operational_summary"]["operational_score"]
+    open_incidents = status["incidents"]["by_status"].get("new", 0) + status["incidents"]["by_status"].get("investigating", 0)
+    critical_incidents = sum(1 for inc in orchestrator.state.get_all_incidents().values() if inc.get("severity") in {"critical", "high"})
+    services_down = status["operational_summary"]["services"]["down"]
+
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("Network Health", "94%", "+2%")
+        st.metric("Network Health", f"{health_score:.0f}%", f"{services_down} services impacted")
     with col2:
-        st.metric("Uptime", "99.97%", "0.01%")
+        st.metric("Open Incidents", open_incidents, f"{critical_incidents} critical")
     with col3:
-        st.metric("MTTR", "45min", "-5min")
+        st.metric("MTTR", "~45 min", "demo metric")
     with col4:
-        st.metric("Cost Savings", "$2.3M", "+$150K")
+        st.metric("Risk Exposure", f"{min(100, 100 - int(health_score))}%", "Operational risk")
     
     st.subheader("Key Insights")
     insights = [
-        "Network reliability improved by 3% this quarter",
-        "Automated incident resolution reduced MTTR by 15 minutes",
-        "AI-driven diagnostics prevented 12 potential outages",
-        "Compliance automation saved 200 hours of manual work",
+        f"Health score is {health_score:.0f}% with {open_incidents} open incidents.",
+        f"Critical incidents are affecting {services_down} services and require NOC escalation.",
+        f"Autonomous workflows are tracking {status['operational_summary']['workflows_active']} active remediation workflows.",
+        "AI operational guidance is suggesting immediate WAN and BGP stabilization steps.",
     ]
     
     for insight in insights:
         st.success(f"✅ {insight}")
     
     st.subheader("Risk Analysis")
-    risks = [
-        {"level": "Low", "description": "Scheduled maintenance window approaching"},
-        {"level": "Medium", "description": "Vendor security advisory for BGP protocol"},
-        {"level": "High", "description": "Critical link utilization above 85%"},
-    ]
-    
-    for risk in risks:
-        if risk["level"] == "High":
-            st.error(f"🔴 {risk['description']}")
-        elif risk["level"] == "Medium":
-            st.warning(f"🟠 {risk['description']}")
-        else:
-            st.info(f"🟢 {risk['description']}")
+    if health_score < 70:
+        st.error("🔴 Elevated risk: network health below 70% and critical service impact present.")
+    elif health_score < 85:
+        st.warning("🟠 Medium risk: maintain heightened monitoring and resolve open incidents.")
+    else:
+        st.info("🟢 Low risk: continue running autonomous remediation workflows.")
 
 else:
     # Default operations view

@@ -336,19 +336,32 @@ class OperationsOrchestrator:
         score = self.state.global_operational_score
         service_impact = self.state.calculate_service_impact(critical_devices)
 
-        root_cause = "No active issues detected." if not critical_incidents else f"Root cause appears to be {critical_incidents[0]['title']} affecting {', '.join(critical_incidents[0].get('affected_devices', [])) or 'core infrastructure'}." 
-        executive = (
-            "Operational risk is elevated as Delhi services are under stress and a critical incident is active. "
-            "AI recommends focused remediation on the affected device and service dependency chain."
-        ) if critical_incidents else "Network health is stable with no critical incidents."
+        if critical_incidents:
+            incident = critical_incidents[0]
+            affected_devices = incident.get("affected_devices", [])
+            impacted_services = service_impact.get("impacted_services", [])
+            impacted_text = ", ".join(impacted_services) if impacted_services else "downstream services"
+            device_text = ", ".join(affected_devices) if affected_devices else "core infrastructure"
+            root_cause = (
+                f"{incident['title']} on {device_text} is causing service impact to {impacted_text}. "
+                "Telemetry indicates elevated latency and packet loss on the affected WAN path."
+            )
+            executive = (
+                f"Critical incident '{incident['title']}' is active. Impact analysis shows {impacted_text} are degraded and BGP/WAN stability must be restored immediately. "
+                "Prioritize route convergence, reset the affected peering session, and stabilize the service dependency chain."
+            )
+            recommendation = (
+                "Review BGP neighbor state on the affected router, validate WAN circuit quality, and restore traffic-engineered paths for impacted services."
+            )
+        else:
+            root_cause = "Network is stable with no critical incidents detected."
+            executive = "Operational metrics are healthy and no active outages are present. Continue monitoring core BGP, WAN, and service dependencies."
+            recommendation = "Maintain current automation posture and verify SLAs on the next maintenance window."
 
         return {
             "root_cause": root_cause,
             "executive_summary": executive,
-            "recommendation": (
-                "Validate BGP state, restore degraded WAN links, and prioritize remediation for impacted services."
-                if critical_incidents else "Continue monitoring and maintain current automation posture."
-            ),
+            "recommendation": recommendation,
             "service_impact": service_impact,
             "critical_incidents": [inc["title"] for inc in critical_incidents[:3]],
             "health_score": score,
