@@ -18,6 +18,12 @@ from core.simulation_engine import SimulationEngine
 from core.telemetry_engine import TelemetryEngine
 from core.event_engine import EventEngine
 
+try:
+    from config.netmiko_devices import load_device_catalog
+except Exception:
+    def load_device_catalog():
+        return []
+
 logger = logging.getLogger(__name__)
 
 
@@ -51,8 +57,13 @@ class OperationsOrchestrator:
         # New event-driven autonomous engines
         self.state = StateManager()
         self.simulator = SimulationEngine()
-        self.telemetry = TelemetryEngine(self.simulator, self.state)
+        device_catalog = load_device_catalog()
+        self.telemetry = TelemetryEngine(self.simulator, self.state, device_catalog=device_catalog)
         self.events = EventEngine(self.state, self.telemetry)
+        if device_catalog:
+            logger.info(f"Live mode: loaded {len(device_catalog)} device(s) from catalog")
+        else:
+            logger.info("Simulation mode: no live device catalog configured")
         
         # Tracking
         self.query_history: List[QueryRecord] = []

@@ -21,7 +21,7 @@ st.set_page_config(
 # =========================================================
 
 import os
-from core.ai_engine import ask_ai, get_api_key
+from core.ai_engine import ask_ai
 from core.orchestration_engine import OperationsOrchestrator
 import time
 import random
@@ -126,7 +126,12 @@ if DATABASE_AVAILABLE:
     except Exception as e:
         logger.warning(f"Database seed failed: {e}")
 
-orchestrator = OperationsOrchestrator()
+@st.cache_resource
+def _get_orchestrator():
+    """Create orchestrator once per session; cache_resource survives reruns."""
+    return OperationsOrchestrator()
+
+orchestrator = _get_orchestrator()
 
 # =========================================================
 # AI CONFIG
@@ -136,7 +141,7 @@ OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 MODEL_NAME = "anthropic/claude-3.5-sonnet"
 
 
-def get_api_key():
+def _resolve_api_key() -> str:
     try:
         return st.secrets.get("OPENROUTER_API_KEY", "")
     except Exception:
@@ -144,12 +149,11 @@ def get_api_key():
 
 
 @st.cache_resource
-
 def get_ai_client():
     if not OPENAI_AVAILABLE:
         return None
 
-    key = get_api_key()
+    key = _resolve_api_key()
 
     if not key:
         return None
@@ -174,8 +178,8 @@ and operational guidance.
 def call_ai(user_query: str):
     if not OPENAI_AVAILABLE:
         return "AI unavailable: OpenAI library not installed."
-    
-    api_key = get_api_key()
+
+    api_key = _resolve_api_key()
     if not api_key:
         return "AI unavailable: OPENROUTER_API_KEY not configured."
     
@@ -419,36 +423,71 @@ def _attempt_autonomous_recovery(anomalies: List[dict], telemetry_data: dict) ->
 
 
 def poll_live_telemetry():
-    """Poll live telemetry and detect operational changes."""
+    """Poll live telemetry, detect anomalies, create incidents, and trigger RCA."""
     try:
         telemetry_data = orchestrator.telemetry.collect_all_telemetry()
-        current_hash = hash(str(telemetry_data))
-        last_hash = st.session_state.get("last_telemetry_hash")
         anomalies = orchestrator.telemetry.detect_anomalies()
+
+        logger.info(
+            f"[POLL] telemetry collected | devices={len(telemetry_data.get('device_metrics', {}))} "
+            f"| anomalies={len(anomalies)}"
+        )
+
+        current_hash = hash(str(sorted(str(anomalies))))
+        last_hash = st.session_state.get("last_telemetry_hash")
 
         if last_hash is None or current_hash != last_hash:
             st.session_state["last_telemetry_hash"] = current_hash
+
+            # Process anomalies → generate incidents
             incident_ids = orchestrator.events.process_anomalies(anomalies)
-            _process_recovery_events(anomalies)
-            st.session_state["live_event_feed"] = orchestrator.events.get_event_history(limit=20)
 
             if incident_ids:
+                logger.info(f"[INCIDENTS] Created: {incident_ids}")
+                for inc_id in incident_ids:
+                    inc = orchestrator.state.get_incident(inc_id)
+                    if inc:
+                        related_anomaly = next(
+                            (a for a in anomalies if a.get("device") in inc.get("affected_devices", [])),
+                            anomalies[0] if anomalies else None,
+                        )
+                        if related_anomaly:
+                            add_live_alert(
+                                related_anomaly.get("severity", "high"),
+                                f"{related_anomaly['type'].replace('_', ' ').title()} on "
+                                f"{related_anomaly.get('device', 'unknown')}",
+                                related_anomaly,
+                            )
+                            # Trigger non-blocking RCA for first new incident
+                            if not st.session_state.get("ai_rca_active"):
+                                st.session_state["ai_rca_active"] = True
+                                start_ai_rca(inc_id, related_anomaly)
+
+            # Detect recoveries from cleared anomaly signatures
+            _process_recovery_events(anomalies)
+
+            # Refresh live event feed
+            st.session_state["live_event_feed"] = orchestrator.events.get_event_history(limit=20)
+
+            # Rebuild incident timeline
+            if incident_ids or anomalies:
                 event_history = orchestrator.events.get_event_history(limit=15)
                 timeline_entries = [
                     {
-                        "timestamp": event.get("timestamp"),
-                        "event": event.get("type", "unknown").replace("_", " ").title(),
-                        "details": event.get("description", ""),
-                        "severity": event.get("severity", "info"),
+                        "timestamp": ev.get("timestamp"),
+                        "event": ev.get("type", "unknown").replace("_", " ").title(),
+                        "details": ev.get("description", ""),
+                        "severity": ev.get("severity", "info"),
                     }
-                    for event in event_history[-15:]
+                    for ev in reversed(event_history[-15:])
                 ]
-                st.session_state["incident_timeline"] = list(reversed(timeline_entries))
+                st.session_state["incident_timeline"] = timeline_entries
 
         _attempt_autonomous_recovery(anomalies, telemetry_data)
         return telemetry_data
+
     except Exception as e:
-        logger.error(f"Live telemetry poll failed: {e}")
+        logger.error(f"[POLL] Live telemetry poll failed: {e}", exc_info=True)
         return {}
 
 
@@ -488,7 +527,7 @@ def add_live_alert(severity: str, message: str, anomaly: dict):
         "severity": severity,
         "message": message,
         "anomaly": anomaly,
-        "id": f"alert_{int(time.time() * 1000)}"
+        "id": f"alert_{datetime.utcnow().strftime('%H%M%S%f')}"
     }
     st.session_state["live_alerts"].insert(0, alert)
 
@@ -500,7 +539,7 @@ def add_live_alert(severity: str, message: str, anomaly: dict):
 def create_live_incident(anomaly: dict):
     """Create incident from operational anomaly."""
     try:
-        incident_id = f"INC-{int(time.time())}"
+        incident_id = f"INC-{datetime.utcnow().strftime('%H%M%S%f')}"
         affected_devices = [anomaly["device"]] if anomaly.get("device") else []
         impacted_services = orchestrator.state.calculate_service_impact(affected_devices).get("impacted_services", [])
 
@@ -557,58 +596,50 @@ def _build_local_rca_summary(incident_id: str, anomaly: dict) -> str:
 
 
 def start_ai_rca(incident_id: str, anomaly: dict):
-    """Start autonomous AI RCA workflow."""
-    st.session_state["ai_rca_active"] = True
-    st.session_state["ai_rca_steps"] = []
+    """Run autonomous AI RCA — non-blocking, no sleep."""
+    device = anomaly.get("device", "unknown")
+    logger.info(f"[RCA] Starting RCA for incident {incident_id} on {device}")
 
     steps = [
-        "Analyzing telemetry data...",
+        "Collecting live telemetry...",
         "Validating interface state...",
-        "Checking routing state...",
-        "Validating neighboring links...",
-        "Checking BGP adjacency...",
+        "Checking routing adjacency...",
+        "Checking BGP sessions...",
         "Correlating operational failures...",
+        "Computing service blast radius...",
         "Generating root cause analysis...",
-        "Generating remediation recommendations..."
+        "Generating remediation recommendations...",
+    ]
+    rca_steps = [
+        {"timestamp": datetime.utcnow().isoformat(), "step": s, "status": "completed"}
+        for s in steps
     ]
 
-    for step in steps:
-        st.session_state["ai_rca_steps"].append({
-            "timestamp": datetime.utcnow().isoformat(),
-            "step": step,
-            "status": "in_progress"
-        })
-        time.sleep(0.4)
-
     try:
-        rca_query = f"""
-        Analyze this operational incident:
-        Incident ID: {incident_id}
-        Type: {anomaly['type']}
-        Device: {anomaly.get('device', 'unknown')}
-        Severity: {anomaly.get('severity', 'high')}
-        Description: {anomaly.get('description', 'N/A')}
-        Current metrics: {orchestrator.state.get_device_metrics(anomaly.get('device', 'unknown'))}
-        Impacted services: {orchestrator.state.calculate_service_impact([anomaly.get('device', 'unknown')]).get('impacted_services', [])}
-
-        Provide an operational summary, root cause, impacted services, operational severity, recommended actions, and recovery validation steps.
-        """
-
-        if OPENAI_AVAILABLE:
-            rca_result = call_ai(rca_query)
-        else:
-            rca_result = _build_local_rca_summary(incident_id, anomaly)
-
-        st.session_state["ai_rca_steps"][-1]["status"] = "completed"
-        st.session_state["ai_rca_steps"][-1]["result"] = rca_result
-
-        orchestrator.state.update_incident(incident_id, status="investigating", note=f"AI RCA: {rca_result[:200]}...")
-
+        rca_query = (
+            f"Analyze this network incident:\n"
+            f"Incident ID: {incident_id}\n"
+            f"Type: {anomaly.get('type', 'unknown')}\n"
+            f"Device: {device}\n"
+            f"Severity: {anomaly.get('severity', 'high')}\n"
+            f"Description: {anomaly.get('description', 'N/A')}\n"
+            f"Impacted services: {orchestrator.state.calculate_service_impact([device]).get('impacted_services', [])}\n"
+            "Provide: operational summary, root cause, impacted services, "
+            "recommended actions, recovery validation steps."
+        )
+        rca_result = call_ai(rca_query) if OPENAI_AVAILABLE else _build_local_rca_summary(incident_id, anomaly)
+        rca_steps[-1]["result"] = rca_result
+        orchestrator.state.update_incident(
+            incident_id, status="investigating",
+            note=f"AI RCA completed: {rca_result[:200]}..."
+        )
+        logger.info(f"[RCA] Completed for incident {incident_id}")
     except Exception as e:
-        logger.error(f"AI RCA failed: {e}")
-        st.session_state["ai_rca_steps"][-1]["status"] = "failed"
-        st.session_state["ai_rca_steps"][-1]["error"] = str(e)
+        logger.error(f"[RCA] Failed for incident {incident_id}: {e}")
+        rca_steps[-1]["status"] = "failed"
+        rca_steps[-1]["error"] = str(e)
 
+    st.session_state["ai_rca_steps"] = rca_steps
     st.session_state["ai_rca_active"] = False
 
 
@@ -666,7 +697,20 @@ with st.sidebar:
     
     with col2:
         st.success("Streamlit ✓")
-        st.info("v2.0")
+        live_label = "Live ✓" if orchestrator.telemetry.live_mode else "Sim ✓"
+        st.info(live_label)
+
+    st.divider()
+    st.markdown("### Operational Debug")
+    device_count = len(orchestrator.state.get_all_device_metrics())
+    incident_count = len(orchestrator.state.get_all_incidents())
+    anomaly_count = len(orchestrator.telemetry.detect_anomalies())
+    event_count = len(orchestrator.events.get_event_history())
+    st.caption(f"Devices: {device_count} | Incidents: {incident_count}")
+    st.caption(f"Anomalies: {anomaly_count} | Events: {event_count}")
+    st.caption(f"Mode: {'LIVE' if orchestrator.telemetry.live_mode else 'SIM'}")
+    poll_age = time.time() - st.session_state.get("last_poll_time", 0)
+    st.caption(f"Last poll: {poll_age:.0f}s ago")
 
 # =========================================================
 # WORKSPACE CONTENT
@@ -674,23 +718,23 @@ with st.sidebar:
 
 workspace = st.session_state.workspace
 
-if workspace == "operations":
-    st.header("� Autonomous NOC Operations Center")
+if workspace == "Net Ops":
+    st.header("⚡ Autonomous NOC Operations Center")
     st.markdown("### Live operational intelligence — real-time failure correlation")
 
-    if "live_initialized" not in st.session_state:
-        st.session_state["live_initialized"] = True
+    POLL_INTERVAL_SECS = 5
 
     if "last_poll_time" not in st.session_state:
-        st.session_state["last_poll_time"] = time.time()
-    
+        st.session_state["last_poll_time"] = 0.0
+
     current_time = time.time()
-    if current_time - st.session_state["last_poll_time"] > 5:
+    elapsed = current_time - st.session_state["last_poll_time"]
+
+    if elapsed >= POLL_INTERVAL_SECS:
         telemetry_data = poll_live_telemetry()
         st.session_state["last_poll_time"] = current_time
-        st.experimental_rerun()
     else:
-        telemetry_data = orchestrator.telemetry.collect_all_telemetry()
+        telemetry_data = st.session_state.get("_last_telemetry", {})
 
     status = orchestrator.get_operational_status()
     summary = status["operational_summary"]
@@ -856,6 +900,13 @@ if workspace == "operations":
     else:
         st.info("Topology nominal — no path data available.")
 
+    # ── Auto-refresh: block for POLL_INTERVAL_SECS then rerun ──────────
+    remaining = max(0.0, POLL_INTERVAL_SECS - (time.time() - st.session_state["last_poll_time"]))
+    st.caption(f"Next telemetry poll in {remaining:.0f}s")
+    if remaining > 0:
+        time.sleep(remaining)
+    st.rerun()
+
 elif workspace == "incident":
     st.header("🚨 Incident Management")
     
@@ -932,15 +983,19 @@ elif workspace == "topology":
     critical_devices = len(orchestrator.state.get_critical_devices())
     unreachable_count = sum(1 for m in orchestrator.state.get_all_device_metrics().values() if getattr(m, "reachable", True) is False)
 
+    summary = status["operational_summary"]
+    dev_summary = summary.get("devices", {})
+    link_summary = summary.get("links", {})
+
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("Total Devices", status["operational_summary"]["devices"]["total"])
+        st.metric("Total Devices", dev_summary.get("total", summary.get("total_devices", 0)))
     with col2:
-        st.metric("Healthy Devices", status["operational_summary"]["devices"]["healthy"], delta=f"{unreachable_count} unreachable")
+        st.metric("Healthy Devices", dev_summary.get("healthy", 0), delta=f"{unreachable_count} unreachable")
     with col3:
         st.metric("Critical Devices", critical_devices)
     with col4:
-        st.metric("Links Active", status["operational_summary"]["links"]["active"])
+        st.metric("Links Active", link_summary.get("active", 0))
     
     st.subheader("Live Device Status")
     
