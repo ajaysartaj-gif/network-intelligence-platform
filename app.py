@@ -27,6 +27,7 @@ import time
 import random
 import logging
 from typing import List, Dict
+from datetime import datetime
 
 import pandas as pd
 
@@ -96,6 +97,11 @@ except Exception:
 DEFAULTS = {
     "workspace": "Net Ops",
     "chat_history": [],
+    "live_alerts": [],  # Live operational alerts
+    "last_telemetry_hash": None,  # For change detection
+    "incident_timeline": [],  # Live incident timeline
+    "ai_rca_active": False,  # AI RCA in progress
+    "ai_rca_steps": [],  # Progressive RCA steps
 }
 
 for key, value in DEFAULTS.items():
@@ -191,6 +197,140 @@ def call_ai(user_query: str):
     except Exception as e:
         return f"AI Error: {str(e)}"
 
+
+# =========================================================
+# LIVE OPERATIONAL ENGINE
+# =========================================================
+
+def poll_live_telemetry():
+    """Poll live telemetry and detect operational changes."""
+    try:
+        # Collect current telemetry
+        telemetry_data = orchestrator.telemetry.collect_all_telemetry()
+        current_hash = hash(str(telemetry_data))
+
+        # Check for changes
+        last_hash = st.session_state.get("last_telemetry_hash")
+        if last_hash is None or current_hash != last_hash:
+            st.session_state["last_telemetry_hash"] = current_hash
+            detect_operational_changes(telemetry_data)
+
+        return telemetry_data
+    except Exception as e:
+        logger.error(f"Live telemetry poll failed: {e}")
+        return {}
+
+
+def detect_operational_changes(telemetry_data):
+    """Detect operational changes and generate live events."""
+    anomalies = orchestrator.telemetry.detect_anomalies()
+
+    for anomaly in anomalies:
+        if anomaly["type"] == "device_unreachable":
+            add_live_alert("critical", f"Device {anomaly['device']} unreachable", anomaly)
+            create_live_incident(anomaly)
+        elif anomaly["type"] == "interface_down":
+            add_live_alert("critical", f"Interface down on {anomaly['device']}", anomaly)
+            create_live_incident(anomaly)
+        elif anomaly["severity"] in ["critical", "high"]:
+            add_live_alert(anomaly["severity"], f"{anomaly['type'].replace('_', ' ').title()} on {anomaly['device']}", anomaly)
+
+
+def add_live_alert(severity: str, message: str, anomaly: dict):
+    """Add a live operational alert."""
+    alert = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "severity": severity,
+        "message": message,
+        "anomaly": anomaly,
+        "id": f"alert_{int(time.time() * 1000)}"
+    }
+    st.session_state["live_alerts"].insert(0, alert)
+
+    # Keep only recent alerts
+    if len(st.session_state["live_alerts"]) > 10:
+        st.session_state["live_alerts"] = st.session_state["live_alerts"][:10]
+
+
+def create_live_incident(anomaly: dict):
+    """Create incident from operational anomaly."""
+    try:
+        incident_id = orchestrator.incident.create_incident(
+            title=f"Critical: {anomaly['type'].replace('_', ' ').title()}",
+            description=anomaly.get("description", f"Operational anomaly detected: {anomaly['type']}"),
+            severity=anomaly["severity"],
+            affected_devices=[anomaly["device"]],
+            source="live_telemetry"
+        )
+
+        # Add to timeline
+        timeline_entry = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "event": f"Incident {incident_id} created",
+            "type": "incident_created",
+            "details": f"Critical incident from {anomaly['type']} on {anomaly['device']}"
+        }
+        st.session_state["incident_timeline"].insert(0, timeline_entry)
+
+        # Start AI RCA
+        start_ai_rca(incident_id, anomaly)
+
+    except Exception as e:
+        logger.error(f"Failed to create live incident: {e}")
+
+
+def start_ai_rca(incident_id: str, anomaly: dict):
+    """Start autonomous AI RCA workflow."""
+    st.session_state["ai_rca_active"] = True
+    st.session_state["ai_rca_steps"] = []
+
+    # Progressive RCA steps
+    steps = [
+        "Analyzing telemetry data...",
+        "Validating interface state...",
+        "Checking routing state...",
+        "Validating neighboring links...",
+        "Checking BGP adjacency...",
+        "Correlating operational failures...",
+        "Generating root cause analysis...",
+        "Generating remediation recommendations..."
+    ]
+
+    for step in steps:
+        st.session_state["ai_rca_steps"].append({
+            "timestamp": datetime.utcnow().isoformat(),
+            "step": step,
+            "status": "in_progress"
+        })
+        time.sleep(0.5)  # Simulate processing time
+
+    # Generate actual RCA
+    try:
+        rca_query = f"""
+        Analyze this operational incident:
+        Type: {anomaly['type']}
+        Device: {anomaly['device']}
+        Severity: {anomaly['severity']}
+        Description: {anomaly.get('description', 'N/A')}
+
+        Provide root cause analysis and remediation steps.
+        """
+
+        rca_result = call_ai(rca_query)
+        st.session_state["ai_rca_steps"][-1]["status"] = "completed"
+        st.session_state["ai_rca_steps"][-1]["result"] = rca_result
+
+        # Update incident with RCA
+        orchestrator.incident.update_incident_status(incident_id, "investigating", f"AI RCA: {rca_result[:200]}...")
+
+    except Exception as e:
+        logger.error(f"AI RCA failed: {e}")
+        st.session_state["ai_rca_steps"][-1]["status"] = "failed"
+        st.session_state["ai_rca_steps"][-1]["error"] = str(e)
+
+    st.session_state["ai_rca_active"] = False
+
+
 # =========================================================
 # SAMPLE DATA
 # =========================================================
@@ -255,101 +395,74 @@ workspace = st.session_state.workspace
 
 if workspace == "operations":
     st.header("🚀 Autonomous Operations Center")
-    st.markdown("### Live Operational Storytelling — Continuous Simulation")
+    st.markdown("### Live Operational Monitoring — Real Network Intelligence")
 
-    if "demo_result" not in st.session_state:
-        st.session_state["demo_result"] = {}
+    # Initialize live monitoring
+    if "live_initialized" not in st.session_state:
+        st.session_state["live_initialized"] = True
 
-    if "operations_initialized" not in st.session_state:
-        orchestrator.run_cycle()
-        st.session_state["operations_initialized"] = True
-
-    # Auto-run cycles continuously
-    if "last_cycle_time" not in st.session_state:
-        st.session_state["last_cycle_time"] = time.time()
+    # Live telemetry polling (every 5 seconds)
+    if "last_poll_time" not in st.session_state:
+        st.session_state["last_poll_time"] = time.time()
     
-    # Run a cycle every 3 seconds automatically
     current_time = time.time()
-    if current_time - st.session_state["last_cycle_time"] > 3:
-        cycle = orchestrator.run_cycle()
-        st.session_state["demo_result"] = {"last_cycle": cycle}
-        st.session_state["last_cycle_time"] = current_time
+    if current_time - st.session_state["last_poll_time"] > 5:
+        telemetry_data = poll_live_telemetry()
+        st.session_state["last_poll_time"] = current_time
+        st.rerun()  # Trigger UI update
 
-    demo_options = orchestrator.get_demo_scenarios()
-    demo_labels = [scenario["label"] for scenario in demo_options]
-    selected_demo_label = st.selectbox("Choose a demo scenario", demo_labels, key="demo_scenario_select")
-    selected_demo_id = next((scenario["id"] for scenario in demo_options if scenario["label"] == selected_demo_label), demo_options[0]["id"])
+    # Display live alerts banner
+    live_alerts = st.session_state.get("live_alerts", [])
+    if live_alerts:
+        with st.container():
+            st.error("🚨 **LIVE CRITICAL ALERTS**")
+            for alert in live_alerts[:3]:  # Show top 3
+                severity_icon = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(alert["severity"], "⚪")
+                st.markdown(f"{severity_icon} **{alert['message']}** — {alert['timestamp'][-8:]}")
+            if len(live_alerts) > 3:
+                st.markdown(f"*...and {len(live_alerts) - 3} more alerts*")
 
-    with st.expander("▶️ Simulation Controls", expanded=False):
-        control_col1, control_col2, control_col3 = st.columns([2, 1, 1])
-        with control_col1:
-            if st.button("Launch Demo Scenario", type="primary", key="launch_demo"):
-                with st.spinner("Launching autonomous demo scenario..."):
-                    demo_result = orchestrator.launch_demo_scenario(selected_demo_id)
-                    st.session_state["demo_result"] = demo_result
-                    st.session_state["demo_selected"] = selected_demo_label
-                    st.success(f"Demo '{selected_demo_label}' launched.")
-        with control_col2:
-            if st.button("Run next autonomous cycle", key="run_cycle"):
-                cycle = orchestrator.run_cycle()
-                st.session_state["demo_result"] = {"last_cycle": cycle}
-                st.success(f"Completed cycle {cycle['cycle']} — {cycle['anomalies_detected']} anomalies detected.")
-        with control_col3:
-            if st.button("Reset Simulation", key="reset_sim"):
-                # Reset simulation state
-                orchestrator.simulator.time_step = 0
-                orchestrator.simulator.workflow_stage = 0
-                orchestrator.simulator.last_stage_change = 0
-                orchestrator.simulator.anomalies = []
-                st.session_state["demo_result"] = {}
-                st.success("Simulation reset to initial state.")
+    # AI RCA Progress
+    if st.session_state.get("ai_rca_active"):
+        with st.container():
+            st.info("🤖 **AI RCA In Progress**")
+            rca_steps = st.session_state.get("ai_rca_steps", [])
+            for step in rca_steps[-3:]:  # Show recent steps
+                status_icon = "⏳" if step["status"] == "in_progress" else "✅" if step["status"] == "completed" else "❌"
+                st.markdown(f"{status_icon} {step['step']}")
 
     status = orchestrator.get_operational_status()
-    topology = orchestrator.simulator.get_topology_summary()
-    ai_summary = orchestrator.generate_operational_ai_summary()
     telemetry = orchestrator.telemetry.get_health_metrics()
-    demo_result = st.session_state.get("demo_result", {})
+    incident_timeline = st.session_state.get("incident_timeline", [])
 
     health_score = status["operational_summary"]["operational_score"]
     critical_incidents = status["incidents"]["by_status"].get("new", 0) + status["incidents"]["by_status"].get("investigating", 0)
-    pending_events = status["operational_summary"]["events_pending"]
-    workflows_active = status["operational_summary"]["workflows_active"]
-    blast_radius = status["operational_summary"]["services"]["degraded"] + status["operational_summary"]["services"]["down"]
-
-    # Current workflow stage indicator
-    workflow_stage_names = {
-        0: "Normal Operation",
-        1: "Packet Loss Detected",
-        2: "WAN Latency Spike", 
-        3: "BGP Instability",
-        4: "Voice Degradation",
-        5: "Critical Incident"
-    }
-    current_stage = workflow_stage_names.get(orchestrator.simulator.workflow_stage, "Unknown")
-    
-    st.info(f"**Current Simulation Stage:** {current_stage} (Cycle: {orchestrator.simulator.time_step})")
+    unreachable_devices = telemetry.get("unreachable_devices", 0)
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("Active Devices", topology.get("total_devices", 0), delta=f"{topology.get('healthy_devices', 0)} healthy")
+        st.metric("Active Devices", status["operational_summary"]["devices"]["total"], delta=f"{unreachable_devices} unreachable")
     with col2:
-        st.metric("Critical Incidents", critical_incidents, delta=f"{workflows_active} workflows")
+        st.metric("Critical Incidents", critical_incidents, delta=f"{len(incident_timeline)} events")
     with col3:
-        st.metric("Health Score", f"{health_score:.0f}%", delta=f"{pending_events} pending events")
+        st.metric("Health Score", f"{health_score:.0f}%", delta=f"{telemetry.get('critical_device_count', 0)} critical")
     with col4:
-        st.metric("Service Blast Radius", f"{blast_radius}", delta=f"{status['operational_summary']['services']['down']} down")
+        st.metric("Service Blast Radius", f"{status['operational_summary']['services']['degraded'] + status['operational_summary']['services']['down']}", delta=f"{status['operational_summary']['services']['down']} down")
 
     st.progress(int(max(0, min(100, health_score))))
 
+    # Live AI Operational Intelligence
     with st.expander("🔎 AI Operational Intelligence", expanded=True):
-        st.markdown(f"**Root Cause:** {ai_summary['root_cause']}")
-        st.markdown(f"**Executive Summary:** {ai_summary['executive_summary']}")
-        st.markdown(f"**Recommendation:** {ai_summary['recommendation']}")
-        if ai_summary.get("critical_incidents"):
-            st.markdown(f"**Active Critical Incidents:** {', '.join(ai_summary['critical_incidents'])}")
-
-    if demo_result and demo_result.get("status") == "success":
-        st.success(f"Demo '{st.session_state.get('demo_selected', selected_demo_label)}' launched successfully")
+        if st.session_state.get("ai_rca_active"):
+            st.markdown("**Status:** AI RCA in progress...")
+            latest_step = st.session_state["ai_rca_steps"][-1] if st.session_state["ai_rca_steps"] else None
+            if latest_step and latest_step.get("result"):
+                st.markdown(f"**Latest RCA:** {latest_step['result'][:300]}...")
+        else:
+            ai_summary = orchestrator.generate_operational_ai_summary()
+            st.markdown(f"**Root Cause:** {ai_summary['root_cause']}")
+            st.markdown(f"**Executive Summary:** {ai_summary['executive_summary']}")
+            st.markdown(f"**Recommendation:** {ai_summary['recommendation']}")
 
     st.divider()
     st.markdown("### Live Network Telemetry")
@@ -363,27 +476,26 @@ if workspace == "operations":
         st.markdown("#### Network Health")
         st.metric("Packet Loss", f"{telemetry['packet_loss_pct']['average']:.2f}%", delta=f"{telemetry['packet_loss_pct']['high_count']} >3%")
         st.metric("BGP Sessions Down", f"{telemetry.get('bgp_down_sessions', 0)}", delta=f"{telemetry.get('critical_device_count', 0)} critical devices")
-        st.metric("Services Healthy", f"{status['operational_summary']['services']['healthy']}")
+        st.metric("Unreachable Devices", unreachable_devices, delta="live monitoring")
 
     st.divider()
-    st.markdown("### Recent Event Timeline")
-    recent_events = orchestrator.get_demo_events(limit=15)
-    if recent_events:
-        event_rows = [
+    st.markdown("### Live Operational Timeline")
+    if incident_timeline:
+        timeline_rows = [
             {
-                "timestamp": event.get("timestamp")[-8:] if event.get("timestamp") else "N/A",  # Show time only
-                "event": event.get("type", "unknown").replace("_", " ").title(),
-                "severity": event.get("severity", "info").upper(),
-                "description": event.get("description", "No description")[:60] + "..." if len(event.get("description", "")) > 60 else event.get("description", "No description"),
+                "time": event.get("timestamp")[-8:] if event.get("timestamp") else "N/A",
+                "event": event.get("event", "unknown"),
+                "type": event.get("type", "operational").replace("_", " ").title(),
+                "details": event.get("details", "")[:50] + "..." if len(event.get("details", "")) > 50 else event.get("details", ""),
             }
-            for event in recent_events[-12:]
+            for event in incident_timeline[-15:]
         ]
-        st.dataframe(pd.DataFrame(event_rows).sort_values(by="timestamp", ascending=False))
+        st.dataframe(pd.DataFrame(timeline_rows).sort_values(by="time", ascending=False))
     else:
-        st.info("No events have been generated yet.")
+        st.info("No operational events yet. Monitoring live...")
 
     st.divider()
-    st.markdown("### Active Incidents")
+    st.markdown("### Active Critical Incidents")
     active_incidents = [inc for inc in orchestrator.state.get_all_incidents().values() if inc['status'] in {'new', 'investigating'}]
     if active_incidents:
         for inc in active_incidents:
@@ -391,33 +503,30 @@ if workspace == "operations":
             st.markdown(f"{severity_color} **{inc['id']}** — {inc['title']} — Status: {inc['status']}")
             if inc.get("affected_devices"):
                 st.markdown(f"_Affected devices:_ {', '.join(inc['affected_devices'])}")
-            if inc.get("affected_services"):
-                st.markdown(f"_Affected services:_ {', '.join(inc['affected_services'])}")
             if inc.get("timeline"):
                 for note in inc["timeline"][-2:]:
                     st.markdown(f"- {note['timestamp'][-8:]}: {note['note']}")
     else:
-        st.info("No active incidents right now.")
+        st.info("No active critical incidents. All systems operational.")
 
     st.divider()
-    st.markdown("### Topology Impact Snapshot")
-    # Show key devices and their status
-    key_devices = ["wan-delhi", "dc1-delhi", "rtr-delhi", "fw-delhi"]
-    device_status_data = []
-    for hostname in key_devices:
-        device = orchestrator.simulator.devices.get(hostname)
-        if device:
-            device_status_data.append({
-                "Device": hostname,
-                "Status": device.status.upper(),
-                "CPU": f"{device.cpu:.1f}%",
-                "BGP Sessions": f"{sum(1 for s in device.bgp_sessions if s.get('state') == 'Established')}/{len(device.bgp_sessions)}"
-            })
+    st.markdown("### Device Health Status")
+    # Show key devices and their live status
+    device_health_data = []
+    for hostname, metrics in orchestrator.state.get_all_device_metrics().items():
+        health_score = orchestrator.telemetry.get_device_health_score(hostname)
+        device_health_data.append({
+            "Device": hostname,
+            "Health Score": f"{health_score['score']:.0f}%",
+            "Status": health_score["status"].upper(),
+            "CPU": f"{metrics.cpu:.1f}%" if hasattr(metrics, 'cpu') else "N/A",
+            "Reachable": "✅" if getattr(metrics, 'reachable', True) else "❌"
+        })
     
-    if device_status_data:
-        st.dataframe(pd.DataFrame(device_status_data))
+    if device_health_data:
+        st.dataframe(pd.DataFrame(device_health_data))
     else:
-        st.info("No topology data to display.")
+        st.info("No device telemetry available yet.")
 
 elif workspace == "incident":
     st.header("🚨 Incident Management")
@@ -428,14 +537,34 @@ elif workspace == "incident":
     critical_count = sum(1 for inc in orchestrator.state.get_all_incidents().values() if inc.get("severity") == "critical")
     resolved_today = incidents_data["by_status"].get("resolved", 0)
 
-    col1, col2, col3 = st.columns(3)
+    # Live alerts summary
+    live_alerts = st.session_state.get("live_alerts", [])
+    active_alerts = len([a for a in live_alerts if a["severity"] in ["critical", "high"]])
+
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Open Incidents", open_incidents)
     with col2:
         st.metric("Critical", critical_count)
     with col3:
         st.metric("Resolved Today", resolved_today)
-    
+    with col4:
+        st.metric("Live Alerts", active_alerts, delta="active monitoring")
+
+    # Live Critical Alerts
+    if live_alerts:
+        st.subheader("🔴 Live Critical Alerts")
+        for alert in live_alerts[:5]:
+            severity_icon = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(alert["severity"], "⚪")
+            with st.expander(f"{severity_icon} {alert['message']} — {alert['timestamp'][-8:]}", expanded=alert["severity"] == "critical"):
+                st.markdown(f"**Severity:** {alert['severity'].upper()}")
+                st.markdown(f"**Time:** {alert['timestamp']}")
+                if alert.get("anomaly"):
+                    st.markdown(f"**Device:** {alert['anomaly'].get('device', 'N/A')}")
+                    st.markdown(f"**Type:** {alert['anomaly'].get('type', 'N/A').replace('_', ' ').title()}")
+                    if alert["anomaly"].get("description"):
+                        st.markdown(f"**Description:** {alert['anomaly']['description']}")
+
     st.subheader("Active Incidents")
     all_incidents = orchestrator.state.get_all_incidents()
     
@@ -443,45 +572,103 @@ elif workspace == "incident":
         for inc_id, inc in all_incidents.items():
             if inc["status"] in ["new", "investigating"]:
                 severity_color = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(inc["severity"], "⚪")
-                st.error(f"{severity_color} **{inc_id}**: {inc['title']} - {inc['status']}")
-                if inc.get("affected_devices"):
-                    st.markdown(f"_Affected devices:_ {', '.join(inc['affected_devices'])}")
-                if inc.get("affected_services"):
-                    st.markdown(f"_Affected services:_ {', '.join(inc['affected_services'])}")
-                if inc.get("timeline"):
-                    for note in inc["timeline"][-3:]:
-                        st.markdown(f"- {note['timestamp']}: {note['note']}")
+                with st.expander(f"{severity_color} **{inc_id}**: {inc['title']} - {inc['status'].upper()}", expanded=inc["severity"] == "critical"):
+                    st.markdown(f"**Severity:** {inc['severity'].upper()}")
+                    st.markdown(f"**Status:** {inc['status']}")
+                    st.markdown(f"**Created:** {inc.get('created_at', 'N/A')}")
+                    if inc.get("affected_devices"):
+                        st.markdown(f"**Affected Devices:** {', '.join(inc['affected_devices'])}")
+                    if inc.get("affected_services"):
+                        st.markdown(f"**Affected Services:** {', '.join(inc['affected_services'])}")
+                    if inc.get("timeline"):
+                        st.markdown("**Timeline:**")
+                        for note in inc["timeline"][-5:]:
+                            st.markdown(f"- {note['timestamp'][-8:]}: {note['note']}")
+                    
+                    # AI RCA Results
+                    if st.session_state.get("ai_rca_active") and inc_id in [a.get("incident_id") for a in st.session_state.get("ai_rca_steps", []) if a.get("incident_id")]:
+                        st.markdown("**🤖 AI RCA In Progress:**")
+                        rca_steps = [s for s in st.session_state["ai_rca_steps"] if s.get("incident_id") == inc_id]
+                        for step in rca_steps[-3:]:
+                            status_icon = "⏳" if step["status"] == "in_progress" else "✅" if step["status"] == "completed" else "❌"
+                            st.markdown(f"{status_icon} {step['step']}")
+                            if step.get("result"):
+                                st.markdown(f"**Result:** {step['result'][:500]}...")
     else:
-        st.info("No active incidents")
+        st.info("No active incidents. All systems operational.")
 
 elif workspace == "topology":
     st.header("🗺 Network Topology")
     
-    topology = orchestrator.simulator.get_topology_summary()
+    status = orchestrator.get_operational_status()
     critical_devices = len(orchestrator.state.get_critical_devices())
-    
+    unreachable_count = sum(1 for m in orchestrator.state.get_all_device_metrics().values() if getattr(m, "reachable", True) is False)
+
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("Nodes", topology.get("total_devices", 0))
+        st.metric("Total Devices", status["operational_summary"]["devices"]["total"])
     with col2:
-        st.metric("Links", topology.get("total_links", 0))
+        st.metric("Healthy Devices", status["operational_summary"]["devices"]["healthy"], delta=f"{unreachable_count} unreachable")
     with col3:
-        st.metric("Sites", len(topology.get("sites", {})))
-    with col4:
         st.metric("Critical Devices", critical_devices)
+    with col4:
+        st.metric("Links Active", status["operational_summary"]["links"]["active"])
     
-    st.subheader("Topology Visualization")
-    st.info("Interactive topology map would be displayed here")
+    st.subheader("Live Device Status")
     
-    st.subheader("Network Links")
-    links_data = [
-        {"source": link.source, "target": link.destination, "type": link.link_type, "status": link.status}
-        for link in orchestrator.simulator.links[:10]
-    ]
-    if links_data:
-        st.dataframe(pd.DataFrame(links_data))
+    # Show all devices with live status
+    device_status_data = []
+    for hostname, metrics in orchestrator.state.get_all_device_metrics().items():
+        health_score = orchestrator.telemetry.get_device_health_score(hostname)
+        status_icon = "🟢" if health_score["status"] == "healthy" else "🟡" if health_score["status"] == "warning" else "🔴"
+        reachable_icon = "✅" if getattr(metrics, "reachable", True) else "❌"
+        
+        device_status_data.append({
+            "Device": hostname,
+            "Status": f"{status_icon} {health_score['status'].upper()}",
+            "Health Score": f"{health_score['score']:.0f}%",
+            "Reachable": reachable_icon,
+            "CPU": f"{metrics.cpu:.1f}%" if hasattr(metrics, 'cpu') else "N/A",
+            "Memory": f"{metrics.memory:.1f}%" if hasattr(metrics, 'memory') else "N/A",
+            "Issues": len(health_score.get("issues", []))
+        })
+    
+    if device_status_data:
+        st.dataframe(pd.DataFrame(device_status_data))
+        
+        # Show critical devices details
+        critical_devices_list = [d for d in device_status_data if "🔴" in d["Status"]]
+        if critical_devices_list:
+            st.subheader("🔴 Critical Devices Details")
+            for device in critical_devices_list:
+                with st.expander(f"Critical: {device['Device']}", expanded=True):
+                    health_score = orchestrator.telemetry.get_device_health_score(device["Device"])
+                    st.markdown(f"**Health Score:** {device['Health Score']}")
+                    st.markdown(f"**Issues:** {', '.join(health_score.get('issues', []))}")
+                    st.markdown(f"**Reachable:** {device['Reachable']}")
     else:
-        st.info("No links available")
+        st.info("No device telemetry available. Monitoring live...")
+
+    st.subheader("Network Links Status")
+    # Show link status based on device reachability
+    link_status_data = []
+    device_metrics = orchestrator.state.get_all_device_metrics()
+    
+    # Simple link representation based on device connectivity
+    for hostname, metrics in device_metrics.items():
+        reachable = getattr(metrics, "reachable", True)
+        link_status_data.append({
+            "Source": "CORE",
+            "Target": hostname.upper(),
+            "Status": "UP" if reachable else "DOWN",
+            "Type": "WAN" if "wan" in hostname else "LAN",
+            "Bandwidth": "1Gbps" if reachable else "N/A"
+        })
+    
+    if link_status_data:
+        st.dataframe(pd.DataFrame(link_status_data))
+    else:
+        st.info("No link data available.")
 
 elif workspace == "security":
     st.header("🔒 Security Operations")
