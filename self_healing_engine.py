@@ -53,6 +53,42 @@ class SelfHealingEngine:
                     risk="high" if severity == "critical" else "medium",
                 )
             )
+        elif alert_type == "interface_down":
+            actions.append(
+                RemediationAction(
+                    action_id=f"R-{device_name}-IFDOWN",
+                    device=device_name,
+                    description="Verify interface status, check physical connectivity and neighbor link state before taking corrective action.",
+                    risk="medium",
+                )
+            )
+        elif alert_type == "device_unreachable":
+            actions.append(
+                RemediationAction(
+                    action_id=f"R-{device_name}-UNR",
+                    device=device_name,
+                    description="Validate management plane reachability, confirm device power and path availability, and collect diagnostics.",
+                    risk="medium",
+                )
+            )
+        elif alert_type == "packet_loss":
+            actions.append(
+                RemediationAction(
+                    action_id=f"R-{device_name}-LOSS",
+                    device=device_name,
+                    description="Inspect interface error counters and path quality, and validate QoS or congestion conditions.",
+                    risk="low",
+                )
+            )
+        elif alert_type == "latency_spike":
+            actions.append(
+                RemediationAction(
+                    action_id=f"R-{device_name}-LAT",
+                    device=device_name,
+                    description="Validate WAN path health, inspect latency-sensitive links, and verify packet forwarding behavior.",
+                    risk="low",
+                )
+            )
         else:
             actions.append(
                 RemediationAction(

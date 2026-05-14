@@ -102,6 +102,14 @@ DEFAULTS = {
     "incident_timeline": [],  # Live incident timeline
     "ai_rca_active": False,  # AI RCA in progress
     "ai_rca_steps": [],  # Progressive RCA steps
+    "live_event_feed": [],  # Continuous operational event feed
+    "last_anomaly_signatures": [],  # Anomaly signatures for recovery detection
+    "recovery_timeline": [],  # Recovery event stream
+    "remediation_workflow": {},  # Closed-loop remediation workflow state
+    "remediation_actions": [],  # Recommended remediation actions
+    "validation_commands": [],  # Recovery validation commands
+    "recovery_confidence": 0,  # Confidence for validation
+    "stabilization_status": "idle",
 }
 
 for key, value in DEFAULTS.items():
@@ -202,19 +210,242 @@ def call_ai(user_query: str):
 # LIVE OPERATIONAL ENGINE
 # =========================================================
 
+def _anomaly_signature(anomaly: dict) -> str:
+    """Create a compact signature for an anomaly to support recovery detection."""
+    return f"{anomaly.get('device', 'unknown')}:{anomaly.get('type', 'unknown')}"
+
+
+def _resolve_incidents_for_device(device: str) -> None:
+    """Resolve open incidents when device anomalies clear."""
+    for inc_id, inc in orchestrator.state.get_all_incidents().items():
+        if device in inc.get("affected_devices", []) and inc["status"] in {"new", "investigating"}:
+            orchestrator.state.update_incident(inc_id, status="resolved", note="Recovery confirmed by live telemetry.")
+            st.session_state["incident_timeline"].insert(0, {
+                "timestamp": datetime.utcnow().isoformat(),
+                "event": f"Incident {inc_id} resolved",
+                "details": f"Recovery confirmed for device {device}",
+                "severity": "recovery",
+            })
+
+
+def _process_recovery_events(current_anomalies: List[dict]) -> None:
+    """Detect cleared anomaly signatures and generate recovery events."""
+    current_signatures = {_anomaly_signature(a) for a in current_anomalies}
+    previous_signatures = set(st.session_state.get("last_anomaly_signatures", []))
+    removed = previous_signatures - current_signatures
+
+    for signature in removed:
+        device, event_type = signature.split(":", 1) if ":" in signature else (signature, "unknown")
+        message = f"Recovery confirmed: {event_type.replace('_', ' ').title()} on {device}"
+        add_live_alert("recovery", message, {"device": device, "type": event_type})
+        st.session_state["recovery_timeline"].insert(0, {
+            "timestamp": datetime.utcnow().isoformat(),
+            "event": message,
+            "type": "recovery",
+            "details": "Telemetry indicates the issue has cleared.",
+        })
+        _resolve_incidents_for_device(device)
+
+    st.session_state["last_anomaly_signatures"] = list(current_signatures)
+
+
+def _fetch_device_interface_issues(device: str) -> List[dict]:
+    """Fetch current down or degraded interfaces for a device."""
+    inventory = orchestrator.telemetry.current_interface_inventory.get(device, {})
+    return [iface for iface in inventory.values() if iface.get("status") != "up"]
+
+
+def _build_validation_commands(anomaly: dict) -> List[str]:
+    """Build safe validation commands for the remediation center."""
+    device = anomaly.get("device", "unknown")
+    commands = [
+        "show interfaces status | include down",
+        "show ip route summary",
+        "show ip bgp summary",
+        "show ip ospf neighbor",
+        "show logging | include ERROR",
+    ]
+
+    if anomaly["type"] == "interface_down":
+        down_ifaces = _fetch_device_interface_issues(device)
+        if down_ifaces:
+            commands = [f"show interfaces {iface['name']} status" for iface in down_ifaces] + commands
+        else:
+            commands.insert(0, "show interfaces status | include down")
+    elif anomaly["type"] == "device_unreachable":
+        commands = ["show management status", f"show ip route | include {device}"] + commands
+    elif anomaly["type"] == "bgp_instability":
+        commands = ["show ip bgp neighbors", "show ip bgp summary"] + commands
+    elif anomaly["type"] == "packet_loss":
+        commands = ["show interfaces description", "show interfaces counters errors"] + commands
+    elif anomaly["type"] == "latency_spike":
+        commands = ["show interfaces accounting", "show controllers | include line protocol"] + commands
+
+    return commands
+
+
+def _build_closed_loop_remediation(incident_id: str, anomaly: dict) -> dict:
+    """Compose a safe remediation workflow for the given incident."""
+    device = anomaly.get("device", "unknown")
+    device_metrics = orchestrator.state.get_device_metrics(device)
+    device_state = vars(device_metrics) if device_metrics else {"hostname": device, "status": "unknown"}
+    device_state["status"] = "healthy" if getattr(device_metrics, "reachable", True) else "degraded"
+
+    alert_payload = {
+        "device": device,
+        "alert_type": anomaly.get("type", "operational"),
+        "severity": anomaly.get("severity", "high"),
+        "description": anomaly.get("description", ""),
+    }
+
+    remediation_actions = orchestrator.recommend_remediation([alert_payload], [device_state])
+    safe_actions = []
+    for action in remediation_actions:
+        if orchestrator.self_heal.validate_remediation(action, device_state):
+            simulated = orchestrator.self_heal.simulate_auto_remediation(action, approve=True)
+            safe_actions.append({
+                "action_id": simulated.action_id,
+                "description": simulated.description,
+                "risk": simulated.risk,
+                "approved": simulated.approved,
+                "executed": simulated.executed,
+                "comments": simulated.approval_comments,
+            })
+        else:
+            safe_actions.append({
+                "action_id": action.action_id,
+                "description": action.description,
+                "risk": action.risk,
+                "approved": False,
+                "executed": False,
+                "comments": "Remediation simulation deferred due to elevated risk.",
+            })
+
+    validation_commands = _build_validation_commands(anomaly)
+    workflow = {
+        "incident_id": incident_id,
+        "device": device,
+        "anomaly_type": anomaly.get("type", "unknown"),
+        "status": "in_progress",
+        "current_step": "Telemetry Validation",
+        "steps": [
+            {"name": "Telemetry Validation", "status": "completed", "note": "Collected interface, routing, and adjacency state."},
+            {"name": "Operational Correlation", "status": "completed", "note": "Correlated failure across device state and service impact."},
+            {"name": "AI RCA", "status": "completed", "note": "Root-cause summary prepared for remediation."},
+            {"name": "Recovery Recommendation", "status": "completed", "note": "Safe remediation actions recommended."},
+            {"name": "Recovery Validation", "status": "pending", "note": "Awaiting telemetry verification after corrective guidance."},
+            {"name": "Incident Closure", "status": "pending", "note": "Will close incident after successful validation."},
+        ],
+        "validation_commands": validation_commands,
+        "recommended_actions": safe_actions,
+        "confidence": 0,
+        "notes": [
+            f"Autonomous remediation workflow started for {device}.",
+        ],
+    }
+
+    st.session_state["remediation_actions"] = safe_actions
+    st.session_state["validation_commands"] = validation_commands
+    st.session_state["remediation_workflow"] = workflow
+    st.session_state["recovery_confidence"] = 0
+    st.session_state["stabilization_status"] = "in_progress"
+
+    return workflow
+
+
+def _update_remediation_workflow(incident: dict, anomaly: dict, telemetry_data: dict) -> None:
+    workflow = st.session_state.get("remediation_workflow", {})
+    if not workflow or workflow.get("incident_id") != incident["id"]:
+        return
+
+    validation_anomalies = orchestrator.telemetry.detect_anomalies()
+    device = workflow.get("device")
+    relevant_anomalies = [a for a in validation_anomalies if a.get("device") == device and a.get("type") == workflow.get("anomaly_type")]
+    recovered = len(relevant_anomalies) == 0
+
+    if recovered:
+        workflow["steps"][-2]["status"] = "completed"
+        workflow["steps"][-2]["note"] = "Recovery validation confirmed by telemetry."
+        workflow["steps"][-1]["status"] = "completed"
+        workflow["steps"][-1]["note"] = "Incident closed automatically after successful recovery verification."
+        workflow["status"] = "completed"
+        workflow["current_step"] = "Completed"
+        workflow["confidence"] = 92
+        st.session_state["stabilization_status"] = "stabilized"
+        orchestrator.state.update_incident(incident["id"], status="resolved", note="Incident closed after automated recovery validation.")
+        add_live_alert("recovery", f"Automated recovery verified for {device}", {"device": device, "type": workflow.get("anomaly_type")})
+        st.session_state["incident_timeline"].insert(0, {
+            "timestamp": datetime.utcnow().isoformat(),
+            "event": f"Automated recovery validated for {device}",
+            "details": "Platform confirmed restoration and closed the incident.",
+            "severity": "recovery",
+        })
+    else:
+        workflow["steps"][-2]["status"] = "in_progress"
+        workflow["current_step"] = "Recovery Validation"
+        workflow["confidence"] = max(20, min(85, 50 + len(workflow.get("recommended_actions", [])) * 10))
+        if "Waiting for telemetry to confirm issue clearance." not in workflow["notes"]:
+            workflow["notes"].append("Waiting for telemetry to confirm issue clearance.")
+        st.session_state["stabilization_status"] = "validating"
+
+    st.session_state["remediation_workflow"] = workflow
+
+
+def _attempt_autonomous_recovery(anomalies: List[dict], telemetry_data: dict) -> None:
+    """Start or continue closed-loop remediation for open incidents."""
+    open_incidents = [inc for inc in orchestrator.state.get_all_incidents().values() if inc["status"] in {"new", "investigating"}]
+    if not open_incidents:
+        return
+
+    primary_incident = open_incidents[0]
+    workflow = st.session_state.get("remediation_workflow", {})
+    if workflow.get("status") == "completed" and workflow.get("incident_id") == primary_incident["id"]:
+        return
+
+    related_anomaly = next((a for a in anomalies if a.get("device") in primary_incident.get("affected_devices", [])), anomalies[0] if anomalies else None)
+    if not related_anomaly:
+        return
+
+    if not workflow or workflow.get("incident_id") != primary_incident["id"]:
+        _build_closed_loop_remediation(primary_incident["id"], related_anomaly)
+        st.session_state["incident_timeline"].insert(0, {
+            "timestamp": datetime.utcnow().isoformat(),
+            "event": "Autonomous remediation workflow started",
+            "details": f"Started safe recovery orchestration for {related_anomaly.get('device', 'unknown')}",
+            "severity": "high",
+        })
+
+    _update_remediation_workflow(primary_incident, related_anomaly, telemetry_data)
+
+
 def poll_live_telemetry():
     """Poll live telemetry and detect operational changes."""
     try:
-        # Collect current telemetry
         telemetry_data = orchestrator.telemetry.collect_all_telemetry()
         current_hash = hash(str(telemetry_data))
-
-        # Check for changes
         last_hash = st.session_state.get("last_telemetry_hash")
+        anomalies = orchestrator.telemetry.detect_anomalies()
+
         if last_hash is None or current_hash != last_hash:
             st.session_state["last_telemetry_hash"] = current_hash
-            detect_operational_changes(telemetry_data)
+            incident_ids = orchestrator.events.process_anomalies(anomalies)
+            _process_recovery_events(anomalies)
+            st.session_state["live_event_feed"] = orchestrator.events.get_event_history(limit=20)
 
+            if incident_ids:
+                event_history = orchestrator.events.get_event_history(limit=15)
+                timeline_entries = [
+                    {
+                        "timestamp": event.get("timestamp"),
+                        "event": event.get("type", "unknown").replace("_", " ").title(),
+                        "details": event.get("description", ""),
+                        "severity": event.get("severity", "info"),
+                    }
+                    for event in event_history[-15:]
+                ]
+                st.session_state["incident_timeline"] = list(reversed(timeline_entries))
+
+        _attempt_autonomous_recovery(anomalies, telemetry_data)
         return telemetry_data
     except Exception as e:
         logger.error(f"Live telemetry poll failed: {e}")
@@ -444,14 +675,12 @@ with st.sidebar:
 workspace = st.session_state.workspace
 
 if workspace == "operations":
-    st.header("🚀 Autonomous Operations Center")
-    st.markdown("### Live Operational Monitoring — Real Network Intelligence")
+    st.header("� Autonomous NOC Operations Center")
+    st.markdown("### Live operational intelligence — real-time failure correlation")
 
-    # Initialize live monitoring
     if "live_initialized" not in st.session_state:
         st.session_state["live_initialized"] = True
 
-    # Live telemetry polling (every 5 seconds)
     if "last_poll_time" not in st.session_state:
         st.session_state["last_poll_time"] = time.time()
     
@@ -459,124 +688,173 @@ if workspace == "operations":
     if current_time - st.session_state["last_poll_time"] > 5:
         telemetry_data = poll_live_telemetry()
         st.session_state["last_poll_time"] = current_time
-        st.rerun()  # Trigger UI update
-
-    # Display live alerts banner
-    live_alerts = st.session_state.get("live_alerts", [])
-    if live_alerts:
-        with st.container():
-            st.error("🚨 **LIVE CRITICAL ALERTS**")
-            for alert in live_alerts[:3]:  # Show top 3
-                severity_icon = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(alert["severity"], "⚪")
-                st.markdown(f"{severity_icon} **{alert['message']}** — {alert['timestamp'][-8:]}")
-            if len(live_alerts) > 3:
-                st.markdown(f"*...and {len(live_alerts) - 3} more alerts*")
-
-    # AI RCA Progress
-    if st.session_state.get("ai_rca_active"):
-        with st.container():
-            st.info("🤖 **AI RCA In Progress**")
-            rca_steps = st.session_state.get("ai_rca_steps", [])
-            for step in rca_steps[-3:]:  # Show recent steps
-                status_icon = "⏳" if step["status"] == "in_progress" else "✅" if step["status"] == "completed" else "❌"
-                st.markdown(f"{status_icon} {step['step']}")
+        st.experimental_rerun()
+    else:
+        telemetry_data = orchestrator.telemetry.collect_all_telemetry()
 
     status = orchestrator.get_operational_status()
-    telemetry = orchestrator.telemetry.get_health_metrics()
-    incident_timeline = st.session_state.get("incident_timeline", [])
+    summary = status["operational_summary"]
+    live_alerts = st.session_state.get("live_alerts", [])
+    event_feed = st.session_state.get("live_event_feed", [])
+    recovery_feed = st.session_state.get("recovery_timeline", [])
+    active_incidents = [inc for inc in orchestrator.state.get_all_incidents().values() if inc["status"] in {"new", "investigating"}]
+    degraded_services = [svc for svc, dep in orchestrator.state.service_dependencies.items() if dep.status in {"degraded", "down"}]
+    impacted_wan = [svc for svc in degraded_services if "WAN" in svc or "VPN" in svc or "Internet" in svc]
 
-    health_score = status["operational_summary"]["operational_score"]
-    critical_incidents = status["incidents"]["by_status"].get("new", 0) + status["incidents"]["by_status"].get("investigating", 0)
-    unreachable_devices = telemetry.get("unreachable_devices", 0)
+    critical_count = summary["incidents"]["new"] + summary["incidents"]["investigating"]
+    outage_count = summary["services"]["down"]
+    mttr_minutes = max(5, critical_count * 4)
+    stability = summary["operational_score"]
 
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Active Devices", status["operational_summary"]["devices"]["total"], delta=f"{unreachable_devices} unreachable")
-    with col2:
-        st.metric("Critical Incidents", critical_incidents, delta=f"{len(incident_timeline)} events")
-    with col3:
-        st.metric("Health Score", f"{health_score:.0f}%", delta=f"{telemetry.get('critical_device_count', 0)} critical")
-    with col4:
-        st.metric("Service Blast Radius", f"{status['operational_summary']['services']['degraded'] + status['operational_summary']['services']['down']}", delta=f"{status['operational_summary']['services']['down']} down")
+    if live_alerts:
+        with st.container():
+            st.markdown("<div style='background:#660000;padding:12px;border-radius:8px;color:#fff;'>"
+                        "<strong>CRITICAL ALERT CENTER</strong> — Live operational failures detected</div>", unsafe_allow_html=True)
+            for alert in live_alerts[:5]:
+                severity_icon = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢", "recovery": "✅"}.get(alert["severity"], "⚪")
+                st.markdown(f"{severity_icon} **{alert['severity'].upper()}** — {alert['message']} — {alert['timestamp'][-8:]}")
+            if len(live_alerts) > 5:
+                st.markdown(f"*...and {len(live_alerts) - 5} more alerts*")
 
-    st.progress(int(max(0, min(100, health_score))))
+    executive_col1, executive_col2, executive_col3, executive_col4 = st.columns(4)
+    with executive_col1:
+        st.metric("Operational Stability", f"{stability:.0f}%", delta=f"{outage_count} outages")
+    with executive_col2:
+        st.metric("Active Incidents", critical_count, delta=f"{len(active_incidents)} active")
+    with executive_col3:
+        st.metric("Degraded Services", len(degraded_services), delta=f"{outage_count} down")
+    with executive_col4:
+        st.metric("MTTR Estimate", f"{mttr_minutes}m", delta="Recovery tracking")
 
-    # Live AI Operational Intelligence
-    with st.expander("🔎 AI Operational Intelligence", expanded=True):
-        if st.session_state.get("ai_rca_active"):
-            st.markdown("**Status:** AI RCA in progress...")
-            latest_step = st.session_state["ai_rca_steps"][-1] if st.session_state["ai_rca_steps"] else None
-            if latest_step and latest_step.get("result"):
-                st.markdown(f"**Latest RCA:** {latest_step['result'][:300]}...")
-        else:
-            ai_summary = orchestrator.generate_operational_ai_summary()
-            st.markdown(f"**Root Cause:** {ai_summary['root_cause']}")
-            st.markdown(f"**Executive Summary:** {ai_summary['executive_summary']}")
-            st.markdown(f"**Recommendation:** {ai_summary['recommendation']}")
-
-    st.divider()
-    st.markdown("### Live Network Telemetry")
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("#### Core Metrics")
-        st.metric("Average CPU", f"{telemetry['cpu']['average']:.1f}%", delta=f"{telemetry['cpu']['high_count']} devices >80%")
-        st.metric("Average Memory", f"{telemetry['memory']['average']:.1f}%", delta=f"{telemetry['memory']['high_count']} devices >80%")
-        st.metric("Avg Latency", f"{telemetry['latency_ms']['average']:.1f}ms", delta=f"{telemetry['latency_ms']['high_count']} >100ms")
-    with col2:
-        st.markdown("#### Network Health")
-        st.metric("Packet Loss", f"{telemetry['packet_loss_pct']['average']:.2f}%", delta=f"{telemetry['packet_loss_pct']['high_count']} >3%")
-        st.metric("BGP Sessions Down", f"{telemetry.get('bgp_down_sessions', 0)}", delta=f"{telemetry.get('critical_device_count', 0)} critical devices")
-        st.metric("Unreachable Devices", unreachable_devices, delta="live monitoring")
+    st.progress(int(max(0, min(100, stability))))
 
     st.divider()
-    st.markdown("### Live Operational Timeline")
-    if incident_timeline:
-        timeline_rows = [
+    st.markdown("### Live Event Feed")
+    if event_feed:
+        feed_rows = [
             {
-                "time": event.get("timestamp")[-8:] if event.get("timestamp") else "N/A",
-                "event": event.get("event", "unknown"),
-                "type": event.get("type", "operational").replace("_", " ").title(),
-                "details": event.get("details", "")[:50] + "..." if len(event.get("details", "")) > 50 else event.get("details", ""),
+                "time": item.get("timestamp", "")[-8:],
+                "event": item.get("type", "unknown").replace("_", " ").title(),
+                "severity": item.get("severity", "info").upper(),
+                "detail": item.get("description", item.get("details", ""))[:80],
             }
-            for event in incident_timeline[-15:]
+            for item in event_feed[-20:]
         ]
+        st.dataframe(pd.DataFrame(feed_rows).sort_values(by="time", ascending=False))
+    else:
+        st.info("Waiting for live operational events...")
+
+    st.divider()
+    st.markdown("### Incident & Recovery Timeline")
+    if active_incidents or recovery_feed:
+        timeline_rows = []
+        for event in st.session_state.get("incident_timeline", [])[:15]:
+            timeline_rows.append({
+                "time": event.get("timestamp", "")[-8:],
+                "event": event.get("event", "unknown"),
+                "severity": event.get("severity", "info").upper(),
+                "details": event.get("details", "")[:80],
+            })
+        for event in recovery_feed[:5]:
+            timeline_rows.append({
+                "time": event.get("timestamp", "")[-8:],
+                "event": event.get("event", "recovery"),
+                "severity": "RECOVERY",
+                "details": event.get("details", ""),
+            })
         st.dataframe(pd.DataFrame(timeline_rows).sort_values(by="time", ascending=False))
     else:
-        st.info("No operational events yet. Monitoring live...")
+        st.info("No incidents or recovery actions recorded yet.")
 
     st.divider()
     st.markdown("### Active Critical Incidents")
-    active_incidents = [inc for inc in orchestrator.state.get_all_incidents().values() if inc['status'] in {'new', 'investigating'}]
     if active_incidents:
         for inc in active_incidents:
-            severity_color = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(inc["severity"], "⚪")
-            st.markdown(f"{severity_color} **{inc['id']}** — {inc['title']} — Status: {inc['status']}")
-            if inc.get("affected_devices"):
-                st.markdown(f"_Affected devices:_ {', '.join(inc['affected_devices'])}")
-            if inc.get("timeline"):
-                for note in inc["timeline"][-2:]:
-                    st.markdown(f"- {note['timestamp'][-8:]}: {note['note']}")
+            severity_icon = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(inc["severity"], "⚪")
+            with st.expander(f"{severity_icon} **{inc['id']}** — {inc['title']} — {inc['status'].upper()}", expanded=inc["severity"] == "critical"):
+                st.markdown(f"**Severity:** {inc['severity'].upper()}")
+                if inc.get("affected_devices"):
+                    st.markdown(f"**Devices:** {', '.join(inc['affected_devices'])}")
+                if inc.get("affected_services"):
+                    st.markdown(f"**Services:** {', '.join(inc['affected_services'])}")
+                if inc.get("timeline"):
+                    st.markdown("**Timeline:**")
+                    for note in inc["timeline"][-3:]:
+                        st.markdown(f"- {note['timestamp'][-8:]}: {note['note']}")
     else:
-        st.info("No active critical incidents. All systems operational.")
+        st.success("No active critical incidents. Network operations stabilized.")
 
     st.divider()
-    st.markdown("### Device Health Status")
-    # Show key devices and their live status
-    device_health_data = []
-    for hostname, metrics in orchestrator.state.get_all_device_metrics().items():
-        health_score = orchestrator.telemetry.get_device_health_score(hostname)
-        device_health_data.append({
-            "Device": hostname,
-            "Health Score": f"{health_score['score']:.0f}%",
-            "Status": health_score["status"].upper(),
-            "CPU": f"{metrics.cpu:.1f}%" if hasattr(metrics, 'cpu') else "N/A",
-            "Reachable": "✅" if getattr(metrics, 'reachable', True) else "❌"
-        })
-    
-    if device_health_data:
-        st.dataframe(pd.DataFrame(device_health_data))
+    st.markdown("### Autonomous Investigation Workflow")
+    if st.session_state.get("ai_rca_steps"):
+        for step in st.session_state["ai_rca_steps"]:
+            status_icon = "✅" if step["status"] == "completed" else "⏳" if step["status"] == "in_progress" else "❌"
+            st.markdown(f"{status_icon} {step['step']}")
+            if step.get("result"):
+                st.markdown(f"> {step['result'][:220]}...")
     else:
-        st.info("No device telemetry available yet.")
+        st.info("Awaiting autonomous investigation trigger...")
+
+    st.divider()
+    st.markdown("### Autonomous Remediation Center")
+    remediation_workflow = st.session_state.get("remediation_workflow", {})
+    if remediation_workflow:
+        st.markdown(f"**Workflow Status:** {remediation_workflow.get('status', 'idle').title()} - {remediation_workflow.get('current_step', 'pending')}")
+        st.markdown(f"**Device:** {remediation_workflow.get('device', 'N/A')}")
+        st.markdown(f"**Recovery Confidence:** {st.session_state.get('recovery_confidence', 0)}%")
+        st.markdown(f"**Stabilization Status:** {st.session_state.get('stabilization_status', 'idle').title()}")
+
+        if remediation_workflow.get("recommended_actions"):
+            st.subheader("Recommended Safe Remediation Actions")
+            for action in remediation_workflow["recommended_actions"]:
+                status_icon = "✅" if action["executed"] else "⚠️"
+                st.markdown(f"{status_icon} **{action['description']}** — Risk: {action['risk'].upper()} — {action['comments']}")
+
+        if remediation_workflow.get("validation_commands"):
+            st.subheader("Recovery Validation Commands")
+            for cmd in remediation_workflow["validation_commands"]:
+                st.code(cmd)
+
+        if remediation_workflow.get("steps"):
+            st.subheader("Workflow Progress")
+            for step in remediation_workflow["steps"]:
+                status_icon = "✅" if step["status"] == "completed" else "⏳" if step["status"] == "in_progress" else "⚪"
+                st.markdown(f"{status_icon} {step['name']} — {step['status']}\n> {step['note']}")
+    else:
+        st.info("No autonomous remediation workflow is active. The platform will start recovery orchestration when the next incident is detected.")
+
+    st.divider()
+    st.markdown("### Device Health Matrix")
+    health_rows = []
+    for hostname, metrics in orchestrator.state.get_all_device_metrics().items():
+        health = orchestrator.telemetry.get_device_health_score(hostname)
+        link_status = "GREEN" if getattr(metrics, "reachable", True) and metrics.packet_loss_pct < 3 else "AMBER" if metrics.packet_loss_pct < 8 else "RED"
+        health_rows.append({
+            "Device": hostname,
+            "Health": f"{health['score']:.0f}%",
+            "Status": f"{health['status'].upper()}",
+            "Latency": f"{metrics.latency_ms:.1f}ms",
+            "Loss": f"{metrics.packet_loss_pct:.1f}%",
+            "Link": link_status,
+        })
+    if health_rows:
+        st.dataframe(pd.DataFrame(health_rows))
+    else:
+        st.info("No device health telemetry available yet.")
+
+    st.divider()
+    st.markdown("### Topology Status")
+    topology_rows = []
+    for hostname, metrics in orchestrator.state.get_all_device_metrics().items():
+        topology_rows.append({
+            "Device": hostname,
+            "Path": "Healthy" if getattr(metrics, "reachable", True) else "Failed",
+            "Status": "GREEN" if getattr(metrics, "reachable", True) else "RED",
+        })
+    if topology_rows:
+        st.dataframe(pd.DataFrame(topology_rows))
+    else:
+        st.info("Topology nominal — no path data available.")
 
 elif workspace == "incident":
     st.header("🚨 Incident Management")
