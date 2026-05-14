@@ -5,25 +5,46 @@ Telemetry engine for realistic dynamic network metrics generation.
 from __future__ import annotations
 from dataclasses import asdict
 from typing import Dict, List, Any, Optional
+import json
+import os
 import random
+import re
 from datetime import datetime, timedelta
 
 from core.state_manager import StateManager, DeviceMetrics
 from core.simulation_engine import SimulationEngine
 
+try:
+    from netmiko import ConnectHandler
+    NETMIKO_AVAILABLE = True
+except Exception:
+    NETMIKO_AVAILABLE = False
+
 
 class TelemetryEngine:
     """
-    Generates realistic, event-driven network telemetry.
-    Integrates with simulation engine and state manager.
+    Collects telemetry from live routers when available and falls back to simulated devices.
     """
 
-    def __init__(self, simulation: SimulationEngine, state_manager: StateManager):
+    def __init__(
+        self,
+        simulation: SimulationEngine,
+        state_manager: StateManager,
+        device_catalog: Optional[List[Dict[str, Any]]] = None,
+        poll_interval: int = 10,
+    ):
         """Initialize telemetry engine."""
         self.simulation = simulation
         self.state = state_manager
+        self.device_catalog = device_catalog or []
+        self.poll_interval = poll_interval
+        self.live_mode = bool(self.device_catalog and NETMIKO_AVAILABLE)
         self.baseline_metrics: Dict[str, Dict[str, float]] = {}
         self.anomaly_correlation: Dict[str, List[str]] = {}
+        self.current_interface_inventory: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        self.previous_interface_inventory: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        self.interface_history: Dict[str, List[Dict[str, Any]]] = {}
+        self.device_reachability: Dict[str, bool] = {}
         self._initialize_baselines()
 
     def _initialize_baselines(self) -> None:
@@ -41,7 +62,36 @@ class TelemetryEngine:
     # ═══════════════════════════════════════════════════════════════
 
     def collect_all_telemetry(self) -> Dict[str, Any]:
-        """Collect telemetry from all simulated devices."""
+        """Collect telemetry from live routers or simulation fallback."""
+        if self.live_mode:
+            return self._collect_live_telemetry()
+        return self._collect_simulation_telemetry()
+
+    def _collect_live_telemetry(self) -> Dict[str, Any]:
+        telemetry = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "device_metrics": {},
+            "interface_metrics": {},
+            "protocol_metrics": {},
+            "reachability": {},
+        }
+
+        for device in self.device_catalog:
+            device_name = self._normalize_device_name(device)
+            metrics, interfaces, protocol_metrics = self._collect_live_device_telemetry(device)
+            telemetry["device_metrics"][device_name] = metrics
+            telemetry["protocol_metrics"][device_name] = protocol_metrics
+            telemetry["reachability"][device_name] = metrics.reachable
+            self.state.update_device_metrics(device_name, metrics)
+            self._update_interface_inventory(device_name, interfaces)
+
+            for interface in interfaces:
+                iface_key = f"{device_name}:{interface['name']}"
+                telemetry["interface_metrics"][iface_key] = interface
+
+        return telemetry
+
+    def _collect_simulation_telemetry(self) -> Dict[str, Any]:
         telemetry = {
             "timestamp": datetime.utcnow().isoformat(),
             "device_metrics": {},
@@ -70,53 +120,172 @@ class TelemetryEngine:
 
         return telemetry
 
-    def _collect_device_telemetry(self, hostname: str, device) -> DeviceMetrics:
-        """Collect device-level telemetry."""
-        baseline = self.baseline_metrics.get(hostname, {})
-        
-        # Apply some random drift to simulate real metrics
-        cpu = max(2, min(98, device.cpu + random.uniform(-2, 3)))
-        memory = max(5, min(98, device.memory + random.uniform(-1, 2)))
-        
-        # Dynamic latency and packet loss based on device status and workflow
-        base_latency = baseline.get("latency_ms", 10)
-        base_packet_loss = baseline.get("packet_loss_pct", 0)
-        
-        # Adjust metrics based on workflow stage and device status
-        if device.status == "warning":
-            latency = base_latency + random.uniform(20, 50)
-            packet_loss = base_packet_loss + random.uniform(2, 8)
-        elif device.status == "critical":
-            latency = base_latency + random.uniform(80, 150)
-            packet_loss = base_packet_loss + random.uniform(8, 20)
+    def _normalize_device_name(self, device: Dict[str, Any]) -> str:
+        return str(
+            device.get("hostname")
+            or device.get("name")
+            or device.get("host")
+            or device.get("ip_address")
+            or device.get("device_id")
+        )
+
+    def _collect_live_device_telemetry(self, device: Dict[str, Any]) -> tuple[DeviceMetrics, List[Dict[str, Any]], Dict[str, Any]]:
+        device_name = self._normalize_device_name(device)
+        now = datetime.utcnow().isoformat()
+        device_metrics = DeviceMetrics(hostname=device_name, last_updated=now)
+        interfaces: List[Dict[str, Any]] = []
+        protocol_metrics: Dict[str, Any] = {
+            "bgp_summary": {},
+            "route_summary": {},
+        }
+
+        if not NETMIKO_AVAILABLE:
+            device_metrics.reachable = False
+            return device_metrics, interfaces, protocol_metrics
+
+        try:
+            conn = ConnectHandler(**device)
+            if device.get("secret"):
+                conn.enable()
+
+            interface_output = conn.send_command("show ip interface brief", use_textfsm=False)
+            interfaces = self._parse_ip_interface_brief(interface_output)
+
+            bgp_output = conn.send_command("show ip bgp summary", use_textfsm=False)
+            protocol_metrics["bgp_summary"] = self._parse_bgp_summary(bgp_output, device_name)
+
+            cpu_output = conn.send_command("show processes cpu | include CPU", use_textfsm=False)
+            device_metrics.cpu = self._parse_cpu_utilization(cpu_output)
+
+            memory_output = conn.send_command("show processes memory | include Processor|show version | include bytes of memory", use_textfsm=False)
+            device_metrics.memory = self._parse_memory_usage(memory_output)
+
+            route_output = conn.send_command("show ip route summary", use_textfsm=False)
+            protocol_metrics["route_summary"] = self._parse_route_summary(route_output)
+
+            conn.disconnect()
+            device_metrics.reachable = True
+            self.device_reachability[device_name] = True
+
+            interface_down = sum(1 for iface in interfaces if iface["status"] != "up")
+            if interface_down > 0:
+                device_metrics.packet_loss_pct = min(100.0, 2.0 + interface_down * 1.5)
+            else:
+                device_metrics.packet_loss_pct = max(0.0, device_metrics.packet_loss_pct)
+
+            device_metrics.latency_ms = 10.0 + interface_down * 5.0
+            device_metrics.bgp_sessions_up = protocol_metrics["bgp_summary"].get("established", 0)
+            device_metrics.bgp_sessions_down = protocol_metrics["bgp_summary"].get("down", 0)
+            device_metrics.interface_errors = sum(iface.get("errors", 0) for iface in interfaces)
+
+        except Exception:
+            device_metrics.reachable = False
+            device_metrics.cpu = 0.0
+            device_metrics.memory = 0.0
+            device_metrics.latency_ms = 999.0
+            device_metrics.packet_loss_pct = 100.0
+            device_metrics.bgp_sessions_up = 0
+            device_metrics.bgp_sessions_down = 0
+            device_metrics.interface_errors = 0
+            self.device_reachability[device_name] = False
+            interfaces = []
+
+        return device_metrics, interfaces, protocol_metrics
+
+    def _parse_ip_interface_brief(self, output: str) -> List[Dict[str, Any]]:
+        interfaces: List[Dict[str, Any]] = []
+        for line in output.splitlines():
+            line = line.strip()
+            if not line or line.lower().startswith("interface"):
+                continue
+            m = re.match(r"^(?P<intf>\S+)\s+(?P<ip>\S+)\s+\S+\s+\S+\s+(?P<status>\S+)\s+(?P<protocol>\S+)$", line)
+            if not m:
+                continue
+            interfaces.append({
+                "name": m.group("intf"),
+                "ip_address": m.group("ip") if m.group("ip") != "unassigned" else "",
+                "status": m.group("status").lower(),
+                "protocol": m.group("protocol").lower(),
+                "errors": 0,
+                "drops": 0,
+                "last_updated": datetime.utcnow().isoformat(),
+            })
+        return interfaces
+
+    def _parse_bgp_summary(self, output: str, device_name: str) -> Dict[str, Any]:
+        summary = {
+            "local_device": device_name,
+            "total_neighbors": 0,
+            "established": 0,
+            "down": 0,
+            "peers": [],
+        }
+        for line in output.splitlines():
+            if line.strip().startswith("Neighbor") or line.strip().startswith("BGP router identifier"):
+                continue
+            parts = re.split(r"\s+", line.strip())
+            if len(parts) < 9:
+                continue
+            peer_ip = parts[0]
+            state = parts[-1]
+            status = "down" if state.lower() not in {"established", "up"} else "up"
+            summary["total_neighbors"] += 1
+            summary["established"] += 1 if status == "up" else 0
+            summary["down"] += 1 if status == "down" else 0
+            summary["peers"].append({"peer_ip": peer_ip, "state": state, "session_status": status})
+        return summary
+
+    def _parse_cpu_utilization(self, output: str) -> float:
+        m = re.search(r"five seconds: (\d+)%", output)
+        if m:
+            return float(m.group(1))
+        m = re.search(r"CPU utilization for five seconds: (\d+)%", output)
+        if m:
+            return float(m.group(1))
+        m = re.search(r"(\d+)%\s*\/$", output)
+        return float(m.group(1)) if m else 0.0
+
+    def _parse_memory_usage(self, output: str) -> float:
+        total = None
+        used = None
+        total_match = re.search(r"Processor Pool Total:\s*(\d+)K", output)
+        used_match = re.search(r"Processor Pool Used:\s*(\d+)K", output)
+        if total_match and used_match:
+            total = float(total_match.group(1))
+            used = float(used_match.group(1))
         else:
-            latency = max(0, base_latency + random.uniform(-1, 5))
-            packet_loss = max(0, min(100, base_packet_loss + random.uniform(-0.1, 0.3)))
+            total_match = re.search(r"(\d+) bytes of memory", output)
+            if total_match:
+                total = float(total_match.group(1)) / 1024.0
+            if total:
+                used = total * 0.4
+        if total and used:
+            return min(100.0, max(0.0, used / total * 100.0))
+        return 0.0
 
-        # Count BGP and OSPF state
-        bgp_up = sum(1 for s in device.bgp_sessions if s.get("state") == "Established")
-        bgp_down = len(device.bgp_sessions) - bgp_up
+    def _parse_route_summary(self, output: str) -> Dict[str, Any]:
+        routes = 0
+        for line in output.splitlines():
+            if "routes" in line.lower() and "," in line:
+                nums = re.findall(r"(\d+)\s+routes", line)
+                if nums:
+                    routes = int(nums[0])
+                    break
+        return {"route_count": routes}
 
-        # Count interface errors from anomalies
-        iface_errors = sum(
-            1 for a in self.simulation.anomalies
-            if a.get("device") == hostname and a.get("type") == "interface_flap"
-        )
+    def _update_interface_inventory(self, device_name: str, interfaces: List[Dict[str, Any]]) -> None:
+        previous = self.current_interface_inventory.get(device_name, {})
+        current = {iface["name"]: iface for iface in interfaces}
+        self.previous_interface_inventory[device_name] = previous
+        self.current_interface_inventory[device_name] = current
 
-        metrics = DeviceMetrics(
-            hostname=hostname,
-            cpu=cpu,
-            memory=memory,
-            latency_ms=max(0, latency),
-            packet_loss_pct=max(0, min(100, packet_loss)),
-            interface_errors=iface_errors,
-            bgp_sessions_up=bgp_up,
-            bgp_sessions_down=bgp_down,
-            ospf_neighbors=len(device.ospf_neighbors),
-            last_updated=datetime.utcnow().isoformat(),
-        )
+        if device_name not in self.interface_history:
+            self.interface_history[device_name] = []
 
-        return metrics
+        for iface in interfaces:
+            self.interface_history[device_name].append(iface)
+            if len(self.interface_history[device_name]) > 1000:
+                self.interface_history[device_name] = self.interface_history[device_name][-1000:]
 
     def _collect_interface_telemetry(self, interface) -> Dict[str, Any]:
         """Collect interface-level telemetry."""
@@ -186,7 +355,15 @@ class TelemetryEngine:
         anomalies = []
 
         for hostname, metrics in self.state.get_all_device_metrics().items():
-            # CPU anomalies
+            if not getattr(metrics, "reachable", True):
+                anomalies.append({
+                    "type": "device_unreachable",
+                    "severity": "critical",
+                    "device": hostname,
+                    "description": "Device is unreachable over Netmiko.",
+                })
+                continue
+
             if metrics.cpu >= 90:
                 anomalies.append({
                     "type": "cpu_spike",
@@ -195,8 +372,7 @@ class TelemetryEngine:
                     "value": metrics.cpu,
                     "threshold": 90,
                 })
-            
-            # Memory anomalies
+
             if metrics.memory >= 90:
                 anomalies.append({
                     "type": "memory_exhaustion",
@@ -205,8 +381,7 @@ class TelemetryEngine:
                     "value": metrics.memory,
                     "threshold": 90,
                 })
-            
-            # Latency anomalies
+
             if metrics.latency_ms > 100:
                 anomalies.append({
                     "type": "latency_spike",
@@ -215,8 +390,7 @@ class TelemetryEngine:
                     "value": metrics.latency_ms,
                     "threshold": 100,
                 })
-            
-            # Packet loss anomalies
+
             if metrics.packet_loss_pct > 5:
                 anomalies.append({
                     "type": "packet_loss",
@@ -225,8 +399,7 @@ class TelemetryEngine:
                     "value": metrics.packet_loss_pct,
                     "threshold": 5,
                 })
-            
-            # BGP instability
+
             if metrics.bgp_sessions_down > 0:
                 anomalies.append({
                     "type": "bgp_instability",
@@ -235,25 +408,41 @@ class TelemetryEngine:
                     "down_sessions": metrics.bgp_sessions_down,
                 })
 
-        # Check for workflow-specific anomalies from simulation
-        for anomaly in self.simulation.anomalies[-10:]:  # Check recent anomalies
-            if anomaly.get("type") == "voice_degradation" and anomaly.get("device") == hostname:
+            if self._has_interface_down_transition(hostname):
+                anomalies.append({
+                    "type": "interface_down",
+                    "severity": "critical",
+                    "device": hostname,
+                    "description": "Interface transitioned from up to down.",
+                })
+
+        for anomaly in self.simulation.anomalies[-10:]:
+            if anomaly.get("type") == "voice_degradation" and anomaly.get("device"):
                 anomalies.append({
                     "type": "voice_degradation",
                     "severity": "critical",
-                    "device": hostname,
+                    "device": anomaly.get("device"),
                     "latency_ms": anomaly.get("latency_ms", 180),
                     "description": "Voice traffic experiencing jitter and degraded MOS scores",
                 })
-            elif anomaly.get("type") == "critical_incident" and hostname in anomaly.get("devices", []):
+            elif anomaly.get("type") == "critical_incident" and anomaly.get("device"):
                 anomalies.append({
                     "type": "critical_incident",
                     "severity": "critical",
-                    "device": hostname,
+                    "device": anomaly.get("device"),
                     "description": "Part of critical incident affecting multiple services",
                 })
 
         return anomalies
+
+    def _has_interface_down_transition(self, hostname: str) -> bool:
+        current = self.current_interface_inventory.get(hostname, {})
+        previous = self.previous_interface_inventory.get(hostname, {})
+        for iface_name, iface in current.items():
+            prev = previous.get(iface_name)
+            if prev and prev.get("status") == "up" and iface.get("status") == "down":
+                return True
+        return False
 
     def correlate_anomalies(self, anomalies: List[Dict[str, Any]]) -> Dict[str, List[str]]:
         """Correlate related anomalies."""
@@ -284,38 +473,34 @@ class TelemetryEngine:
         memories = [m.memory for m in all_metrics.values()]
         latencies = [m.latency_ms for m in all_metrics.values()]
         packet_losses = [m.packet_loss_pct for m in all_metrics.values()]
-
-        high_cpu = sum(1 for c in cpus if c > 80)
-        high_memory = sum(1 for m in memories if m > 80)
-        high_latency = sum(1 for l in latencies if l > 100)
-        high_packet_loss = sum(1 for p in packet_losses if p > 3)
-        bgp_down = sum(m.bgp_sessions_down for m in all_metrics.values())
+        unreachable_count = sum(1 for m in all_metrics.values() if getattr(m, "reachable", True) is False)
 
         return {
             "cpu": {
                 "average": sum(cpus) / len(cpus),
                 "max": max(cpus),
                 "min": min(cpus),
-                "high_count": high_cpu,
+                "high_count": sum(1 for c in cpus if c > 80),
             },
             "memory": {
                 "average": sum(memories) / len(memories),
                 "max": max(memories),
                 "min": min(memories),
-                "high_count": high_memory,
+                "high_count": sum(1 for m in memories if m > 80),
             },
             "latency_ms": {
                 "average": sum(latencies) / len(latencies),
                 "max": max(latencies),
                 "min": min(latencies),
-                "high_count": high_latency,
+                "high_count": sum(1 for l in latencies if l > 100),
             },
             "packet_loss_pct": {
                 "average": sum(packet_losses) / len(packet_losses),
                 "max": max(packet_losses),
-                "high_count": high_packet_loss,
+                "high_count": sum(1 for p in packet_losses if p > 3),
             },
-            "bgp_down_sessions": bgp_down,
+            "bgp_down_sessions": sum(m.bgp_sessions_down for m in all_metrics.values()),
+            "unreachable_devices": unreachable_count,
             "critical_device_count": len(self.state.get_critical_devices()),
         }
 
@@ -328,6 +513,10 @@ class TelemetryEngine:
 
         score = 100.0
         issues = []
+
+        if not getattr(metrics, "reachable", True):
+            score -= 50
+            issues.append("Device unreachable")
 
         if metrics.cpu > 85:
             score -= 20
