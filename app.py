@@ -224,16 +224,30 @@ def poll_live_telemetry():
 def detect_operational_changes(telemetry_data):
     """Detect operational changes and generate live events."""
     anomalies = orchestrator.telemetry.detect_anomalies()
+    incident_ids = orchestrator.events.process_anomalies(anomalies)
 
     for anomaly in anomalies:
-        if anomaly["type"] == "device_unreachable":
-            add_live_alert("critical", f"Device {anomaly['device']} unreachable", anomaly)
-            create_live_incident(anomaly)
-        elif anomaly["type"] == "interface_down":
-            add_live_alert("critical", f"Interface down on {anomaly['device']}", anomaly)
-            create_live_incident(anomaly)
-        elif anomaly["severity"] in ["critical", "high"]:
-            add_live_alert(anomaly["severity"], f"{anomaly['type'].replace('_', ' ').title()} on {anomaly['device']}", anomaly)
+        if anomaly.get("severity") in ["critical", "high"]:
+            add_live_alert(
+                anomaly["severity"],
+                f"{anomaly['type'].replace('_', ' ').title()} on {anomaly.get('device', 'unknown')}",
+                anomaly,
+            )
+
+    if incident_ids:
+        event_history = orchestrator.events.get_event_history(limit=15)
+        timeline_entries = [
+            {
+                "timestamp": event.get("timestamp"),
+                "event": event.get("type", "unknown").replace("_", " ").title(),
+                "details": event.get("description", ""),
+                "severity": event.get("severity", "info"),
+            }
+            for event in event_history[-15:]
+        ]
+        st.session_state["incident_timeline"] = list(reversed(timeline_entries))
+
+    return incident_ids
 
 
 def add_live_alert(severity: str, message: str, anomaly: dict):
@@ -255,28 +269,60 @@ def add_live_alert(severity: str, message: str, anomaly: dict):
 def create_live_incident(anomaly: dict):
     """Create incident from operational anomaly."""
     try:
-        incident_id = orchestrator.incident.create_incident(
+        incident_id = f"INC-{int(time.time())}"
+        affected_devices = [anomaly["device"]] if anomaly.get("device") else []
+        impacted_services = orchestrator.state.calculate_service_impact(affected_devices).get("impacted_services", [])
+
+        orchestrator.state.create_incident(
+            incident_id=incident_id,
             title=f"Critical: {anomaly['type'].replace('_', ' ').title()}",
             description=anomaly.get("description", f"Operational anomaly detected: {anomaly['type']}"),
             severity=anomaly["severity"],
-            affected_devices=[anomaly["device"]],
-            source="live_telemetry"
+            affected_devices=affected_devices,
+            affected_services=impacted_services,
         )
 
-        # Add to timeline
         timeline_entry = {
             "timestamp": datetime.utcnow().isoformat(),
             "event": f"Incident {incident_id} created",
             "type": "incident_created",
-            "details": f"Critical incident from {anomaly['type']} on {anomaly['device']}"
+            "details": f"Critical incident from {anomaly['type']} on {anomaly.get('device', 'unknown')}"
         }
         st.session_state["incident_timeline"].insert(0, timeline_entry)
 
-        # Start AI RCA
         start_ai_rca(incident_id, anomaly)
 
     except Exception as e:
         logger.error(f"Failed to create live incident: {e}")
+
+
+def _build_local_rca_summary(incident_id: str, anomaly: dict) -> str:
+    """Build a structured operational RCA summary when AI is limited."""
+    device = anomaly.get("device", "unknown")
+    metrics = orchestrator.state.get_device_metrics(device)
+    impacted_services = orchestrator.state.calculate_service_impact([device]).get("impacted_services", [])
+    service_text = ", ".join(impacted_services) if impacted_services else "None identified"
+    severity = anomaly.get("severity", "high").upper()
+    root_cause = "Correlated network degradation detected."
+
+    if anomaly["type"] == "interface_down":
+        root_cause = "Interface operational failure on device causing path degradation and packet loss."
+    elif anomaly["type"] == "device_unreachable":
+        root_cause = "Device unreachable, causing routing and service path disruption."
+    elif anomaly["type"] == "bgp_instability":
+        root_cause = "BGP neighbor instability causing routing convergence issues."
+    elif anomaly["type"] == "latency_spike":
+        root_cause = "WAN path degradation causing elevated latency and retransmissions."
+
+    return (
+        "Operational Summary:\n"
+        f"Device: {device}\n"
+        f"Severity: {severity}\n"
+        f"Impacted Services: {service_text}\n"
+        f"Root Cause: {root_cause}\n"
+        "Recommended Actions: Validate interface state, confirm routing adjacency, and isolate the impacted WAN path.\n"
+        "Recovery Validation Steps: Confirm interface status, verify BGP adjacency, validate traffic forwarding, and recheck service reachability."
+    )
 
 
 def start_ai_rca(incident_id: str, anomaly: dict):
@@ -284,7 +330,6 @@ def start_ai_rca(incident_id: str, anomaly: dict):
     st.session_state["ai_rca_active"] = True
     st.session_state["ai_rca_steps"] = []
 
-    # Progressive RCA steps
     steps = [
         "Analyzing telemetry data...",
         "Validating interface state...",
@@ -302,26 +347,31 @@ def start_ai_rca(incident_id: str, anomaly: dict):
             "step": step,
             "status": "in_progress"
         })
-        time.sleep(0.5)  # Simulate processing time
+        time.sleep(0.4)
 
-    # Generate actual RCA
     try:
         rca_query = f"""
         Analyze this operational incident:
+        Incident ID: {incident_id}
         Type: {anomaly['type']}
-        Device: {anomaly['device']}
-        Severity: {anomaly['severity']}
+        Device: {anomaly.get('device', 'unknown')}
+        Severity: {anomaly.get('severity', 'high')}
         Description: {anomaly.get('description', 'N/A')}
+        Current metrics: {orchestrator.state.get_device_metrics(anomaly.get('device', 'unknown'))}
+        Impacted services: {orchestrator.state.calculate_service_impact([anomaly.get('device', 'unknown')]).get('impacted_services', [])}
 
-        Provide root cause analysis and remediation steps.
+        Provide an operational summary, root cause, impacted services, operational severity, recommended actions, and recovery validation steps.
         """
 
-        rca_result = call_ai(rca_query)
+        if OPENAI_AVAILABLE:
+            rca_result = call_ai(rca_query)
+        else:
+            rca_result = _build_local_rca_summary(incident_id, anomaly)
+
         st.session_state["ai_rca_steps"][-1]["status"] = "completed"
         st.session_state["ai_rca_steps"][-1]["result"] = rca_result
 
-        # Update incident with RCA
-        orchestrator.incident.update_incident_status(incident_id, "investigating", f"AI RCA: {rca_result[:200]}...")
+        orchestrator.state.update_incident(incident_id, status="investigating", note=f"AI RCA: {rca_result[:200]}...")
 
     except Exception as e:
         logger.error(f"AI RCA failed: {e}")

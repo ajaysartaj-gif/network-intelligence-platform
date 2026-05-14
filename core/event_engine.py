@@ -32,6 +32,7 @@ class EventEngine:
         self.handlers: Dict[str, List[EventHandler]] = {}
         self.workflow_chains: Dict[str, List[str]] = {}
         self.event_history: List[Dict[str, Any]] = []
+        self.active_incident_signatures: Dict[str, str] = {}
         self._initialize_workflow_chains()
 
     # ═══════════════════════════════════════════════════════════════
@@ -156,24 +157,38 @@ class EventEngine:
     def process_anomalies(self, anomalies: List[Dict[str, Any]]) -> List[str]:
         """Process detected anomalies and trigger workflows."""
         incident_ids = []
+        grouped_anomalies = self._group_anomalies(anomalies)
 
-        for anomaly in anomalies:
-            event = self._anomaly_to_event(anomaly)
-            
-            if event:
-                self.emit_event(event)
-                
-                # Create incident if severity warrants
-                if anomaly.get("severity") in ["high", "critical"]:
-                    incident_id = self._create_incident_from_anomaly(anomaly)
-                    incident_ids.append(incident_id)
-                    self.emit_event({
-                        "type": "incident_created",
-                        "severity": anomaly.get("severity", "high"),
-                        "source": "event_engine",
-                        "description": f"Incident {incident_id} created for {anomaly.get('type')}",
-                        "data": {"incident_id": incident_id, "anomaly": anomaly},
-                    })
+        for device, group in grouped_anomalies.items():
+            if not group:
+                continue
+
+            signature = self._build_incident_signature(device, group)
+            if self._is_duplicate_incident(signature):
+                continue
+
+            # Emit raw anomaly events for correlation workflows
+            for anomaly in group:
+                event = self._anomaly_to_event(anomaly)
+                if event:
+                    self.emit_event(event)
+
+            # Create one correlated incident per device/group
+            correlated_anomaly = self._build_correlated_anomaly(group, device)
+            if correlated_anomaly:
+                incident_id = self._create_incident_from_anomaly(correlated_anomaly)
+                incident_ids.append(incident_id)
+                self.emit_event({
+                    "type": "incident_created",
+                    "severity": correlated_anomaly.get("severity", "high"),
+                    "source": "event_engine",
+                    "description": f"Incident {incident_id} created for correlated failures on {device}.",
+                    "data": {
+                        "incident_id": incident_id,
+                        "device": device,
+                        "correlated_types": [a.get("type") for a in group],
+                    },
+                })
 
         return incident_ids
 
@@ -207,12 +222,28 @@ class EventEngine:
                 "description": f"Interface flap on {device}: {anomaly.get('interface', 'unknown')}",
                 "data": anomaly,
             }
+        elif atype == "interface_down":
+            return {
+                "type": "interface_down_detected",
+                "severity": severity,
+                "source": "telemetry_engine",
+                "description": f"Interface down on {device} detected",
+                "data": anomaly,
+            }
+        elif atype == "device_unreachable":
+            return {
+                "type": "device_unreachable_detected",
+                "severity": severity,
+                "source": "telemetry_engine",
+                "description": f"Device unreachable: {device}",
+                "data": anomaly,
+            }
         elif atype == "packet_loss":
             return {
                 "type": "packet_loss_detected",
                 "severity": severity,
                 "source": "telemetry_engine",
-                "description": f"Packet loss on {device}: {anomaly.get('loss_pct', 'unknown')}%",
+                "description": f"Packet loss on {device}: {anomaly.get('value', anomaly.get('packet_loss_pct', 'unknown'))}%",
                 "data": anomaly,
             }
         elif atype == "latency_spike":
@@ -220,7 +251,7 @@ class EventEngine:
                 "type": "latency_spike_detected",
                 "severity": severity,
                 "source": "telemetry_engine",
-                "description": f"Latency spike on {device}: {anomaly.get('latency_ms', 'unknown')}ms",
+                "description": f"Latency spike on {device}: {anomaly.get('value', anomaly.get('latency_ms', 'unknown'))}ms",
                 "data": anomaly,
             }
         elif atype == "bgp_instability":
@@ -258,6 +289,58 @@ class EventEngine:
 
         return None
 
+    def _group_anomalies(self, anomalies: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+        """Group anomalies by device for correlation."""
+        grouped: Dict[str, List[Dict[str, Any]]] = {}
+        for anomaly in anomalies:
+            device = anomaly.get("device", "unknown") or "unknown"
+            grouped.setdefault(device, []).append(anomaly)
+        return grouped
+
+    def _build_incident_signature(self, device: str, anomalies: List[Dict[str, Any]]) -> str:
+        """Build a dedupe signature for correlated incidents."""
+        anomaly_types = sorted({a.get("type", "unknown") for a in anomalies})
+        return f"{device}:{','.join(anomaly_types)}"
+
+    def _is_duplicate_incident(self, signature: str) -> bool:
+        """Suppress duplicate incident creation for the same correlated failure."""
+        if signature in self.active_incident_signatures:
+            return True
+
+        self.active_incident_signatures[signature] = datetime.utcnow().isoformat()
+        return False
+
+    def _get_group_severity(self, anomalies: List[Dict[str, Any]]) -> str:
+        """Return the highest severity found in a correlated anomaly group."""
+        severity_rank = {"low": 1, "medium": 2, "high": 3, "critical": 4}
+        highest = "low"
+        for anomaly in anomalies:
+            candidate = anomaly.get("severity", "medium")
+            if severity_rank.get(candidate, 2) > severity_rank.get(highest, 1):
+                highest = candidate
+        return highest
+
+    def _build_correlated_anomaly(self, anomalies: List[Dict[str, Any]], device: str) -> Dict[str, Any]:
+        """Build a single correlated incident representation from an anomaly group."""
+        types = sorted({a.get("type", "unknown") for a in anomalies})
+        severity = self._get_group_severity(anomalies)
+        impacted_services = self.state.calculate_service_impact([device]).get("impacted_services", [])
+        description = (
+            f"Correlated operational failure on {device}: "
+            f"{', '.join(types)} detected. "
+            f"Service impact calculated for {', '.join(impacted_services) or 'affected services'}.")
+
+        return {
+            "type": "operational_correlation",
+            "severity": severity,
+            "device": device,
+            "description": description,
+            "data": {
+                "correlated_anomalies": anomalies,
+                "impacted_services": impacted_services,
+            },
+        }
+
     def _create_incident_from_anomaly(self, anomaly: Dict[str, Any]) -> str:
         """Create incident from anomaly."""
         atype = anomaly.get("type")
@@ -268,6 +351,9 @@ class EventEngine:
             "cpu_spike": f"High CPU on {device}",
             "memory_exhaustion": f"Memory exhaustion on {device}",
             "interface_flap": f"Interface flap on {device}",
+            "interface_down": f"Interface down on {device}",
+            "device_unreachable": f"Device unreachable: {device}",
+            "operational_correlation": f"Operational correlation failure on {device}",
             "packet_loss": f"Packet loss on {device}",
             "latency_spike": f"Latency spike on {device}",
             "bgp_instability": f"BGP instability on {device}",
@@ -422,6 +508,70 @@ class EventEngine:
 
         return downstream
 
+    def _handle_interface_down_detected(self, event: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Handle interface down events and correlate failure modes."""
+        downstream = []
+        downstream.append({
+            "type": "packet_loss_detected",
+            "severity": "high",
+            "source": "event_engine",
+            "description": "Packet loss detected after interface down event",
+            "data": event.get("data", {}),
+        })
+        downstream.append({
+            "type": "service_impact_calculated",
+            "severity": "critical",
+            "source": "event_engine",
+            "description": "Service impact computed from interface down event",
+            "data": event.get("data", {}),
+        })
+        return downstream
+
+    def _handle_device_unreachable_detected(self, event: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Handle device unreachable events."""
+        downstream = []
+        downstream.append({
+            "type": "service_impact_calculated",
+            "severity": "critical",
+            "source": "event_engine",
+            "description": "Service impact computed from unreachable device",
+            "data": event.get("data", {}),
+        })
+        downstream.append({
+            "type": "ai_rca_triggered",
+            "severity": "critical",
+            "source": "event_engine",
+            "description": "AI RCA triggered for unreachable device",
+            "data": event.get("data", {}),
+        })
+        return downstream
+
+    def _handle_operational_correlation(self, event: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Handle correlated operational failures."""
+        downstream = []
+        downstream.append({
+            "type": "service_impact_calculated",
+            "severity": event.get("severity", "high"),
+            "source": "event_engine",
+            "description": "Service impact calculated from correlated operational failure",
+            "data": event.get("data", {}),
+        })
+        downstream.append({
+            "type": "rca_triggered",
+            "severity": event.get("severity", "high"),
+            "source": "event_engine",
+            "description": "AI RCA triggered from correlated failure",
+            "data": event.get("data", {}),
+        })
+        downstream.append({
+            "type": "remediation_recommended",
+            "severity": event.get("severity", "high"),
+            "source": "event_engine",
+            "description": "Remediation recommended for correlated failure",
+            "data": event.get("data", {}),
+        })
+        return downstream
+
     def _handle_incident_created(self, event: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Handle incident creation to continue the workflow."""
         downstream = []
@@ -465,6 +615,16 @@ class EventEngine:
             priority=10,
         )
         self.register_handler(
+            "interface_down_detected",
+            self._handle_interface_down_detected,
+            priority=20,
+        )
+        self.register_handler(
+            "device_unreachable_detected",
+            self._handle_device_unreachable_detected,
+            priority=20,
+        )
+        self.register_handler(
             "packet_loss_detected",
             self._handle_packet_loss_detected,
             priority=10,
@@ -488,6 +648,11 @@ class EventEngine:
             "critical_incident_detected",
             self._handle_critical_incident_detected,
             priority=10,
+        )
+        self.register_handler(
+            "operational_correlation",
+            self._handle_operational_correlation,
+            priority=20,
         )
         self.register_handler(
             "incident_created",
