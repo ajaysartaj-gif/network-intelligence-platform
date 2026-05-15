@@ -95,42 +95,7 @@ if DATABASE_AVAILABLE:
     except Exception as e:
         logger.warning(f"DB seed failed: {e}")
 
-# ── ORCHESTRATOR (singleton — survives reruns) ─────────────────────────────────
-@st.cache_resource
-def _get_orchestrator():
-    from core.orchestration_engine import OperationsOrchestrator
-    return OperationsOrchestrator()
-
-@st.cache_resource
-def _get_workflow_tracker():
-    from core.workflow_tracker import WorkflowTracker
-    return WorkflowTracker(max_history=100)
-
-@st.cache_resource
-def _get_network_fixer(_orchestrator):
-    from core.network_fixer import NetworkFixer
-    try:
-        gns3 = getattr(_orchestrator, "gns3", None)
-    except Exception:
-        gns3 = None
-    return NetworkFixer(gns3_engine=gns3)
-
-@st.cache_resource
-def _get_monitor(_orchestrator, _tracker, _fixer):
-    from core.autonomous_monitor import AutonomousMonitor
-    return AutonomousMonitor(
-        orchestrator=_orchestrator,
-        workflow_tracker=_tracker,
-        network_fixer=_fixer,
-        ai_call_fn=call_ai,
-    )
-
-orchestrator = _get_orchestrator()
-tracker      = _get_workflow_tracker()
-fixer        = _get_network_fixer(orchestrator)
-monitor      = _get_monitor(orchestrator, tracker, fixer)
-
-# ── AI CONFIG ─────────────────────────────────────────────────────────────────
+# ── AI CONFIG (must come before _get_monitor) ─────────────────────────────────
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 MODEL_NAME      = "anthropic/claude-3.5-sonnet"
 
@@ -176,6 +141,112 @@ def call_ai(prompt: str) -> str:
     except Exception as e:
         logger.warning(f"AI call failed: {e}")
         return ""
+
+# ── PINGPY / TUNNEL CONFIG ────────────────────────────────────────────────────
+
+def _resolve_gns3_endpoint() -> tuple[str, int]:
+    """
+    Returns (host, port) for GNS3.
+    Priority: GNS3_TUNNEL_URL env/secret → localhost:3080.
+    GNS3_TUNNEL_URL can be a full URL like https://abc123.pinggy.io or host:port.
+    """
+    try:
+        raw = st.secrets.get("GNS3_TUNNEL_URL", "")
+    except Exception:
+        raw = ""
+    if not raw:
+        raw = os.environ.get("GNS3_TUNNEL_URL", "")
+
+    if raw:
+        raw = raw.strip().rstrip("/")
+        # Strip protocol
+        for scheme in ("https://", "http://"):
+            if raw.startswith(scheme):
+                raw = raw[len(scheme):]
+                break
+        # host:port or just host
+        if ":" in raw:
+            host, port_str = raw.rsplit(":", 1)
+            try:
+                return host, int(port_str)
+            except ValueError:
+                return raw, 443
+        return raw, 443  # pingpy tunnel uses 443 by default
+
+    return "localhost", 3080
+
+
+def _check_tunnel_and_reconnect() -> bool:
+    """
+    Returns True if GNS3 became newly reachable this call (tunnel just connected).
+    Side-effect: updates gns3_engine when tunnel URL changes.
+    """
+    host, port = _resolve_gns3_endpoint()
+    gns3 = getattr(orchestrator, "gns3", None)
+    if gns3 is None:
+        return False
+
+    current_url = f"http://{host}:{port}/v2"
+    if gns3.base_url != current_url:
+        # Tunnel URL changed — reconfigure
+        gns3.base_url = current_url
+        gns3.available = False
+
+    was_available = gns3.available
+    if not gns3.available:
+        gns3._check_connectivity()
+
+    newly_connected = (not was_available) and gns3.available
+    if newly_connected:
+        gns3.refresh()
+        logger.info(f"GNS3 tunnel connected: {current_url}")
+
+    return newly_connected
+
+# ── ORCHESTRATOR (singleton — survives reruns) ─────────────────────────────────
+@st.cache_resource
+def _get_orchestrator():
+    from core.orchestration_engine import OperationsOrchestrator
+    orc = OperationsOrchestrator()
+    # Inject GNS3 engine with tunnel-aware endpoint
+    try:
+        from core.gns3_engine import GNS3Engine
+        host, port = _resolve_gns3_endpoint()
+        orc.gns3 = GNS3Engine(host=host, port=port)
+    except Exception as e:
+        logger.warning(f"GNS3 engine init failed: {e}")
+        orc.gns3 = None
+    return orc
+
+@st.cache_resource
+def _get_workflow_tracker():
+    from core.workflow_tracker import WorkflowTracker
+    return WorkflowTracker(max_history=100)
+
+@st.cache_resource
+def _get_network_fixer(_orchestrator):
+    from core.network_fixer import NetworkFixer
+    try:
+        gns3 = getattr(_orchestrator, "gns3", None)
+    except Exception:
+        gns3 = None
+    return NetworkFixer(gns3_engine=gns3)
+
+@st.cache_resource
+def _get_monitor(_orchestrator, _tracker, _fixer):
+    from core.autonomous_monitor import AutonomousMonitor
+    # call_ai is defined above — safe to reference here
+    return AutonomousMonitor(
+        orchestrator=_orchestrator,
+        workflow_tracker=_tracker,
+        network_fixer=_fixer,
+        ai_call_fn=call_ai,
+    )
+
+orchestrator = _get_orchestrator()
+tracker      = _get_workflow_tracker()
+fixer        = _get_network_fixer(orchestrator)
+monitor      = _get_monitor(orchestrator, tracker, fixer)
 
 # ── ALERT HELPERS ─────────────────────────────────────────────────────────────
 
@@ -358,12 +429,46 @@ with st.sidebar:
     poll_age = time.time() - st.session_state.get("last_poll_time", 0)
     st.caption(f"Last poll: {poll_age:.0f}s ago | Fixes: {st.session_state['total_fixes_executed']}")
 
+    # ── Tunnel / GNS3 connection status ──────────────────────────────────────
+    st.divider()
+    st.markdown("**GNS3 / TUNNEL**")
+    gns3_engine = getattr(orchestrator, "gns3", None)
+    gns3_host, gns3_port = _resolve_gns3_endpoint()
+    tunnel_url = os.environ.get("GNS3_TUNNEL_URL", "") or ""
+    try:
+        tunnel_url = st.secrets.get("GNS3_TUNNEL_URL", tunnel_url)
+    except Exception:
+        pass
+    if gns3_engine and gns3_engine.available:
+        st.success(f"🟢 Connected  v{gns3_engine.version}")
+        st.caption(f"{gns3_host}:{gns3_port} · {len(gns3_engine.nodes)} nodes · {len(gns3_engine.links)} links")
+    elif tunnel_url:
+        st.warning("🟡 Tunnel configured — waiting for GNS3")
+        st.caption(f"URL: {tunnel_url}")
+    else:
+        st.info("🔵 Simulation mode\nSet GNS3_TUNNEL_URL to connect live")
+
 # ══════════════════════════════════════════════════════════════════════════════
 # WORKSPACE CONTENT
 # ══════════════════════════════════════════════════════════════════════════════
 
 workspace = st.session_state["workspace"]
 POLL_INTERVAL = 5  # seconds
+
+# ── Check tunnel on every render — reconnect if GNS3 just became reachable ───
+tunnel_just_connected = _check_tunnel_and_reconnect()
+if tunnel_just_connected:
+    # GNS3 tunnel just came up — switch telemetry to live mode and alert
+    try:
+        orchestrator.telemetry.live_mode = True
+        gns3_nodes = list(getattr(orchestrator, "gns3", {}).nodes.keys()) if getattr(orchestrator, "gns3", None) else []
+        add_live_alert(
+            "recovery",
+            f"GNS3 tunnel connected — pulling live data from {len(gns3_nodes)} device(s)",
+            {"type": "tunnel_connected", "device": "gns3", "nodes": gns3_nodes},
+        )
+    except Exception:
+        pass
 
 # ── Poll if due ───────────────────────────────────────────────────────────────
 now = time.time()
