@@ -5,6 +5,7 @@ Falls back to simulated execution when no live connection is available.
 """
 from __future__ import annotations
 import logging
+import os
 import time
 import random
 from typing import Dict, List, Any, Optional
@@ -13,12 +14,27 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
+# ── Paramiko legacy cipher patch (required for old Cisco IOS) ─────────────────
+try:
+    import paramiko
+    paramiko.Transport._preferred_kex = (
+        "diffie-hellman-group14-sha1",
+        "diffie-hellman-group-exchange-sha1",
+        "diffie-hellman-group1-sha1",
+    )
+    paramiko.Transport._preferred_ciphers = (
+        "aes128-cbc",
+        "aes192-cbc",
+        "aes256-cbc",
+    )
+except Exception:
+    pass
+
 try:
     from netmiko import ConnectHandler, NetmikoTimeoutException, NetmikoAuthenticationException
     NETMIKO_AVAILABLE = True
 except ImportError:
     NETMIKO_AVAILABLE = False
-
 
 # ── Fix command library ──────────────────────────────────────────────────────
 
@@ -153,6 +169,9 @@ class NetworkFixer:
     def __init__(self, gns3_engine=None):
         self.gns3 = gns3_engine
         self.execution_log: List[Dict[str, Any]] = []
+        # Default SSH credentials — override via GNS3_SSH_USER / GNS3_SSH_PASS env vars
+        self.default_username = os.environ.get("GNS3_SSH_USER", "admin")
+        self.default_password = os.environ.get("GNS3_SSH_PASS", "admin")
 
     # ── main entry point ────────────────────────────────────────────────────
 
@@ -176,6 +195,8 @@ class NetworkFixer:
 
         # 1. Resolve device connection config
         conn_config = device_config
+        if not conn_config:
+            conn_config = self._build_tunnel_config()
         if not conn_config and self.gns3:
             conn_config = self.gns3.get_netmiko_config(device)
 
@@ -331,6 +352,27 @@ class NetworkFixer:
             "fix":        [],
             "verify":     ["show ip interface brief"],
         })
+
+    def _build_tunnel_config(self) -> Optional[Dict[str, Any]]:
+        """Build SSH config from GNS3_ROUTER_HOST/PORT env vars (pingpy tunnel)."""
+        host = os.environ.get("GNS3_ROUTER_HOST", "")
+        port_str = os.environ.get("GNS3_ROUTER_PORT", "")
+        if not host or not port_str:
+            return None
+        try:
+            port = int(port_str)
+        except ValueError:
+            return None
+        return {
+            "device_type": "cisco_ios",
+            "host": host,
+            "port": port,
+            "username": self.default_username,
+            "password": self.default_password,
+            "timeout": 90,
+            "auth_timeout": 90,
+            "fast_cli": False,
+        }
 
     def _interpolate(self, cmd: str, anomaly: Dict[str, Any]) -> str:
         interface = (

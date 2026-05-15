@@ -319,6 +319,18 @@ def run_monitor_cycle() -> Dict[str, Any]:
         logger.error(f"Monitor cycle failed: {e}", exc_info=True)
         return {"error": str(e), "anomalies_found": 0}
 
+# ── WORKSPACES list (updated to include Admin) ───────────────────────────────
+WORKSPACES = [
+    ("dashboard", "🖥",  "Dashboard"),
+    ("Workflows", "🔄",  "Workflows"),
+    ("incident",  "🚨",  "Incidents"),
+    ("topology",  "🗺",  "Topology"),
+    ("Observability", "📡", "Observability"),
+    ("security",  "🔒",  "Security"),
+    ("executive", "📈",  "Executive"),
+    ("admin",     "⚙️",  "Admin"),
+]
+
 # ── CSS ───────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
@@ -366,98 +378,189 @@ st.markdown("""
 
 /* Fix dataframe headers */
 .dataframe th { background: #1c2128 !important; color: #cdd9e5 !important; }
+
+/* Device health card */
+.dev-card { border-radius:10px; padding:14px; margin:4px 0; }
+
+/* Approval card */
+.approval-card {
+    background: linear-gradient(135deg, #1a1200, #0d0d00);
+    border: 2px solid #cc8800;
+    border-radius: 10px;
+    padding: 16px 20px;
+    margin-bottom: 12px;
+}
 </style>
 """, unsafe_allow_html=True)
+
+# ── helper: render a single device health card ────────────────────────────────
+def _device_card(hostname: str, m, health: dict) -> None:
+    score  = health.get("score", 100)
+    status = health.get("status", "healthy")
+    reachable = getattr(m, "reachable", True)
+    color  = {"critical": "#cc0000", "warning": "#cc8800", "healthy": "#00aa44"}.get(status, "#555")
+    icon   = {"critical": "🔴", "warning": "🟡", "healthy": "🟢"}.get(status, "⚫")
+
+    cpu_bar  = int(m.cpu)
+    mem_bar  = int(m.memory)
+    cpu_col  = "#cc0000" if m.cpu >= 90 else "#cc8800" if m.cpu >= 70 else "#00aa44"
+    mem_col  = "#cc0000" if m.memory >= 90 else "#cc8800" if m.memory >= 70 else "#00aa44"
+
+    st.markdown(f"""
+    <div style="background:#161b22; border:1px solid {color}; border-left:4px solid {color};
+                border-radius:10px; padding:14px; margin:4px 0;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+            <span style="font-weight:700; color:#cdd9e5; font-size:14px;">{icon} {hostname}</span>
+            <span style="font-size:11px; color:{color}; font-weight:600;">{status.upper()}</span>
+        </div>
+        <div style="font-size:11px; color:#8b949e; margin-bottom:6px;">
+            {'✅ Reachable' if reachable else '❌ Unreachable'} &nbsp;|&nbsp; Health: {score:.0f}%
+        </div>
+        <div style="font-size:11px; color:#8b949e; margin:2px 0;">CPU</div>
+        <div style="background:#30363d; border-radius:3px; height:6px; margin-bottom:4px;">
+            <div style="background:{cpu_col}; width:{min(cpu_bar,100)}%; height:6px; border-radius:3px;"></div>
+        </div>
+        <div style="font-size:11px; color:#8b949e; margin:2px 0;">Memory</div>
+        <div style="background:#30363d; border-radius:3px; height:6px; margin-bottom:6px;">
+            <div style="background:{mem_col}; width:{min(mem_bar,100)}%; height:6px; border-radius:3px;"></div>
+        </div>
+        <div style="font-size:11px; color:#8b949e;">
+            CPU {m.cpu:.1f}% &nbsp;|&nbsp; Mem {m.memory:.1f}%
+            &nbsp;|&nbsp; Lat {m.latency_ms:.0f}ms &nbsp;|&nbsp; Loss {m.packet_loss_pct:.2f}%
+        </div>
+    </div>""", unsafe_allow_html=True)
+
+
+# ── helper: render one pending-approval card ──────────────────────────────────
+def _render_approval_card(run_id: str, data: dict) -> None:
+    run     = data["run"]
+    anomaly = data["anomaly"]
+    plan    = data.get("plan", [])
+    rca     = data.get("rca", "Root cause analysis pending.")
+    sev_icon = {"critical": "🔴", "high": "🟠", "medium": "🟡"}.get(run.severity, "⚪")
+
+    st.markdown(f"""
+    <div class="approval-card">
+        <div style="font-size:16px; font-weight:700; color:#cc8800;">
+            {sev_icon} APPROVAL REQUIRED — {run.anomaly_type.replace('_',' ').upper()}
+        </div>
+        <div style="font-size:12px; color:#8b949e; margin-top:4px;">
+            Device: <b style="color:#cdd9e5;">{run.device}</b> &nbsp;|&nbsp;
+            Incident: <b style="color:#cdd9e5;">{run.incident_id}</b> &nbsp;|&nbsp;
+            Severity: <b style="color:#cc8800;">{run.severity.upper()}</b>
+        </div>
+    </div>""", unsafe_allow_html=True)
+
+    col_rca, col_plan = st.columns([3, 2])
+    with col_rca:
+        st.markdown("**AI Root Cause Analysis**")
+        st.info(rca[:400])
+    with col_plan:
+        st.markdown("**Remediation Plan**")
+        for i, step in enumerate(plan, 1):
+            st.markdown(f"  {i}. {step}")
+
+    col_approve, col_reject, col_skip = st.columns([1, 1, 3])
+    with col_approve:
+        if st.button(f"✅ APPROVE FIX", key=f"approve_{run_id}", type="primary", use_container_width=True):
+            monitor.approved_run_ids.add(run_id)
+            st.success("Fix approved — executing on next cycle...")
+            st.rerun()
+    with col_reject:
+        if st.button(f"❌ REJECT", key=f"reject_{run_id}", use_container_width=True):
+            monitor.rejected_run_ids.add(run_id)
+            st.warning("Fix rejected.")
+            st.rerun()
+    with col_skip:
+        st.caption(f"Run: `{run_id}` · Elapsed: {run.elapsed_seconds:.0f}s")
+
 
 # ── SIDEBAR ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## 🧠 NetBrain AI")
-    st.caption("Autonomous Network Operations")
+    st.caption("Autonomous NOC Platform")
     st.divider()
 
-    # Live health score
+    # Health score ring
     op_summary = orchestrator.state.get_operational_summary()
     score = op_summary.get("operational_score", 100)
     score_color = "#cc0000" if score < 60 else "#cc8800" if score < 80 else "#00aa44"
     st.markdown(
         f"""<div style="text-align:center; padding:12px; background:#161b22;
-                        border-radius:8px; border:1px solid #30363d; margin-bottom:8px;">
-                <div style="font-size:36px; font-weight:700; color:{score_color};">{score:.0f}</div>
-                <div style="font-size:12px; color:#8b949e;">HEALTH SCORE</div>
+                        border-radius:8px; border:2px solid {score_color}33; margin-bottom:8px;">
+                <div style="font-size:38px; font-weight:700; color:{score_color};">{score:.0f}</div>
+                <div style="font-size:11px; color:#8b949e; letter-spacing:1px;">HEALTH SCORE</div>
             </div>""",
         unsafe_allow_html=True,
     )
 
     # Quick stats
-    incidents_open = len([i for i in orchestrator.state.get_all_incidents().values()
-                          if i["status"] in {"new", "investigating"}])
-    anomaly_count  = len(orchestrator.telemetry.detect_anomalies())
-    active_wf      = len(tracker.get_active_runs())
+    incidents_open   = sum(1 for i in orchestrator.state.get_all_incidents().values()
+                           if i["status"] in {"new", "investigating"})
+    anomaly_count    = len(orchestrator.telemetry.detect_anomalies())
+    active_wf        = len(tracker.get_active_runs())
+    pending_approvals_count = len(getattr(monitor, "pending_approvals", {}))
 
     c1, c2 = st.columns(2)
-    c1.metric("Incidents", incidents_open)
-    c2.metric("Anomalies", anomaly_count)
+    c1.metric("Incidents",  incidents_open)
+    c2.metric("Anomalies",  anomaly_count)
     c1.metric("Workflows",  active_wf)
-    c2.metric("Cycles",     st.session_state["cycle_count"])
+    c2.metric("Approvals",  pending_approvals_count)
+
+    if pending_approvals_count:
+        st.warning(f"⚠️ {pending_approvals_count} fix(es) awaiting approval")
 
     st.divider()
 
     # Navigation
-    st.markdown("**WORKSPACES**")
+    st.markdown("**NAVIGATION**")
     current_ws = st.session_state["workspace"]
     for ws_id, icon, label in WORKSPACES:
+        badge = f" ({pending_approvals_count})" if ws_id == "Workflows" and pending_approvals_count else ""
         btn_type = "primary" if ws_id == current_ws else "secondary"
-        if st.button(f"{icon} {label}", key=f"ws_{ws_id}",
+        if st.button(f"{icon} {label}{badge}", key=f"ws_{ws_id}",
                      use_container_width=True, type=btn_type):
             st.session_state["workspace"] = ws_id
             st.rerun()
 
     st.divider()
-    st.markdown("**SYSTEM STATUS**")
-    mode = "🟢 LIVE" if orchestrator.telemetry.live_mode else "🔵 SIMULATION"
-    ai_status = "🟢 AI ON" if _resolve_api_key() else "🟡 AI OFF"
-    db_status = "🟢 DB ON" if DATABASE_AVAILABLE else "🟡 DB OFF"
-    st.caption(f"{mode} | {ai_status} | {db_status}")
+    st.markdown("**SYSTEM**")
+    mode      = "🟢 LIVE" if orchestrator.telemetry.live_mode else "🔵 SIM"
+    ai_status = "🟢 AI" if _resolve_api_key() else "🟡 AI"
+    st.caption(f"{mode} | {ai_status}")
     poll_age = time.time() - st.session_state.get("last_poll_time", 0)
-    st.caption(f"Last poll: {poll_age:.0f}s ago | Fixes: {st.session_state['total_fixes_executed']}")
+    st.caption(f"Cycle #{st.session_state['cycle_count']} · {poll_age:.0f}s ago")
 
-    # ── GNS3 / Tunnel status ──────────────────────────────────────────────────
-    st.divider()
-    st.markdown("**GNS3 / TUNNEL**")
+    # GNS3 / tunnel
     gns3_engine = getattr(orchestrator, "gns3", None)
     gns3_host, gns3_port = _resolve_gns3_endpoint()
-    tunnel_configured = (gns3_host != "localhost")
     if gns3_engine and gns3_engine.available:
-        st.success(f"🟢 Connected v{gns3_engine.version}")
-        st.caption(f"{gns3_host}:{gns3_port} · {len(gns3_engine.nodes)} nodes · {len(gns3_engine.links)} links")
-    elif tunnel_configured:
-        st.warning("🟡 Waiting for tunnel…")
-        st.caption(f"{gns3_host}:{gns3_port}")
+        st.success(f"🟢 GNS3 v{gns3_engine.version}\n{len(gns3_engine.nodes)} nodes")
+    elif gns3_host != "localhost":
+        st.warning("🟡 Tunnel — waiting GNS3")
     else:
-        st.info("🔵 Simulation\nSet GNS3_TUNNEL_URL to go live")
+        st.info("🔵 Simulation mode")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # WORKSPACE CONTENT
 # ══════════════════════════════════════════════════════════════════════════════
 
-workspace = st.session_state["workspace"]
+workspace     = st.session_state["workspace"]
 POLL_INTERVAL = 5  # seconds
 
-# ── Check pingpy tunnel on every render ──────────────────────────────────────
+# ── Check tunnel + poll monitor ───────────────────────────────────────────────
 tunnel_just_connected = _check_tunnel_and_reconnect()
 if tunnel_just_connected:
     try:
         orchestrator.telemetry.live_mode = True
         gns3_nodes = list(orchestrator.gns3.nodes.keys()) if getattr(orchestrator, "gns3", None) else []
-        add_live_alert(
-            "recovery",
-            f"GNS3 tunnel connected — pulling live data from {len(gns3_nodes)} device(s)",
-            {"type": "tunnel_connected", "device": "gns3", "nodes": gns3_nodes},
+        add_live_alert("recovery",
+            f"GNS3 tunnel connected — {len(gns3_nodes)} device(s) now live",
+            {"type": "tunnel_connected", "device": "gns3"},
         )
     except Exception:
         pass
 
-# ── Poll if due ───────────────────────────────────────────────────────────────
 now = time.time()
 if now - st.session_state["last_poll_time"] >= POLL_INTERVAL:
     cycle_result = run_monitor_cycle()
@@ -465,207 +568,207 @@ if now - st.session_state["last_poll_time"] >= POLL_INTERVAL:
 else:
     cycle_result = {}
 
-# ══════════════════════════════════════════════════════════════════════════════
-# WORKSPACE: NOC OPERATIONS
-# ══════════════════════════════════════════════════════════════════════════════
-if workspace == "Net Ops":
-    st.markdown("## ⚡ Autonomous NOC Operations Center")
-    st.caption("Real-time network monitoring with AI-powered autonomous remediation")
+# ── Workflow fallback renderer (no ui module needed) ──────────────────────────
+def _render_workflow_fallback(run) -> None:
+    sev_icon     = {"critical": "🔴", "high": "🟠", "medium": "🟡"}.get(run.severity, "⚪")
+    status_badge = {"running": "🔄 RUNNING", "awaiting_approval": "⏳ AWAITING APPROVAL",
+                    "completed": "✅ DONE", "failed": "❌ FAILED"}.get(run.status, run.status)
+    st.markdown(f"### {sev_icon} {run.anomaly_type.replace('_',' ').upper()} — {status_badge}")
+    st.caption(f"Device: **{run.device}** | Incident: `{run.incident_id}` | Run: `{run.run_id}`")
+    if run.progress_pct:
+        st.progress(run.progress_pct / 100)
+    cols = st.columns(len(run.steps))
+    for step, col in zip(run.steps, cols):
+        with col:
+            st.markdown(f"**{step.icon}**\n\n<small>{step.name}</small>", unsafe_allow_html=True)
+    completed = [s for s in run.steps if s.status.value == "completed"]
+    running   = [s for s in run.steps if s.status.value == "running"]
+    detail    = running[0] if running else (completed[-1] if completed else None)
+    if detail and detail.output:
+        with st.expander(f"▶ Step {detail.step_id}: {detail.name}", expanded=True):
+            st.code("\n".join(detail.output[-20:]), language="bash")
 
-    # ── Live alert banner ────────────────────────────────────────────────────
-    live_alerts = st.session_state["live_alerts"]
-    critical_alerts = [a for a in live_alerts if a["severity"] in ("critical", "high")]
-    if critical_alerts:
-        st.markdown(
-            f"""<div style="background:#1a0000; border:1px solid #cc0000; border-radius:8px;
-                            padding:12px 16px; margin-bottom:12px;">
-                    <b style="color:#ff4444;">🚨 CRITICAL ALERT — {len(critical_alerts)} active issue(s)</b>
-                </div>""",
-            unsafe_allow_html=True,
-        )
-        for a in critical_alerts[:3]:
-            sev_icon = {"critical": "🔴", "high": "🟠"}.get(a["severity"], "⚪")
-            st.markdown(
-                f"&nbsp;&nbsp;{sev_icon} **{a['severity'].upper()}** — "
-                f"{a['message']} — `{a['timestamp'][-8:]}`"
-            )
 
-    # ── KPI row ───────────────────────────────────────────────────────────────
-    op_summary = orchestrator.state.get_operational_summary()
+# ══════════════════════════════════════════════════════════════════════════════
+# WORKSPACE: DASHBOARD (main NOC view)
+# ══════════════════════════════════════════════════════════════════════════════
+if workspace == "dashboard":
+    op_summary  = orchestrator.state.get_operational_summary()
     inc_summary = op_summary.get("incidents", {})
     svc_summary = op_summary.get("services", {})
     score       = op_summary.get("operational_score", 100)
     open_inc    = inc_summary.get("new", 0) + inc_summary.get("investigating", 0)
     svc_down    = svc_summary.get("down", 0)
-    mttr        = max(5, open_inc * 4)
+    anomalies   = orchestrator.telemetry.detect_anomalies()
 
-    k1, k2, k3, k4, k5 = st.columns(5)
-    k1.metric("Health Score",      f"{score:.0f}%",
-              delta_color="inverse" if score < 80 else "off")
-    k2.metric("Open Incidents",    open_inc,
-              delta_color="inverse" if open_inc > 0 else "off")
-    k3.metric("Active Anomalies",  len(st.session_state["live_event_feed"] and
-              orchestrator.telemetry.detect_anomalies() or []))
-    k4.metric("Services Impacted", svc_down,
-              delta_color="inverse" if svc_down > 0 else "off")
-    k5.metric("Est. MTTR",         f"{mttr}m")
+    # ── Top status ribbon ─────────────────────────────────────────────────────
+    score_color = "#cc0000" if score < 60 else "#cc8800" if score < 80 else "#00aa44"
+    pending_cnt = len(getattr(monitor, "pending_approvals", {}))
+    st.markdown(f"""
+    <div style="display:flex; gap:10px; margin-bottom:16px; flex-wrap:wrap;">
+        <div style="flex:1; min-width:120px; background:#161b22; border:1px solid {score_color};
+                    border-radius:8px; padding:12px; text-align:center;">
+            <div style="font-size:28px; font-weight:700; color:{score_color};">{score:.0f}%</div>
+            <div style="font-size:11px; color:#8b949e;">HEALTH SCORE</div>
+        </div>
+        <div style="flex:1; min-width:120px; background:#161b22; border:1px solid {'#cc0000' if open_inc else '#30363d'};
+                    border-radius:8px; padding:12px; text-align:center;">
+            <div style="font-size:28px; font-weight:700; color:{'#cc0000' if open_inc else '#cdd9e5'};">{open_inc}</div>
+            <div style="font-size:11px; color:#8b949e;">OPEN INCIDENTS</div>
+        </div>
+        <div style="flex:1; min-width:120px; background:#161b22; border:1px solid {'#cc8800' if anomalies else '#30363d'};
+                    border-radius:8px; padding:12px; text-align:center;">
+            <div style="font-size:28px; font-weight:700; color:{'#cc8800' if anomalies else '#cdd9e5'};">{len(anomalies)}</div>
+            <div style="font-size:11px; color:#8b949e;">ANOMALIES</div>
+        </div>
+        <div style="flex:1; min-width:120px; background:#161b22; border:1px solid {'#cc8800' if pending_cnt else '#30363d'};
+                    border-radius:8px; padding:12px; text-align:center;">
+            <div style="font-size:28px; font-weight:700; color:{'#cc8800' if pending_cnt else '#cdd9e5'};">{pending_cnt}</div>
+            <div style="font-size:11px; color:#8b949e;">AWAITING APPROVAL</div>
+        </div>
+        <div style="flex:1; min-width:120px; background:#161b22; border:1px solid #30363d;
+                    border-radius:8px; padding:12px; text-align:center;">
+            <div style="font-size:28px; font-weight:700; color:#cdd9e5;">{st.session_state['total_fixes_executed']}</div>
+            <div style="font-size:11px; color:#8b949e;">FIXES APPLIED</div>
+        </div>
+    </div>""", unsafe_allow_html=True)
 
-    st.progress(int(max(0, min(100, score))))
-    st.divider()
+    # ── Alert ticker ──────────────────────────────────────────────────────────
+    live_alerts = st.session_state["live_alerts"]
+    critical_alerts = [a for a in live_alerts if a["severity"] in ("critical", "high")]
+    if critical_alerts:
+        msgs = "  &nbsp;|&nbsp;  ".join(
+            f"🔴 {a['message']} ({a['timestamp'][-8:]})" for a in critical_alerts[:4]
+        )
+        st.markdown(f"""<div style="background:#1a0000; border:1px solid #cc000066; border-radius:6px;
+            padding:8px 14px; font-size:12px; color:#ff6666; margin-bottom:12px;
+            white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+            🚨 LIVE ALERTS &nbsp;|&nbsp; {msgs}</div>""", unsafe_allow_html=True)
 
-    # ── Live event feed ───────────────────────────────────────────────────────
-    st.markdown("### 📡 Live Event Feed")
-    event_feed = st.session_state.get("live_event_feed", [])
-    if event_feed:
-        feed_rows = [
-            {
-                "Time":     ev.get("timestamp", "")[-8:],
-                "Event":    ev.get("type", "?").replace("_", " ").title(),
-                "Severity": ev.get("severity", "info").upper(),
-                "Detail":   ev.get("description", "")[:80],
-            }
-            for ev in event_feed[-20:]
-        ]
-        st.dataframe(pd.DataFrame(feed_rows), use_container_width=True, height=220)
-    else:
-        st.info("⏳ Monitoring active — events will appear here...")
+    # ── Pending approvals banner ───────────────────────────────────────────────
+    if pending_cnt:
+        st.warning(f"⚠️ **{pending_cnt} fix(es) awaiting your approval.** Go to **Workflows** to approve or reject.")
 
-    st.divider()
-
-    # ── Device health matrix ──────────────────────────────────────────────────
-    st.markdown("### 🖥 Device Health Matrix")
+    # ── Device health cards ───────────────────────────────────────────────────
+    st.markdown("### Device Health")
     all_metrics = orchestrator.state.get_all_device_metrics()
     if all_metrics:
-        health_rows = []
-        for hostname, m in all_metrics.items():
+        items   = list(all_metrics.items())
+        n_cols  = min(4, len(items))
+        cols    = st.columns(n_cols)
+        for idx, (hostname, m) in enumerate(items):
             h = orchestrator.telemetry.get_device_health_score(hostname)
-            reachable = getattr(m, "reachable", True)
-            link_st = "🟢 UP" if reachable and m.packet_loss_pct < 3 else \
-                      "🟡 DEGRADED" if m.packet_loss_pct < 8 else "🔴 DOWN"
-            health_rows.append({
-                "Device":       hostname,
-                "Health":       f"{h['score']:.0f}%",
-                "Status":       h["status"].upper(),
-                "CPU":          f"{m.cpu:.1f}%",
-                "Memory":       f"{m.memory:.1f}%",
-                "Latency":      f"{m.latency_ms:.1f}ms",
-                "Pkt Loss":     f"{m.packet_loss_pct:.2f}%",
-                "BGP↓":         str(m.bgp_sessions_down) if m.bgp_sessions_down else "—",
-                "Link":         link_st,
-            })
-        st.dataframe(pd.DataFrame(health_rows), use_container_width=True, height=350)
+            with cols[idx % n_cols]:
+                _device_card(hostname, m, h)
     else:
-        st.info("No telemetry yet — polling in progress...")
+        st.info("⏳ No telemetry yet — first poll in progress...")
 
-    # ── Active incidents summary ───────────────────────────────────────────────
-    active_incidents = [i for i in orchestrator.state.get_all_incidents().values()
-                        if i["status"] in {"new", "investigating"}]
-    if active_incidents:
-        st.divider()
-        st.markdown("### 🚨 Active Incidents")
-        for inc in active_incidents[:5]:
-            sev_icon = {"critical": "🔴", "high": "🟠", "medium": "🟡"}.get(inc["severity"], "⚪")
-            with st.expander(
-                f"{sev_icon} **{inc['id']}** — {inc['title']} — {inc['status'].upper()}",
-                expanded=inc["severity"] == "critical",
-            ):
-                c1, c2 = st.columns(2)
-                c1.markdown(f"**Severity:** {inc['severity'].upper()}")
-                c1.markdown(f"**Devices:** {', '.join(inc.get('affected_devices', []))}")
-                c2.markdown(f"**Services:** {', '.join(inc.get('affected_services', []) or ['None'])}")
-                c2.markdown(f"**Created:** {inc.get('created_at', '')[-8:]}")
-                if inc.get("timeline"):
-                    st.markdown("**Timeline:**")
-                    for note in inc["timeline"][-3:]:
-                        st.markdown(f"  `{note['timestamp'][-8:]}` {note['note']}")
+    # ── Two-column: events + active incidents ─────────────────────────────────
+    st.markdown("### Live Event Feed & Active Incidents")
+    col_ev, col_inc = st.columns([3, 2])
+
+    with col_ev:
+        event_feed = st.session_state.get("live_event_feed", [])
+        if event_feed:
+            feed_rows = [
+                {"Time": ev.get("timestamp","")[-8:],
+                 "Event": ev.get("type","?").replace("_"," ").title(),
+                 "Sev": ev.get("severity","info").upper(),
+                 "Detail": ev.get("description","")[:70]}
+                for ev in event_feed[-15:]
+            ]
+            st.dataframe(pd.DataFrame(feed_rows), use_container_width=True, height=280)
+        else:
+            st.info("Events will appear here once monitoring starts.")
+
+    with col_inc:
+        active_inc = [i for i in orchestrator.state.get_all_incidents().values()
+                      if i["status"] in {"new", "investigating"}]
+        if active_inc:
+            for inc in active_inc[:5]:
+                sev_icon = {"critical":"🔴","high":"🟠","medium":"🟡"}.get(inc["severity"],"⚪")
+                with st.expander(f"{sev_icon} {inc['id']} — {inc['title'][:40]}",
+                                 expanded=inc["severity"] == "critical"):
+                    st.caption(f"Status: {inc['status']} | {inc.get('created_at','')[-8:]}")
+                    st.caption(f"Devices: {', '.join(inc.get('affected_devices',[]) or ['—'])}")
+                    if inc.get("timeline"):
+                        st.markdown(f"  `{inc['timeline'][-1]['timestamp'][-8:]}` {inc['timeline'][-1]['note'][:60]}")
+        else:
+            st.success("✅ No active incidents")
 
     # ── Auto-refresh ──────────────────────────────────────────────────────────
     remaining = max(0.0, POLL_INTERVAL - (time.time() - st.session_state["last_poll_time"]))
-    st.caption(f"🔄 Next autonomous cycle in **{remaining:.0f}s** | Cycle #{st.session_state['cycle_count']}")
-    if remaining > 0:
-        time.sleep(remaining)
+    st.caption(f"🔄 Next refresh in {remaining:.0f}s | Cycle #{st.session_state['cycle_count']}")
+    time.sleep(remaining)
     st.rerun()
 
 # ══════════════════════════════════════════════════════════════════════════════
-# WORKSPACE: AUTONOMOUS WORKFLOWS
+# WORKSPACE: WORKFLOWS + APPROVALS
 # ══════════════════════════════════════════════════════════════════════════════
 elif workspace == "Workflows":
     st.markdown("## 🔄 Autonomous Remediation Workflows")
-    st.caption(
-        "Watch every step of the autonomous pipeline: "
-        "Detection → Root Cause Analysis → Fix Execution → Verification → Closure"
-    )
+    st.caption("Detect → Analyze → Plan → **APPROVE** → Fix → Verify → Close")
 
-    try:
-        from ui.workflow_viz import (
-            render_workflow_run,
-            render_workflow_history,
-            render_no_active_workflow,
-        )
-        UI_VIZ_AVAILABLE = True
-    except ImportError:
-        UI_VIZ_AVAILABLE = False
-
-    # ── Active workflow display ───────────────────────────────────────────────
-    active_runs = tracker.get_active_runs()
-    recent_runs = tracker.get_recent_runs(10)
-
-    if active_runs:
-        st.markdown("### 🔴 LIVE — Active Remediation")
-        for run in active_runs:
-            if UI_VIZ_AVAILABLE:
-                render_workflow_run(run)
-            else:
-                _render_workflow_fallback(run)
+    # ── SECTION 1: Pending approvals (most important) ─────────────────────────
+    pending = getattr(monitor, "pending_approvals", {})
+    if pending:
+        st.markdown(f"### ⏳ Awaiting Approval ({len(pending)})")
+        st.markdown("Review the AI analysis and remediation plan, then approve or reject each fix.")
+        for run_id, data in list(pending.items()):
+            _render_approval_card(run_id, data)
             st.divider()
     else:
-        latest = tracker.get_latest_run()
-        if latest:
-            st.markdown("### Last Completed Workflow")
-            if UI_VIZ_AVAILABLE:
-                render_workflow_run(latest)
-            else:
-                _render_workflow_fallback(latest)
-        else:
-            if UI_VIZ_AVAILABLE:
-                render_no_active_workflow()
-            else:
-                st.success("🟢 Network operating normally. No active workflows.")
-                st.info(
-                    "When the autonomous monitor detects a high-severity anomaly, "
-                    "it will start a remediation workflow visible here step by step."
-                )
+        st.success("✅ No fixes awaiting approval")
 
-    # ── Workflow history ──────────────────────────────────────────────────────
+    # ── SECTION 2: Active (approved, running) workflows ───────────────────────
+    try:
+        from ui.workflow_viz import render_workflow_run, render_no_active_workflow
+        UI_VIZ = True
+    except ImportError:
+        UI_VIZ = False
+
+    active_runs = tracker.get_active_runs()
+    if active_runs:
+        st.markdown("### 🔴 LIVE — Executing Fix")
+        for run in active_runs:
+            render_workflow_run(run) if UI_VIZ else _render_workflow_fallback(run)
+            st.divider()
+    elif not pending:
+        if UI_VIZ:
+            render_no_active_workflow()
+        else:
+            st.info("No workflows running. Anomalies will be processed automatically every 5 seconds.")
+
+    # ── SECTION 3: Workflow history ───────────────────────────────────────────
+    recent_runs = tracker.get_recent_runs(15)
     if recent_runs:
         st.divider()
-        st.markdown("### 📋 Recent Workflow History")
+        st.markdown("### 📋 Workflow History")
         wf_rows = []
         for run in recent_runs:
-            status_icon = {"running": "🔄", "completed": "✅", "failed": "❌"}.get(run.status, "⬜")
-            sev_icon    = {"critical": "🔴", "high": "🟠", "medium": "🟡"}.get(run.severity, "⚪")
+            s_icon = {"running":"🔄","awaiting_approval":"⏳","completed":"✅","failed":"❌"}.get(run.status,"⬜")
+            v_icon = {"critical":"🔴","high":"🟠","medium":"🟡"}.get(run.severity,"⚪")
             wf_rows.append({
                 "Run ID":   run.run_id,
                 "Device":   run.device,
-                "Issue":    run.anomaly_type.replace("_", " ").title(),
-                "Severity": f"{sev_icon} {run.severity.upper()}",
-                "Status":   f"{status_icon} {run.status}",
+                "Issue":    run.anomaly_type.replace("_"," ").title(),
+                "Sev":      f"{v_icon} {run.severity.upper()}",
+                "Status":   f"{s_icon} {run.status}",
                 "Progress": f"{run.progress_pct}%",
                 "Duration": f"{run.elapsed_seconds:.1f}s",
-                "Summary":  run.summary[:60] if run.summary else "—",
+                "Summary":  (run.summary or "—")[:55],
             })
         st.dataframe(pd.DataFrame(wf_rows), use_container_width=True)
 
-    # ── Stats ─────────────────────────────────────────────────────────────────
     st.divider()
-    wf_summary = tracker.export_summary()
-    s1, s2, s3, s4 = st.columns(4)
-    s1.metric("Total Runs",     wf_summary["total_runs"])
-    s2.metric("Active",         wf_summary["active_runs"])
-    s3.metric("Completed",      wf_summary["completed_runs"])
-    s4.metric("Failed",         wf_summary["failed_runs"])
+    wf_s = tracker.export_summary()
+    s1, s2, s3, s4, s5 = st.columns(5)
+    s1.metric("Total",     wf_s["total_runs"])
+    s2.metric("Active",    wf_s["active_runs"])
+    s3.metric("Pending",   len(pending))
+    s4.metric("Completed", wf_s["completed_runs"])
+    s5.metric("Failed",    wf_s["failed_runs"])
 
-    # ── Auto refresh ──────────────────────────────────────────────────────────
     remaining = max(0.0, POLL_INTERVAL - (time.time() - st.session_state["last_poll_time"]))
     st.caption(f"🔄 Refreshing in {remaining:.0f}s")
     time.sleep(max(0.5, remaining))
@@ -676,54 +779,56 @@ elif workspace == "Workflows":
 # ══════════════════════════════════════════════════════════════════════════════
 elif workspace == "incident":
     st.markdown("## 🚨 Incident War Room")
-
-    op_status    = orchestrator.get_operational_status()
     all_incidents = orchestrator.state.get_all_incidents()
-    open_inc  = sum(1 for i in all_incidents.values() if i["status"] in {"new", "investigating"})
+    open_inc  = sum(1 for i in all_incidents.values() if i["status"] in {"new","investigating"})
     resolved  = sum(1 for i in all_incidents.values() if i["status"] == "resolved")
     critical  = sum(1 for i in all_incidents.values() if i.get("severity") == "critical")
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Open Incidents",  open_inc)
-    c2.metric("Critical",        critical)
-    c3.metric("Resolved",        resolved)
-    c4.metric("Total",           len(all_incidents))
+    c1.metric("Open",     open_inc,        delta_color="inverse" if open_inc else "off")
+    c2.metric("Critical", critical,        delta_color="inverse" if critical else "off")
+    c3.metric("Resolved", resolved)
+    c4.metric("Total",    len(all_incidents))
 
-    live_alerts = st.session_state.get("live_alerts", [])
-    if live_alerts:
-        st.subheader("🔴 Live Alerts")
-        for a in live_alerts[:8]:
-            sev_icon = {"critical": "🔴", "high": "🟠", "medium": "🟡",
-                        "low": "🟢", "recovery": "✅"}.get(a["severity"], "⚪")
-            with st.expander(f"{sev_icon} {a['message']} — {a['timestamp'][-8:]}",
-                             expanded=a["severity"] == "critical"):
-                st.json(a.get("anomaly", {}))
+    tab_live, tab_all = st.tabs(["Live Alerts", "All Incidents"])
 
-    st.subheader("All Incidents")
-    for inc_id, inc in sorted(all_incidents.items(), key=lambda x: x[1]["created_at"], reverse=True):
-        sev_icon = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(inc["severity"], "⚪")
-        status_color = {"new": "🔴", "investigating": "🟠", "resolved": "🟢", "closed": "⚫"}.get(inc["status"], "⚪")
-        with st.expander(
-            f"{sev_icon} **{inc_id}** — {inc['title']} — {status_color} {inc['status'].upper()}",
-            expanded=inc["severity"] == "critical" and inc["status"] in {"new", "investigating"},
-        ):
-            c1, c2 = st.columns(2)
-            c1.markdown(f"**Severity:** {inc['severity'].upper()}")
-            c1.markdown(f"**Status:** {inc['status']}")
-            c1.markdown(f"**Created:** {inc.get('created_at', 'N/A')}")
-            c2.markdown(f"**Devices:** {', '.join(inc.get('affected_devices', []) or ['—'])}")
-            c2.markdown(f"**Services:** {', '.join(inc.get('affected_services', []) or ['—'])}")
-            if inc.get("timeline"):
-                st.markdown("**Timeline:**")
-                for note in inc["timeline"][-5:]:
-                    st.markdown(f"  `{note['timestamp'][-8:]}` {note['note']}")
+    with tab_live:
+        live_alerts = st.session_state.get("live_alerts", [])
+        if live_alerts:
+            for a in live_alerts[:10]:
+                s_icon = {"critical":"🔴","high":"🟠","medium":"🟡","low":"🟢","recovery":"✅"}.get(a["severity"],"⚪")
+                with st.expander(f"{s_icon} {a['message']} — {a['timestamp'][-8:]}",
+                                 expanded=a["severity"] == "critical"):
+                    st.json(a.get("anomaly", {}))
+        else:
+            st.info("No alerts yet")
+
+    with tab_all:
+        filter_status = st.selectbox("Filter", ["All", "Open", "Resolved"], key="inc_filter")
+        for inc_id, inc in sorted(all_incidents.items(), key=lambda x: x[1]["created_at"], reverse=True):
+            if filter_status == "Open" and inc["status"] not in {"new","investigating"}:
+                continue
+            if filter_status == "Resolved" and inc["status"] != "resolved":
+                continue
+            s_icon = {"critical":"🔴","high":"🟠","medium":"🟡","low":"🟢"}.get(inc["severity"],"⚪")
+            st_icon = {"new":"🔴","investigating":"🟠","resolved":"🟢","closed":"⚫"}.get(inc["status"],"⚪")
+            with st.expander(f"{s_icon} {inc_id} — {inc['title']} — {st_icon} {inc['status'].upper()}",
+                             expanded=False):
+                c1, c2 = st.columns(2)
+                c1.markdown(f"**Severity:** {inc['severity'].upper()}")
+                c1.markdown(f"**Devices:** {', '.join(inc.get('affected_devices',[]) or ['—'])}")
+                c2.markdown(f"**Status:** {inc['status']}")
+                c2.markdown(f"**Created:** {inc.get('created_at','N/A')[-19:]}")
+                if inc.get("timeline"):
+                    st.markdown("**Timeline:**")
+                    for note in inc["timeline"][-5:]:
+                        st.markdown(f"  `{note['timestamp'][-8:]}` {note['note']}")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # WORKSPACE: TOPOLOGY
 # ══════════════════════════════════════════════════════════════════════════════
 elif workspace == "topology":
     st.markdown("## 🗺 Network Topology")
-
     try:
         from ui.topology_view import (
             render_topology_kpis, render_device_health_table,
@@ -731,8 +836,7 @@ elif workspace == "topology":
         )
         render_topology_kpis(orchestrator.state, orchestrator.simulator)
         st.divider()
-
-        tab1, tab2, tab3, tab4 = st.tabs(["Device Health", "Sites", "Links", "GNS3"])
+        tab1, tab2, tab3, tab4 = st.tabs(["Device Health", "Sites", "Links", "GNS3 Live"])
         with tab1:
             render_device_health_table(orchestrator.state, orchestrator.telemetry)
         with tab2:
@@ -740,33 +844,19 @@ elif workspace == "topology":
         with tab3:
             render_link_status(orchestrator.simulator)
         with tab4:
-            gns3 = getattr(orchestrator, "gns3", None)
-            render_gns3_topology(gns3)
-
+            render_gns3_topology(getattr(orchestrator, "gns3", None))
     except ImportError:
-        # Fallback if UI module not yet available
-        op_summary = orchestrator.state.get_operational_summary()
-        dev_summary  = op_summary.get("devices", {})
-        link_summary = op_summary.get("links", {})
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Total Devices",  dev_summary.get("total", 0))
-        c2.metric("Healthy",        dev_summary.get("healthy", 0))
-        c3.metric("Critical",       dev_summary.get("critical", 0))
-        c4.metric("Links Active",   link_summary.get("active", 0))
-
-        st.subheader("Device Status")
+        op_s = orchestrator.state.get_operational_summary()
+        d_s  = op_s.get("devices", {})
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total Devices", d_s.get("total", 0))
+        c2.metric("Healthy",       d_s.get("healthy", 0))
+        c3.metric("Critical",      d_s.get("critical", 0))
         rows = []
-        for hostname, m in orchestrator.state.get_all_device_metrics().items():
-            h = orchestrator.telemetry.get_device_health_score(hostname)
-            rows.append({
-                "Device":   hostname,
-                "Health":   f"{h['score']:.0f}%",
-                "Status":   h["status"].upper(),
-                "CPU":      f"{m.cpu:.1f}%",
-                "Memory":   f"{m.memory:.1f}%",
-                "Latency":  f"{m.latency_ms:.1f}ms",
-                "Reachable": "✅" if getattr(m, "reachable", True) else "❌",
-            })
+        for hn, m in orchestrator.state.get_all_device_metrics().items():
+            h = orchestrator.telemetry.get_device_health_score(hn)
+            rows.append({"Device":hn,"Health":f"{h['score']:.0f}%","CPU":f"{m.cpu:.1f}%",
+                         "Memory":f"{m.memory:.1f}%","Latency":f"{m.latency_ms:.1f}ms"})
         if rows:
             st.dataframe(pd.DataFrame(rows), use_container_width=True)
 
@@ -775,7 +865,6 @@ elif workspace == "topology":
 # ══════════════════════════════════════════════════════════════════════════════
 elif workspace == "Observability":
     st.markdown("## 📡 Observability & Metrics")
-
     try:
         from ui.metrics_panel import (
             render_fleet_health_kpis, render_device_sparklines,
@@ -783,164 +872,309 @@ elif workspace == "Observability":
         )
         render_fleet_health_kpis(orchestrator.state, orchestrator.telemetry)
         st.divider()
-        anomalies = orchestrator.telemetry.detect_anomalies()
-        render_anomaly_summary(anomalies)
+        render_anomaly_summary(orchestrator.telemetry.detect_anomalies())
         st.divider()
-        st.subheader("Device Metrics")
         render_device_sparklines(orchestrator.state)
         st.divider()
-
-        # Per-device history chart
         devices = list(orchestrator.state.get_all_device_metrics().keys())
         if devices:
-            selected = st.selectbox("Select device for history chart", devices)
-            if selected:
-                render_telemetry_history_chart(orchestrator.state, selected)
-
+            sel = st.selectbox("History chart for device", devices)
+            if sel:
+                render_telemetry_history_chart(orchestrator.state, sel)
     except ImportError:
-        # Fallback
-        anomalies = orchestrator.telemetry.detect_anomalies()
-        health    = orchestrator.telemetry.get_health_metrics()
+        health = orchestrator.telemetry.get_health_metrics()
         if health.get("status") != "no_data":
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Avg CPU",     f"{health['cpu']['average']:.1f}%")
             c2.metric("Avg Memory",  f"{health['memory']['average']:.1f}%")
             c3.metric("Avg Latency", f"{health['latency_ms']['average']:.1f}ms")
-            c4.metric("Anomalies",   len(anomalies))
-        st.subheader("Current Anomalies")
-        if anomalies:
-            for a in anomalies:
-                st.warning(f"⚠️ **{a['type']}** on `{a.get('device','?')}` — {a.get('severity','?').upper()}")
-        else:
-            st.success("✅ No anomalies detected")
+            c4.metric("Anomalies",   len(orchestrator.telemetry.detect_anomalies()))
 
 # ══════════════════════════════════════════════════════════════════════════════
 # WORKSPACE: SECURITY
 # ══════════════════════════════════════════════════════════════════════════════
 elif workspace == "security":
     st.markdown("## 🔒 Security Operations")
-
-    op_summary = orchestrator.state.get_operational_summary()
-    score  = op_summary.get("operational_score", 100)
-    comp_s = min(100, max(60, int(score + 5)))
+    op_s    = orchestrator.state.get_operational_summary()
+    score   = op_s.get("operational_score", 100)
     threats = sum(1 for i in orchestrator.state.get_all_incidents().values()
-                  if i.get("severity") in {"critical", "high"})
-    drift   = len(orchestrator.state.compliance_status)
-
+                  if i.get("severity") in {"critical","high"})
     c1, c2, c3 = st.columns(3)
-    c1.metric("Active Threats",     threats)
-    c2.metric("Compliance Score",   f"{comp_s}%")
-    c3.metric("Config Drift Events",drift)
-
-    st.subheader("Threat Intelligence")
+    c1.metric("Active Threats",    threats)
+    c2.metric("Compliance Score",  f"{min(100,max(60,int(score+5)))}%")
+    c3.metric("Config Drift",      len(orchestrator.state.compliance_status))
     critical_inc = [i for i in orchestrator.state.get_all_incidents().values()
-                    if i.get("severity") in {"critical", "high"} and
-                    i["status"] in {"new", "investigating"}]
+                    if i.get("severity") in {"critical","high"} and i["status"] in {"new","investigating"}]
     if critical_inc:
         for inc in critical_inc:
             st.error(f"🚨 **{inc['title']}** — {inc['description'][:120]}")
     else:
-        st.success("✅ No active security threats detected")
-
-    st.subheader("Compliance Status")
-    if orchestrator.state.compliance_status:
-        for cid, comp in orchestrator.state.compliance_status.items():
-            status = comp.get("status", "unknown")
-            if status == "healthy":
-                st.success(f"✅ {cid}: {comp.get('description', '')}")
-            elif status == "degraded":
-                st.warning(f"⚠️ {cid}: {comp.get('description', '')}")
-            else:
-                st.error(f"❌ {cid}: {comp.get('description', '')}")
-    else:
-        st.info("No compliance events recorded yet")
+        st.success("✅ No active security threats")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # WORKSPACE: EXECUTIVE
 # ══════════════════════════════════════════════════════════════════════════════
 elif workspace == "executive":
     st.markdown("## 📈 Executive Dashboard")
-
-    op_status  = orchestrator.get_operational_status()
-    op_summary = op_status["operational_summary"]
+    try:
+        op_status  = orchestrator.get_operational_status()
+        op_summary = op_status["operational_summary"]
+    except Exception:
+        op_summary = orchestrator.state.get_operational_summary()
     score      = op_summary.get("operational_score", 100)
-    inc_summary = op_summary.get("incidents", {})
-    svc_summary = op_summary.get("services", {})
-    open_inc    = inc_summary.get("new", 0) + inc_summary.get("investigating", 0)
-    critical_in = sum(1 for i in orchestrator.state.get_all_incidents().values()
-                      if i.get("severity") in {"critical", "high"})
-    svc_down    = svc_summary.get("down", 0)
+    open_inc   = sum(1 for i in orchestrator.state.get_all_incidents().values()
+                     if i["status"] in {"new","investigating"})
+    wf_s = tracker.export_summary()
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Network Health",   f"{score:.0f}%",    f"{svc_down} services impacted")
-    c2.metric("Open Incidents",   open_inc,             f"{critical_in} critical")
-    c3.metric("Auto-Remediated",  st.session_state["total_fixes_executed"])
-    c4.metric("Risk Exposure",    f"{min(100, 100 - int(score))}%")
-
+    c1.metric("Network Health",   f"{score:.0f}%")
+    c2.metric("Open Incidents",   open_inc)
+    c3.metric("Auto-Remediated",  wf_s["completed_runs"])
+    c4.metric("Risk Exposure",    f"{min(100,100-int(score))}%")
     st.progress(int(max(0, min(100, score))))
 
-    st.subheader("Executive Insights")
-    wf_total = tracker.export_summary()["total_runs"]
-    wf_done  = tracker.export_summary()["completed_runs"]
-    insights = [
-        f"Network health score is **{score:.0f}%** with {open_inc} open incident(s).",
-        f"The autonomous system has executed **{wf_total} remediation workflows** ({wf_done} completed).",
-        f"**{st.session_state['total_anomalies_seen']} anomalies** detected and processed since session start.",
-        f"**{svc_summary.get('total', 0)} services** tracked | {svc_down} currently impacted.",
-    ]
-    for insight in insights:
+    for insight in [
+        f"Health score is **{score:.0f}%** with **{open_inc}** open incident(s).",
+        f"Autonomous system executed **{wf_s['total_runs']} workflows** ({wf_s['completed_runs']} completed).",
+        f"**{st.session_state['total_anomalies_seen']} anomalies** processed since session start.",
+    ]:
         st.info(f"📌 {insight}")
 
     if score < 70:
-        st.error("🔴 **HIGH RISK** — Network health below 70%. Immediate NOC escalation recommended.")
+        st.error("🔴 HIGH RISK — Immediate NOC escalation recommended.")
     elif score < 85:
-        st.warning("🟠 **MEDIUM RISK** — Maintain elevated monitoring posture.")
+        st.warning("🟠 MEDIUM RISK — Maintain elevated monitoring posture.")
     else:
-        st.success("🟢 **LOW RISK** — Network operating within normal parameters.")
-
-    # AI operational summary
-    try:
-        ai_summary = orchestrator.generate_operational_ai_summary()
-        st.subheader("AI Operational Brief")
-        st.markdown(f"**Root Cause:** {ai_summary.get('root_cause', '—')}")
-        st.markdown(f"**Executive Summary:** {ai_summary.get('executive_summary', '—')}")
-        st.markdown(f"**Recommendation:** {ai_summary.get('recommendation', '—')}")
-    except Exception:
-        pass
+        st.success("🟢 LOW RISK — Network operating normally.")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# DEFAULT FALLBACK
+# WORKSPACE: ADMIN
 # ══════════════════════════════════════════════════════════════════════════════
-else:
-    st.header("🚀 NetBrain AI — Autonomous Network Operations")
-    st.info("Select a workspace from the sidebar to begin.")
-    c1, c2, c3 = st.columns(3)
-    c1.markdown("**⚡ Net Ops**\nLive autonomous NOC with real-time monitoring")
-    c2.markdown("**🔄 Workflows**\nStep-by-step autonomous remediation visualization")
-    c3.markdown("**🗺 Topology**\nNetwork device health and link status")
+elif workspace == "admin":
+    st.markdown("## ⚙️ Administration")
+    st.caption("Configure connection settings, credentials, thresholds, and system actions.")
 
+    tab_conn, tab_creds, tab_thresh, tab_actions = st.tabs(
+        ["Connection", "Credentials", "Thresholds", "System Actions"]
+    )
 
-# ── Workflow fallback renderer (when ui module not loaded) ────────────────────
-def _render_workflow_fallback(run) -> None:
-    """Simple fallback workflow display without the ui module."""
-    sev_icon = {"critical": "🔴", "high": "🟠", "medium": "🟡"}.get(run.severity, "⚪")
-    status_badge = {"running": "🔄 RUNNING", "completed": "✅ DONE", "failed": "❌ FAILED"}.get(run.status, run.status)
-    st.markdown(f"### {sev_icon} {run.anomaly_type.replace('_', ' ').upper()} — {status_badge}")
-    st.caption(f"Device: **{run.device}** | Incident: `{run.incident_id}` | Run: `{run.run_id}`")
-    st.progress(run.progress_pct / 100)
+    # ── Connection tab ────────────────────────────────────────────────────────
+    with tab_conn:
+        st.markdown("### GNS3 Tunnel / Pingpy Configuration")
+        st.info(
+            "Set these in **Streamlit Secrets** (Settings → Secrets) for persistence. "
+            "Changes here apply for this session only."
+        )
+        current_gns3_url  = os.environ.get("GNS3_TUNNEL_URL", "")
+        current_router_h  = os.environ.get("GNS3_ROUTER_HOST", "")
+        current_router_p  = os.environ.get("GNS3_ROUTER_PORT", "22")
 
-    cols = st.columns(len(run.steps))
-    for step, col in zip(run.steps, cols):
-        with col:
-            st.markdown(
-                f"**{step.icon}**\n\n"
-                f"<small>{step.name}</small>",
-                unsafe_allow_html=True,
+        with st.form("conn_form"):
+            new_gns3_url = st.text_input(
+                "GNS3 API Tunnel URL (for topology fetch)",
+                value=current_gns3_url,
+                placeholder="e.g. abc123.pinggy.io:3080",
+                help="Used by GNS3Engine to fetch node/link topology via REST API",
             )
+            new_router_h = st.text_input(
+                "Router SSH Host (pingpy tunnel for CLI access)",
+                value=current_router_h,
+                placeholder="e.g. ugtft-203-145-57-1.run.pinggy-free.link",
+            )
+            new_router_p = st.text_input(
+                "Router SSH Port",
+                value=current_router_p,
+                placeholder="37459",
+            )
+            if st.form_submit_button("Apply Connection Settings", type="primary"):
+                os.environ["GNS3_TUNNEL_URL"]   = new_gns3_url.strip()
+                os.environ["GNS3_ROUTER_HOST"]  = new_router_h.strip()
+                os.environ["GNS3_ROUTER_PORT"]  = new_router_p.strip()
+                st.success("Connection settings applied for this session.")
+                st.caption("Add to Streamlit secrets to persist across restarts.")
 
-    running_steps = [s for s in run.steps if s.status.value == "running"]
-    completed_steps = [s for s in run.steps if s.status.value == "completed"]
-    detail = running_steps[0] if running_steps else (completed_steps[-1] if completed_steps else None)
-    if detail and detail.output:
-        with st.expander(f"▶ Step {detail.step_id}: {detail.name}", expanded=True):
-            st.code("\n".join(detail.output[-20:]), language="bash")
+        st.divider()
+        st.markdown("**Current GNS3 Status**")
+        g = getattr(orchestrator, "gns3", None)
+        if g and g.available:
+            st.success(f"🟢 Connected to GNS3 v{g.version} — {len(g.nodes)} nodes, {len(g.links)} links")
+            if st.button("🔄 Refresh Topology"):
+                g.refresh()
+                st.success("Topology refreshed.")
+        else:
+            st.warning("GNS3 not connected. Set tunnel URL above and click Apply.")
+            if st.button("Test Connection"):
+                _check_tunnel_and_reconnect()
+                g2 = getattr(orchestrator, "gns3", None)
+                if g2 and g2.available:
+                    st.success(f"Connected! v{g2.version}")
+                else:
+                    st.error("Connection failed. Check tunnel URL and GNS3 server.")
+
+        st.markdown("**Secrets file template** (paste into Streamlit → Settings → Secrets):")
+        st.code(f"""GNS3_TUNNEL_URL = "{new_gns3_url if 'new_gns3_url' in dir() else ''}"
+GNS3_ROUTER_HOST = "{new_router_h if 'new_router_h' in dir() else ''}"
+GNS3_ROUTER_PORT = "{new_router_p if 'new_router_p' in dir() else '22'}"
+GNS3_SSH_USER = "admin"
+GNS3_SSH_PASS = "admin"
+OPENROUTER_API_KEY = "your-key-here"
+""", language="toml")
+
+    # ── Credentials tab ───────────────────────────────────────────────────────
+    with tab_creds:
+        st.markdown("### Device SSH Credentials")
+        st.warning("⚠️ Credentials entered here are stored in session memory only. Use Streamlit Secrets for production.")
+
+        with st.form("cred_form"):
+            new_user = st.text_input("SSH Username", value=os.environ.get("GNS3_SSH_USER","admin"))
+            new_pass = st.text_input("SSH Password", value=os.environ.get("GNS3_SSH_PASS","admin"), type="password")
+            new_secret = st.text_input("Enable Secret (optional)", value="", type="password")
+            if st.form_submit_button("Save Credentials", type="primary"):
+                os.environ["GNS3_SSH_USER"] = new_user
+                os.environ["GNS3_SSH_PASS"] = new_pass
+                if new_secret:
+                    os.environ["GNS3_SSH_SECRET"] = new_secret
+                # Update the fixer
+                fixer.default_username = new_user
+                fixer.default_password = new_pass
+                st.success("Credentials updated.")
+
+        st.divider()
+        st.markdown("### OpenRouter AI Key")
+        with st.form("ai_form"):
+            new_ai_key = st.text_input("OPENROUTER_API_KEY", value=os.environ.get("OPENROUTER_API_KEY",""),
+                                       type="password")
+            if st.form_submit_button("Save AI Key"):
+                os.environ["OPENROUTER_API_KEY"] = new_ai_key
+                st.success("AI key updated. Restart the app if the AI client was already cached.")
+
+    # ── Thresholds tab ────────────────────────────────────────────────────────
+    with tab_thresh:
+        st.markdown("### Anomaly Detection Thresholds")
+        st.info("These thresholds determine when the autonomous monitor triggers a workflow.")
+        col1, col2 = st.columns(2)
+        with col1:
+            cpu_warn  = st.slider("CPU Warning %",    50, 95, 80)
+            cpu_crit  = st.slider("CPU Critical %",   60, 99, 90)
+            mem_warn  = st.slider("Memory Warning %", 50, 95, 80)
+            mem_crit  = st.slider("Memory Critical %",60, 99, 90)
+        with col2:
+            lat_warn  = st.slider("Latency Warning ms",  20, 200, 80)
+            lat_crit  = st.slider("Latency Critical ms", 50, 500, 100)
+            loss_warn = st.slider("Packet Loss Warning %", 1, 10, 3)
+            loss_crit = st.slider("Packet Loss Critical %",2, 20, 5)
+
+        if st.button("Apply Thresholds", type="primary"):
+            try:
+                te = orchestrator.telemetry
+                te.thresholds = {
+                    "cpu_warning": cpu_warn, "cpu_critical": cpu_crit,
+                    "memory_warning": mem_warn, "memory_critical": mem_crit,
+                    "latency_warning": lat_warn, "latency_critical": lat_crit,
+                    "packet_loss_warning": loss_warn, "packet_loss_critical": loss_crit,
+                }
+                st.success("Thresholds updated.")
+            except Exception as e:
+                st.warning(f"Could not update thresholds: {e}")
+
+        st.divider()
+        st.markdown("### Autonomous Mode")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            auto_fix = st.toggle("Auto-fix without approval", value=False,
+                                 help="If ON: fixes execute immediately without waiting for approval")
+        with col_b:
+            poll_int = st.number_input("Poll interval (seconds)", 3, 60, POLL_INTERVAL)
+
+        if st.button("Save Mode Settings"):
+            if auto_fix:
+                st.session_state["auto_fix_mode"] = True
+                st.warning("Auto-fix mode enabled. Fixes will execute without approval.")
+            else:
+                st.session_state["auto_fix_mode"] = False
+                st.success("Approval-required mode enabled.")
+
+    # ── System Actions tab ────────────────────────────────────────────────────
+    with tab_actions:
+        st.markdown("### System Actions")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🗑️ Clear All Incidents", use_container_width=True):
+                orchestrator.state.incidents.clear()
+                st.success("All incidents cleared.")
+            if st.button("🔄 Reset Monitor", use_container_width=True):
+                monitor._active_signatures.clear()
+                monitor.pending_approvals.clear()
+                monitor.approved_run_ids.clear()
+                monitor.rejected_run_ids.clear()
+                monitor.cycle_count = 0
+                st.success("Monitor reset.")
+            if st.button("📋 Clear Workflow History", use_container_width=True):
+                tracker.runs.clear()
+                st.success("Workflow history cleared.")
+
+        with col2:
+            if st.button("🔌 Test Router SSH Connection", use_container_width=True):
+                host = os.environ.get("GNS3_ROUTER_HOST","")
+                port = os.environ.get("GNS3_ROUTER_PORT","22")
+                if not host:
+                    st.error("Set GNS3_ROUTER_HOST in Connection tab first.")
+                else:
+                    with st.spinner(f"Connecting to {host}:{port}..."):
+                        try:
+                            import paramiko
+                            paramiko.Transport._preferred_kex = (
+                                "diffie-hellman-group14-sha1",
+                                "diffie-hellman-group-exchange-sha1",
+                                "diffie-hellman-group1-sha1",
+                            )
+                            paramiko.Transport._preferred_ciphers = (
+                                "aes128-cbc","aes192-cbc","aes256-cbc",
+                            )
+                            from netmiko import ConnectHandler
+                            conn = ConnectHandler(
+                                device_type="cisco_ios",
+                                host=host, port=int(port),
+                                username=fixer.default_username,
+                                password=fixer.default_password,
+                                timeout=20, auth_timeout=20, fast_cli=False,
+                            )
+                            out = conn.send_command("show ip interface brief")
+                            conn.disconnect()
+                            st.success("Connection successful!")
+                            st.code(out, language="text")
+                        except Exception as e:
+                            st.error(f"Connection failed: {e}")
+
+            if st.button("📊 Show Current Anomalies", use_container_width=True):
+                anomalies = orchestrator.telemetry.detect_anomalies()
+                if anomalies:
+                    for a in anomalies:
+                        sev_icon = {"critical":"🔴","high":"🟠","medium":"🟡"}.get(a.get("severity",""),"⚪")
+                        st.markdown(f"{sev_icon} **{a.get('type','?')}** on `{a.get('device','?')}` — {a.get('severity','?').upper()}")
+                else:
+                    st.success("No anomalies currently detected.")
+
+        st.divider()
+        st.markdown("### About")
+        g = getattr(orchestrator, "gns3", None)
+        info = {
+            "Platform": "NetBrain AI — Autonomous NOC",
+            "GNS3 Connected": str(g.available if g else False),
+            "GNS3 Version": g.version if (g and g.available) else "N/A",
+            "GNS3 Nodes": str(len(g.nodes)) if (g and g.available) else "0",
+            "Telemetry Mode": "LIVE" if orchestrator.telemetry.live_mode else "SIMULATION",
+            "Monitor Cycles": str(monitor.cycle_count),
+            "Active Signatures": str(len(monitor._active_signatures)),
+        }
+        for k, v in info.items():
+            st.markdown(f"**{k}:** {v}")
+
+else:
+    st.header("🧠 NetBrain AI — Autonomous Network Operations")
+    st.info("Select a workspace from the sidebar.")
+    c1, c2, c3 = st.columns(3)
+    c1.markdown("**🖥 Dashboard**\nLive NOC with device health cards and event feed")
+    c2.markdown("**🔄 Workflows**\nApprove/reject fixes, watch 7-step pipeline")
+    c3.markdown("**⚙️ Admin**\nConfigure tunnel, credentials, thresholds")
