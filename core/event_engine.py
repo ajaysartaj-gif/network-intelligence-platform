@@ -32,7 +32,9 @@ class EventEngine:
         self.handlers: Dict[str, List[EventHandler]] = {}
         self.workflow_chains: Dict[str, List[str]] = {}
         self.event_history: List[Dict[str, Any]] = []
+        # Maps signature → incident_id so we can check if the incident resolved
         self.active_incident_signatures: Dict[str, str] = {}
+        self._emit_depth: int = 0  # Recursion guard for emit_event
         self._initialize_workflow_chains()
 
     # ═══════════════════════════════════════════════════════════════
@@ -105,17 +107,21 @@ class EventEngine:
     # EVENT EMISSION & PROCESSING
     # ═══════════════════════════════════════════════════════════════
 
+    _MAX_EMIT_DEPTH = 8  # Prevent runaway recursive event chains
+
     def emit_event(self, event: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
         Emit an event and process all handlers.
         Returns list of downstream events triggered.
         """
+        if self._emit_depth >= self._MAX_EMIT_DEPTH:
+            return []
+
         event_type = event.get("type")
-        
         if not event_type:
             return []
 
-        # Record in history
+        # Record in history (cap to avoid unbounded memory growth)
         event_record = {
             "id": f"EVT-{int(datetime.utcnow().timestamp())}",
             "type": event_type,
@@ -123,30 +129,32 @@ class EventEngine:
             **event,
         }
         self.event_history.append(event_record)
+        if len(self.event_history) > 500:
+            self.event_history = self.event_history[-500:]
 
         # Execute handlers
         downstream_events = []
         handlers = self.handlers.get(event_type, [])
-        
+
         for handler in handlers:
             if not handler.enabled:
                 continue
-            
             try:
                 result = handler.handler_func(event_record)
                 if isinstance(result, dict) and result.get("type"):
                     downstream_events.append(result)
                 elif isinstance(result, list):
                     downstream_events.extend([e for e in result if isinstance(e, dict)])
-            except Exception as e:
-                # Log handler error but continue
+            except Exception:
                 pass
 
-        # Process downstream events
+        # Process downstream events with depth tracking
+        self._emit_depth += 1
         all_downstream = downstream_events.copy()
         for downstream in downstream_events:
             further_downstream = self.emit_event(downstream)
             all_downstream.extend(further_downstream)
+        self._emit_depth -= 1
 
         return all_downstream
 
@@ -177,6 +185,8 @@ class EventEngine:
             correlated_anomaly = self._build_correlated_anomaly(group, device)
             if correlated_anomaly:
                 incident_id = self._create_incident_from_anomaly(correlated_anomaly)
+                # Register so we can detect when this incident resolves
+                self._register_incident_signature(signature, incident_id)
                 incident_ids.append(incident_id)
                 self.emit_event({
                     "type": "incident_created",
@@ -303,12 +313,25 @@ class EventEngine:
         return f"{device}:{','.join(anomaly_types)}"
 
     def _is_duplicate_incident(self, signature: str) -> bool:
-        """Suppress duplicate incident creation for the same correlated failure."""
-        if signature in self.active_incident_signatures:
-            return True
+        """
+        Suppress duplicate incident creation while an open incident exists for
+        the same signature. Allows new incidents once the previous one resolves.
+        """
+        if signature not in self.active_incident_signatures:
+            return False
 
-        self.active_incident_signatures[signature] = datetime.utcnow().isoformat()
-        return False
+        incident_id = self.active_incident_signatures[signature]
+        if incident_id:
+            incident = self.state.get_incident(incident_id)
+            if incident and incident["status"] in {"resolved", "closed"}:
+                # Previous incident resolved — allow a new one
+                del self.active_incident_signatures[signature]
+                return False
+        return True
+
+    def _register_incident_signature(self, signature: str, incident_id: str) -> None:
+        """Associate a newly-created incident_id with its signature."""
+        self.active_incident_signatures[signature] = incident_id
 
     def _get_group_severity(self, anomalies: List[Dict[str, Any]]) -> str:
         """Return the highest severity found in a correlated anomaly group."""
@@ -364,8 +387,12 @@ class EventEngine:
 
         title = title_map.get(atype, f"Network anomaly: {atype}")
         description = anomaly.get("description", f"Anomaly detected: {str(anomaly)}")
-        
-        incident_id = f"INC-{int(datetime.utcnow().timestamp())}"
+
+        # Use microsecond precision + device hash to guarantee uniqueness
+        incident_id = (
+            f"INC-{datetime.utcnow().strftime('%H%M%S%f')}"
+            f"-{abs(hash(device)) % 9999:04d}"
+        )
         
         # For critical incidents, get all affected devices
         if atype == "critical_incident":

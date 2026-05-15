@@ -21,6 +21,7 @@ class DeviceMetrics:
     bgp_sessions_up: int = 0
     bgp_sessions_down: int = 0
     ospf_neighbors: int = 0
+    reachable: bool = True
     last_updated: str = field(default_factory=lambda: datetime.utcnow().isoformat())
 
 
@@ -371,11 +372,28 @@ class StateManager:
 
     def get_operational_summary(self) -> Dict[str, Any]:
         """Get operational summary."""
+        total_devices = len(self.device_metrics)
+        critical_count = len(self.get_critical_devices())
+        unreachable_count = sum(
+            1 for m in self.device_metrics.values() if not m.reachable
+        )
+        healthy_count = total_devices - critical_count - unreachable_count
         return {
             "timestamp": self.last_updated,
             "operational_score": self.calculate_operational_score(),
-            "total_devices": len(self.device_metrics),
-            "critical_devices": len(self.get_critical_devices()),
+            "total_devices": total_devices,
+            "critical_devices": critical_count,
+            # Structured sub-dicts expected by the UI
+            "devices": {
+                "total": total_devices,
+                "healthy": max(0, healthy_count),
+                "critical": critical_count,
+                "unreachable": unreachable_count,
+            },
+            "links": {
+                "active": max(0, total_devices - unreachable_count),
+                "down": unreachable_count,
+            },
             "incidents": {
                 "total": len(self.incidents),
                 "new": len(self.get_incidents_by_status("new")),

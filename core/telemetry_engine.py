@@ -91,6 +91,36 @@ class TelemetryEngine:
 
         return telemetry
 
+    def _collect_device_telemetry(self, hostname: str, device) -> "DeviceMetrics":
+        """Derive DeviceMetrics from a SimulatedDevice with realistic noise."""
+        baseline = self.baseline_metrics.get(hostname, {})
+
+        cpu = max(0.0, min(100.0, device.cpu + random.uniform(-2, 3)))
+        memory = max(0.0, min(100.0, device.memory + random.uniform(-1, 2)))
+        latency = max(1.0, baseline.get("latency_ms", 10.0) + random.uniform(-1, 3))
+        loss = max(0.0, baseline.get("packet_loss_pct", 0.0) + random.uniform(-0.05, 0.15))
+
+        bgp_up = sum(1 for s in device.bgp_sessions if s.get("state") == "Established")
+        bgp_down = sum(1 for s in device.bgp_sessions if s.get("state") != "Established")
+
+        reachable = device.status != "down"
+
+        return DeviceMetrics(
+            hostname=hostname,
+            cpu=round(cpu, 1),
+            memory=round(memory, 1),
+            latency_ms=round(latency, 1),
+            packet_loss_pct=round(loss, 3),
+            bgp_sessions_up=bgp_up,
+            bgp_sessions_down=bgp_down,
+            ospf_neighbors=len(device.ospf_neighbors),
+            interface_errors=sum(
+                1 for iface in device.interfaces if iface.get("status") == "down"
+            ),
+            reachable=reachable,
+            last_updated=datetime.utcnow().isoformat(),
+        )
+
     def _collect_simulation_telemetry(self) -> Dict[str, Any]:
         telemetry = {
             "timestamp": datetime.utcnow().isoformat(),
@@ -100,11 +130,25 @@ class TelemetryEngine:
             "protocol_metrics": {},
         }
 
-        # Collect device metrics
+        # Collect device metrics and update interface inventory for transition detection
         for hostname, device in self.simulation.devices.items():
             metrics = self._collect_device_telemetry(hostname, device)
             telemetry["device_metrics"][hostname] = metrics
             self.state.update_device_metrics(hostname, metrics)
+
+            # Build interface list for this device from simulation state
+            iface_list = [
+                {
+                    "name": iface["name"],
+                    "status": iface.get("status", "up"),
+                    "ip_address": "",
+                    "errors": 0,
+                    "drops": 0,
+                    "last_updated": datetime.utcnow().isoformat(),
+                }
+                for iface in device.interfaces
+            ]
+            self._update_interface_inventory(hostname, iface_list)
 
         # Collect interface metrics
         for iface_key, interface in self.simulation.interfaces.items():
@@ -436,13 +480,25 @@ class TelemetryEngine:
         return anomalies
 
     def _has_interface_down_transition(self, hostname: str) -> bool:
+        """Return True when any interface transitioned down OR is persistently down."""
         current = self.current_interface_inventory.get(hostname, {})
         previous = self.previous_interface_inventory.get(hostname, {})
+
         for iface_name, iface in current.items():
-            prev = previous.get(iface_name)
-            if prev and prev.get("status") == "up" and iface.get("status") == "down":
-                return True
+            if iface.get("status") != "up":
+                prev = previous.get(iface_name)
+                # Transition: was up, now down
+                if prev and prev.get("status") == "up":
+                    return True
+                # Persistent: no previous record (first poll) and already down
+                if not prev:
+                    return True
         return False
+
+    def get_down_interfaces(self, hostname: str) -> List[Dict[str, Any]]:
+        """Return list of currently-down interfaces for a device."""
+        current = self.current_interface_inventory.get(hostname, {})
+        return [iface for iface in current.values() if iface.get("status") != "up"]
 
     def correlate_anomalies(self, anomalies: List[Dict[str, Any]]) -> Dict[str, List[str]]:
         """Correlate related anomalies."""
