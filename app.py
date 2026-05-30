@@ -1020,6 +1020,78 @@ GNS3_SSH_PASS = "admin"
 OPENROUTER_API_KEY = "your-key-here"
 """, language="toml")
 
+        # ── GitHub log source ─────────────────────────────────────────────────
+        st.divider()
+        st.markdown("### 📥 GitHub Log Source")
+        st.caption(
+            "Pipeline: GNS3 Router → local syslog server → GitHub repo → this platform. "
+            "The autonomous monitor reads router syslog from the raw GitHub URL each cycle."
+        )
+        gh_engine = getattr(monitor, "github_log", None)
+        default_gh_url = (
+            gh_engine.raw_url if gh_engine else
+            os.environ.get("GNS3_LOG_GITHUB_URL", "")
+        )
+        with st.form("gh_log_form"):
+            new_gh_url = st.text_input(
+                "Raw log URL (network_audit.log)",
+                value=default_gh_url,
+                help="raw.githubusercontent.com URL of the log file in your gns3-router-logs repo",
+            )
+            new_gh_dev = st.text_input(
+                "Default device name (for log lines with no hostname)",
+                value=os.environ.get("GNS3_LOG_DEFAULT_DEVICE", "R1"),
+            )
+            if st.form_submit_button("Apply Log Source", type="primary"):
+                os.environ["GNS3_LOG_GITHUB_URL"] = new_gh_url.strip()
+                os.environ["GNS3_LOG_DEFAULT_DEVICE"] = new_gh_dev.strip()
+                if gh_engine:
+                    gh_engine.raw_url = new_gh_url.strip()
+                    gh_engine.default_device = new_gh_dev.strip() or "R1"
+                st.success("Log source applied for this session.")
+
+        if gh_engine:
+            colp, colr = st.columns([1, 4])
+            with colp:
+                if st.button("🔄 Poll Now"):
+                    gh_engine.poll()
+                    st.rerun()
+            status = gh_engine.status()
+            if status["last_error"]:
+                st.error(f"Last fetch error: {status['last_error']}")
+            else:
+                st.success(
+                    f"🟢 {status['lines_parsed']} log lines parsed · "
+                    f"{len(status['open_interfaces'])} interface(s) currently down"
+                )
+            if status["open_interfaces"]:
+                st.warning("Down now: " + ", ".join(status["open_interfaces"]))
+
+            st.markdown("**Recent log events** (newest first)")
+            events = gh_engine.recent_events[:15]
+            if events:
+                import pandas as _pd
+                df = _pd.DataFrame([
+                    {
+                        "Time": e["ts"],
+                        "Device": e["device"],
+                        "Event": e["mnemonic"],
+                        "Interface": e["interface"] or "—",
+                        "State": e["state"] or "—",
+                        "Action?": "⚠️ fixable" if e["actionable"] else "",
+                    }
+                    for e in events
+                ])
+                st.dataframe(df, use_container_width=True, hide_index=True)
+            else:
+                st.caption("No events parsed yet — click Poll Now.")
+
+        st.markdown("**Add to Streamlit secrets:**")
+        st.code(f'GNS3_LOG_GITHUB_URL = "{default_gh_url}"\n'
+                f'GNS3_LOG_DEFAULT_DEVICE = "R1"\n'
+                '# GNS3_LOG_GITHUB_TOKEN = "ghp_..."  # only for a PRIVATE log repo',
+                language="toml")
+
     # ── Credentials tab ───────────────────────────────────────────────────────
     with tab_creds:
         st.markdown("### Device SSH Credentials")
