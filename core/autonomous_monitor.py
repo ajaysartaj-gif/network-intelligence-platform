@@ -20,6 +20,10 @@ from core.workflow_tracker import WorkflowTracker, WorkflowRun, StepStatus
 
 logger = logging.getLogger(__name__)
 
+# Live-only mode: show ONLY the real GNS3 network (devices + anomalies from the
+# log pipeline). Set NETBRAIN_LIVE_ONLY=0 to re-enable the built-in demo simulator.
+LIVE_ONLY = os.environ.get("NETBRAIN_LIVE_ONLY", "1").strip().lower() not in ("0", "false", "no")
+
 try:
     from netmiko import ConnectHandler, NetmikoTimeoutException, NetmikoAuthenticationException
     NETMIKO_AVAILABLE = True
@@ -104,10 +108,22 @@ class AutonomousMonitor:
                     logger.info(f"[MONITOR] Run {run_id} approved — starting Phase 2")
                     self._run_phase2(data["run"], data["anomaly"])
 
-            # ── 3. Sim step + telemetry + anomaly detection ──────────────────
-            self.orchestrator.simulator.step()
-            telemetry = self.orchestrator.telemetry.collect_all_telemetry()
-            anomalies = self.orchestrator.telemetry.detect_anomalies()
+            # ── 3. Telemetry + anomaly detection ─────────────────────────────
+            if LIVE_ONLY:
+                # Live network only: no simulated devices/anomalies. On the
+                # first cycle after a (re)start, purge any stale demo state.
+                if self.cycle_count == 1:
+                    self._purge_demo_state()
+                # Poll the GitHub log first (this discovers real routers), then
+                # register them so the dashboard shows the live topology.
+                anomalies = self._poll_github_logs()
+                self._register_live_devices()
+                telemetry = {"device_metrics": self.orchestrator.state.get_all_device_metrics()}
+            else:
+                # Legacy demo mode (set NETBRAIN_LIVE_ONLY=0 to enable).
+                self.orchestrator.simulator.step()
+                telemetry = self.orchestrator.telemetry.collect_all_telemetry()
+                anomalies = self.orchestrator.telemetry.detect_anomalies()
 
             # ── 4. External log polling (merges unique anomalies) ────────────
             existing_sigs = {
@@ -116,11 +132,12 @@ class AutonomousMonitor:
 
             # 4a. GitHub log source (router → local → GitHub → here).
             #     Primary source for cloud deployments.
-            for ga in self._poll_github_logs():
-                gsig = f"{ga.get('device')}:{ga.get('type')}"
-                if gsig not in existing_sigs:
-                    anomalies.append(ga)
-                    existing_sigs.add(gsig)
+            if not LIVE_ONLY:
+                for ga in self._poll_github_logs():
+                    gsig = f"{ga.get('device')}:{ga.get('type')}"
+                    if gsig not in existing_sigs:
+                        anomalies.append(ga)
+                        existing_sigs.add(gsig)
 
             # 4b. Direct GNS3 SSH syslog (used when the lab is reachable).
             for ga in self._poll_gns3_logs():
@@ -369,6 +386,45 @@ class AutonomousMonitor:
             run.fail(f"Phase 2 failed: {e}")
 
     # ── GNS3 log polling ────────────────────────────────────────────────────
+
+    def _register_live_devices(self) -> None:
+        """
+        Register real routers seen in the GitHub logs into state, so the
+        dashboard reflects the live GNS3 topology (R1, R2, ...) rather than
+        simulated sites. Health is derived from syslog interface state.
+        """
+        if not self.github_log:
+            return
+        try:
+            from core.state_manager import DeviceMetrics
+        except Exception:
+            return
+        try:
+            health = self.github_log.get_device_health()
+        except Exception:
+            health = {}
+        for hostname, info in health.items():
+            self.orchestrator.state.update_device_metrics(
+                hostname,
+                DeviceMetrics(
+                    hostname=hostname,
+                    reachable=bool(info.get("reachable", True)),
+                    interface_errors=int(info.get("interface_errors", 0)),
+                ),
+            )
+
+    def _purge_demo_state(self) -> None:
+        """One-time cleanup of any leftover simulated devices/incidents/approvals."""
+        try:
+            self.orchestrator.state.device_metrics.clear()
+            self.orchestrator.state.incidents.clear()
+        except Exception:
+            pass
+        self.pending_approvals.clear()
+        self.approved_run_ids.clear()
+        self.rejected_run_ids.clear()
+        self._active_signatures.clear()
+        logger.info("[MONITOR] Live-only mode: purged simulated demo state")
 
     def _poll_github_logs(self) -> List[Dict[str, Any]]:
         """
