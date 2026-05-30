@@ -52,6 +52,16 @@ class AutonomousMonitor:
         self.cycle_count = 0
         self.last_cycle_result: Dict[str, Any] = {}
 
+        # GitHub log source — reads router syslog pushed to the gns3-router-logs
+        # repo.  This is the primary anomaly source for cloud deployments where
+        # the GNS3 lab is not directly reachable over SSH.
+        try:
+            from core.github_log_engine import GitHubLogEngine
+            self.github_log = GitHubLogEngine()
+        except Exception as e:  # pragma: no cover
+            logger.warning(f"[MONITOR] GitHub log engine init failed: {e}")
+            self.github_log = None
+
         # sig → run_id; only removed on verified recovery or operator rejection
         self._active_signatures: Dict[str, str] = {}
 
@@ -99,12 +109,21 @@ class AutonomousMonitor:
             telemetry = self.orchestrator.telemetry.collect_all_telemetry()
             anomalies = self.orchestrator.telemetry.detect_anomalies()
 
-            # ── 4. GNS3 log polling (optional — merges unique anomalies) ──────
-            gns3_anomalies = self._poll_gns3_logs()
+            # ── 4. External log polling (merges unique anomalies) ────────────
             existing_sigs = {
                 f"{a.get('device')}:{a.get('type')}" for a in anomalies
             }
-            for ga in gns3_anomalies:
+
+            # 4a. GitHub log source (router → local → GitHub → here).
+            #     Primary source for cloud deployments.
+            for ga in self._poll_github_logs():
+                gsig = f"{ga.get('device')}:{ga.get('type')}"
+                if gsig not in existing_sigs:
+                    anomalies.append(ga)
+                    existing_sigs.add(gsig)
+
+            # 4b. Direct GNS3 SSH syslog (used when the lab is reachable).
+            for ga in self._poll_gns3_logs():
                 gsig = f"{ga.get('device')}:{ga.get('type')}"
                 if gsig not in existing_sigs:
                     anomalies.append(ga)
@@ -350,6 +369,24 @@ class AutonomousMonitor:
             run.fail(f"Phase 2 failed: {e}")
 
     # ── GNS3 log polling ────────────────────────────────────────────────────
+
+    def _poll_github_logs(self) -> List[Dict[str, Any]]:
+        """
+        Poll the GitHub log repository for currently-open interface anomalies.
+        Returns a list of anomaly dicts; silently returns [] if unavailable.
+        """
+        if not self.github_log:
+            return []
+        try:
+            anomalies = self.github_log.poll()
+            if anomalies:
+                logger.info(
+                    f"[MONITOR] GitHub log source: {len(anomalies)} open anomaly(ies)"
+                )
+            return anomalies
+        except Exception as e:
+            logger.debug(f"[MONITOR] GitHub log poll unavailable: {e}")
+            return []
 
     def _poll_gns3_logs(self) -> List[Dict[str, Any]]:
         """
