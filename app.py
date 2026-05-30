@@ -1020,6 +1020,87 @@ GNS3_SSH_PASS = "admin"
 OPENROUTER_API_KEY = "your-key-here"
 """, language="toml")
 
+        # ── Router Login Test (Pinggy tunnel) ─────────────────────────────────
+        st.divider()
+        st.markdown("### 🔐 Router Login Test")
+        st.caption(
+            "Checks that the platform can reach your router through the Pinggy tunnel "
+            "and log in with admin credentials. **Read-only — nothing on the router is changed.**"
+        )
+        st.markdown(
+            "**How to get these values:** on the GNS3 host run "
+            "`ssh -p 443 -R0:<ROUTER_IP>:22 tcp@a.pinggy.io`. "
+            "Pinggy prints a line like `tcp://abcd-1-2-3-4.run.pinggy-free.link:33893` — "
+            "the part before the last colon is the **Host**, the number after is the **Port**."
+        )
+        with st.form("router_login_test_form"):
+            c1, c2 = st.columns([3, 1])
+            with c1:
+                test_host = st.text_input(
+                    "Tunnel Host",
+                    value=os.environ.get("GNS3_ROUTER_HOST", ""),
+                    placeholder="abcd-1-2-3-4.run.pinggy-free.link",
+                )
+            with c2:
+                test_port = st.text_input(
+                    "Tunnel Port",
+                    value=os.environ.get("GNS3_ROUTER_PORT", ""),
+                    placeholder="33893",
+                )
+            c3, c4, c5 = st.columns(3)
+            with c3:
+                test_user = st.text_input("Username", value=os.environ.get("GNS3_SSH_USER", "admin"))
+            with c4:
+                test_pass = st.text_input("Password", value=os.environ.get("GNS3_SSH_PASS", "admin"), type="password")
+            with c5:
+                test_dtype = st.selectbox(
+                    "Login type",
+                    options=["cisco_ios", "cisco_ios_telnet"],
+                    index=0,
+                    help="Use cisco_ios for SSH (default). Use cisco_ios_telnet only if the router has no SSH.",
+                )
+            run_test = st.form_submit_button("🔌 Test Router Login", type="primary")
+
+        if run_test:
+            with st.spinner("Connecting through the tunnel and attempting login..."):
+                try:
+                    from core.router_login_check import validate_router_login
+                    res = validate_router_login(
+                        host=test_host, port=test_port,
+                        username=test_user, password=test_pass,
+                        device_type=test_dtype,
+                    )
+                except Exception as e:
+                    res = {"success": False, "steps": [], "summary": f"Internal error: {e}",
+                           "interfaces": "", "prompt": "", "can_login": False, "can_config": False}
+
+            # Headline verdict
+            if res["success"]:
+                st.success("🎉 " + res["summary"])
+                st.balloons()
+            elif res.get("can_login"):
+                st.warning("⚠️ " + res["summary"])
+            else:
+                st.error("❌ " + res["summary"])
+
+            # Step-by-step breakdown
+            st.markdown("**Step-by-step:**")
+            for s in res["steps"]:
+                icon = "✅" if s["ok"] else "❌"
+                st.markdown(f"{icon} **{s['name']}** — {s['detail']}")
+
+            # Read-only interface output, if we got it
+            if res.get("interfaces"):
+                with st.expander("Router interface summary (read-only)"):
+                    st.code(res["interfaces"], language="text")
+
+            # Offer to save working settings
+            if res["success"]:
+                st.info(
+                    "These settings work. To make the platform use them for real fixes, "
+                    "click **Apply Connection Settings** above (or add them to Streamlit Secrets)."
+                )
+
         # ── GitHub log source ─────────────────────────────────────────────────
         st.divider()
         st.markdown("### 📥 GitHub Log Source")
