@@ -5,8 +5,13 @@ Network simulation engine for realistic enterprise topology and state simulation
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any
+import os
 import random
 from datetime import datetime
+
+# Live-only mode: do not generate any simulated devices or anomalies.
+# Set NETBRAIN_LIVE_ONLY=0 to re-enable the built-in demo topology.
+LIVE_ONLY = os.environ.get("NETBRAIN_LIVE_ONLY", "1").strip().lower() not in ("0", "false", "no")
 
 
 @dataclass
@@ -77,7 +82,8 @@ class SimulationEngine:
         self.workflow_stage: int = 0  # Track the cascading workflow stage
         self.workflow_active: bool = True  # Continuous workflow flag
         self.last_stage_change: int = 0  # Track when we last changed stages
-        self._initialize_enterprise_topology()
+        if not LIVE_ONLY:
+            self._initialize_enterprise_topology()
 
     # ═══════════════════════════════════════════════════════════════
     # TOPOLOGY INITIALIZATION
@@ -246,6 +252,10 @@ class SimulationEngine:
             "updates": [],
             "anomalies": [],
         }
+
+        if LIVE_ONLY:
+            # No simulated activity in live-only mode.
+            return changes
 
         # Continuous cascading workflow: Packet Loss → WAN Latency → BGP Instability → Voice Degradation → Critical Incident
         if self.workflow_active:
