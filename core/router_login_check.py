@@ -95,12 +95,32 @@ def validate_router_login(
 
     # Step 2: netmiko present
     try:
+        # Loosen SSH algorithms for older Cisco IOS (15.x) which negotiates
+        # legacy KEX/ciphers that modern paramiko disables by default. Without
+        # this, the SSH handshake to old IOS times out.
+        try:
+            import paramiko
+            paramiko.Transport._preferred_kex = (
+                "diffie-hellman-group14-sha1",
+                "diffie-hellman-group-exchange-sha1",
+                "diffie-hellman-group1-sha1",
+            )
+            paramiko.Transport._preferred_ciphers = (
+                "aes128-cbc", "aes192-cbc", "aes256-cbc",
+                "aes128-ctr", "aes192-ctr", "aes256-ctr",
+            )
+            paramiko.Transport._preferred_keys = (
+                "ssh-rsa", "rsa-sha2-512", "rsa-sha2-256",
+            )
+        except Exception:
+            pass
+
         from netmiko import (
             ConnectHandler,
             NetmikoAuthenticationException,
             NetmikoTimeoutException,
         )
-        steps.append(_step("SSH library (netmiko)", True, "Ready."))
+        steps.append(_step("SSH library (netmiko)", True, "Ready (legacy IOS algorithms enabled)."))
     except ImportError:
         steps.append(_step("SSH library (netmiko)", False,
                            "netmiko not installed in this app environment. Add 'netmiko' to requirements.txt."))
@@ -116,9 +136,10 @@ def validate_router_login(
         "password": password,
         "secret": password,
         "fast_cli": False,
-        "conn_timeout": 20,
-        "banner_timeout": 20,
-        "auth_timeout": 20,
+        "conn_timeout": 30,
+        "banner_timeout": 30,
+        "auth_timeout": 30,
+        "blocking_timeout": 30,
     }
     try:
         with ConnectHandler(**conn_config) as conn:
