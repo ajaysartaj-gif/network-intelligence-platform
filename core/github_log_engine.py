@@ -159,6 +159,8 @@ class GitHubLogEngine:
 
         # (device, interface) → latest state ("up" | "down" | "admin_down")
         self._iface_state: Dict[Tuple[str, str], str] = {}
+        # every device hostname ever seen in the log (e.g. R1, R2)
+        self._devices_seen: set = set()
         # rolling feed of recently parsed events (newest first), for the UI
         self.recent_events: List[Dict[str, Any]] = []
         self.last_poll_ts: Optional[str] = None
@@ -204,7 +206,9 @@ class GitHubLogEngine:
 
         # Replay events in order to reconstruct current interface state.
         self._iface_state.clear()
+        self._devices_seen.clear()
         for ev in events:
+            self._devices_seen.add(ev.device)
             if ev.is_interface_event:
                 self._iface_state[(ev.device, ev.interface)] = ev.state
 
@@ -246,6 +250,25 @@ class GitHubLogEngine:
         return anomalies
 
     # ── helpers for the UI ───────────────────────────────────────────────────
+    def get_device_health(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Return real devices seen in the log with their current health, derived
+        purely from syslog. Used to populate the dashboard with live routers
+        (e.g. R1, R2) instead of simulated devices.
+        """
+        health: Dict[str, Dict[str, Any]] = {}
+        for device in sorted(self._devices_seen):
+            down = [
+                iface for (d, iface), s in self._iface_state.items()
+                if d == device and s in ("down", "admin_down")
+            ]
+            health[device] = {
+                "reachable": True,            # syslog reaching us implies the device is alive
+                "down_interfaces": down,
+                "interface_errors": len(down),
+            }
+        return health
+
     def status(self) -> Dict[str, Any]:
         open_ifaces = [
             f"{d}:{i} ({s})"
