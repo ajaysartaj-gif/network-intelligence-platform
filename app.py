@@ -99,6 +99,10 @@ if DATABASE_AVAILABLE:
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 MODEL_NAME      = "anthropic/claude-3.5-sonnet"
 
+# Build version — bump this whenever code changes so we can confirm at a glance
+# in the running app that the latest deploy is actually live.
+BUILD_VERSION = "2026.05.31-telnet-fix-7"
+
 
 def _load_secrets_into_env() -> None:
     """
@@ -595,6 +599,17 @@ with st.sidebar:
     st.caption(f"{mode} | {ai_status}")
     poll_age = time.time() - st.session_state.get("last_poll_time", 0)
     st.caption(f"Cycle #{st.session_state['cycle_count']} · {poll_age:.0f}s ago")
+
+    # ── Build / deploy diagnostic (confirms the running app has latest code) ──
+    _dtype_now = os.environ.get("GNS3_DEVICE_TYPE", "(not set → SSH)")
+    try:
+        from core.autonomous_monitor import LIVE_ONLY as _LO
+    except Exception:
+        _LO = None
+    _conn_method = "TELNET ✅" if str(_dtype_now).endswith("_telnet") else "SSH ⚠️"
+    st.caption(f"🏷 Build: `{BUILD_VERSION}`")
+    st.caption(f"🔧 Fix uses: **{_conn_method}** ({_dtype_now})")
+    st.caption(f"📡 Live-only: {'ON ✅' if _LO else 'OFF ⚠️'}")
 
     # GNS3 / tunnel
     gns3_engine = getattr(orchestrator, "gns3", None)
