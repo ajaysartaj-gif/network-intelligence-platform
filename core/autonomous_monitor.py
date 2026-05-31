@@ -287,7 +287,8 @@ class AutonomousMonitor:
             try:
                 from core.ai_remediation import generate_fix_commands
                 device_facts = self._device_facts(device)
-                gen = generate_fix_commands(anomaly, self.ai_call, device_facts)
+                knowledge = self._retrieve_knowledge(anomaly)
+                gen = generate_fix_commands(anomaly, self.ai_call, device_facts, knowledge)
                 ai_status = gen["status"]
                 if ai_status == "ok":
                     ai_commands = gen["commands"]
@@ -706,6 +707,44 @@ class AutonomousMonitor:
             affected_services=impacted,
         )
         return incident_id
+
+    def _retrieve_knowledge(self, anomaly: Dict[str, Any]) -> str:
+        """
+        RAG: retrieve relevant runbook docs + past resolved incidents for this
+        anomaly, to ground the AI's remediation in THIS network's practices.
+        """
+        lines: List[str] = []
+        atype = anomaly.get("type", "")
+        device = anomaly.get("device", "")
+        query = f"{atype} {anomaly.get('interface','')} {anomaly.get('description','')}"
+
+        # 1. Runbook documents via the RAG engine.
+        try:
+            rag = getattr(self.orchestrator, "rag", None)
+            if rag:
+                hits = rag.search(query, vendor="Cisco", top_k=3)
+                for h in hits[:3]:
+                    lines.append(f"- Runbook '{h.get('title')}': {h.get('snippet','')}")
+        except Exception:
+            pass
+
+        # 2. Past RESOLVED incidents on the same device (what worked before).
+        try:
+            incidents = self.orchestrator.state.get_all_incidents()
+            past = [
+                inc for inc in incidents.values()
+                if inc.get("status") == "resolved"
+                and device in (inc.get("affected_devices") or [])
+            ]
+            for inc in past[-2:]:
+                note = ""
+                if inc.get("timeline"):
+                    note = inc["timeline"][-1].get("note", "")
+                lines.append(f"- Past incident '{inc.get('title','')}' resolved: {note}")
+        except Exception:
+            pass
+
+        return "\n".join(lines)
 
     def _device_facts(self, device: str) -> str:
         """Short factual context about the device for the AI prompt."""
