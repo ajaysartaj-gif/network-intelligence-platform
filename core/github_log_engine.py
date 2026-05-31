@@ -168,19 +168,55 @@ class GitHubLogEngine:
         self.total_lines_seen: int = 0
 
     # ── fetch ────────────────────────────────────────────────────────────────
+    def _raw_to_api_url(self) -> Optional[str]:
+        """Convert a raw.githubusercontent.com URL to the GitHub Contents API URL.
+        The API is NOT served through the ~5-min CDN cache that makes raw URLs
+        return stale logs, so it reflects new commits almost immediately."""
+        m = re.match(
+            r"https?://raw\.githubusercontent\.com/([^/]+)/([^/]+)/([^/]+)/(.+)",
+            self.raw_url or "",
+        )
+        if not m:
+            return None
+        owner, repo, branch, path = m.groups()
+        return (f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
+                f"?ref={branch}")
+
     def _fetch_raw(self) -> Optional[str]:
         if not REQUESTS_AVAILABLE:
             self.last_error = "requests library not available"
             return None
+
+        # 1. Preferred: GitHub Contents API (uncached → no stale-log delay).
+        api_url = self._raw_to_api_url()
+        if api_url:
+            try:
+                headers = {
+                    "Accept": "application/vnd.github.raw+json",
+                    "Cache-Control": "no-cache",
+                }
+                if self.token:
+                    headers["Authorization"] = f"token {self.token}"
+                resp = requests.get(api_url, headers=headers, timeout=self.timeout)
+                if resp.status_code == 200:
+                    self.last_error = None
+                    return resp.text
+                # 403 with no token = rate-limited; fall through to raw.
+            except Exception as e:
+                logger.debug(f"[GITHUB-LOG] API fetch failed, falling back: {e}")
+
+        # 2. Fallback: raw URL with a cache-busting query param.
         try:
-            headers = {"Cache-Control": "no-cache"}
+            import time as _t
+            bust = f"{'&' if '?' in self.raw_url else '?'}_cb={int(_t.time())}"
+            headers = {"Cache-Control": "no-cache", "Pragma": "no-cache"}
             if self.token:
                 headers["Authorization"] = f"token {self.token}"
-            resp = requests.get(self.raw_url, headers=headers, timeout=self.timeout)
+            resp = requests.get(self.raw_url + bust, headers=headers, timeout=self.timeout)
             resp.raise_for_status()
             self.last_error = None
             return resp.text
-        except Exception as e:  # network / 404 / etc.
+        except Exception as e:
             self.last_error = str(e)
             logger.debug(f"[GITHUB-LOG] fetch failed: {e}")
             return None
