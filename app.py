@@ -101,7 +101,7 @@ MODEL_NAME      = "anthropic/claude-3.5-sonnet"
 
 # Build version — bump this whenever code changes so we can confirm at a glance
 # in the running app that the latest deploy is actually live.
-BUILD_VERSION = "2026.05.31-rag-nlp-10"
+BUILD_VERSION = "2026.05.31-no-fake-topo-11"
 
 
 def _load_secrets_into_env() -> None:
