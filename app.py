@@ -101,7 +101,7 @@ MODEL_NAME      = "anthropic/claude-3.5-sonnet"
 
 # Build version — bump this whenever code changes so we can confirm at a glance
 # in the running app that the latest deploy is actually live.
-BUILD_VERSION = "2026.05.31-interp-fix-8"
+BUILD_VERSION = "2026.05.31-ai-remediation-9"
 
 
 def _load_secrets_into_env() -> None:
@@ -495,7 +495,21 @@ def _render_approval_card(run_id: str, data: dict) -> None:
     </div>""", unsafe_allow_html=True)
 
     # What the AI will actually do, in plain CLI terms.
-    if run.anomaly_type == "interface_down" and iface:
+    ai_status = data.get("ai_status", "unavailable")
+    ai_cmds = data.get("ai_commands")
+    needs_manual = data.get("needs_manual", False)
+
+    if needs_manual:
+        reasons = "; ".join(data.get("ai_block_reasons", [])) or "AI could not produce safe commands"
+        st.error(
+            f"⚠️ **Manual handling required.** The AI was unavailable or proposed "
+            f"unsafe commands, so no automated fix will run. Reason: {reasons}. "
+            f"Approving will mark this for manual review (no commands sent to the router)."
+        )
+    elif ai_cmds and ai_cmds.get("fix"):
+        st.markdown("**🤖 AI-generated commands (passed safety filter):**")
+        st.code("configure terminal\n " + "\n ".join(ai_cmds.get("fix", [])), language="text")
+    elif run.anomaly_type == "interface_down" and iface:
         st.markdown("**Action the AI will take (after approval):**")
         st.code(f"configure terminal\n interface {iface}\n no shutdown\nend", language="text")
 
