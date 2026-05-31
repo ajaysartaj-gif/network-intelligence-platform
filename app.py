@@ -439,17 +439,31 @@ def _render_approval_card(run_id: str, data: dict) -> None:
     rca     = data.get("rca", "Root cause analysis pending.")
     sev_icon = {"critical": "🔴", "high": "🟠", "medium": "🟡"}.get(run.severity, "⚪")
 
+    # Build a clear, specific headline from the actual anomaly.
+    iface = anomaly.get("interface")
+    a_desc = anomaly.get("description") or f"{run.anomaly_type.replace('_',' ')} on {run.device}"
+    a_state = anomaly.get("state", "")
+    headline_target = f"{run.device} · {iface}" if iface else run.device
+
     st.markdown(f"""
     <div class="approval-card">
         <div style="font-size:16px; font-weight:700; color:#cc8800;">
             {sev_icon} APPROVAL REQUIRED — {run.anomaly_type.replace('_',' ').upper()}
         </div>
+        <div style="font-size:13px; color:#cdd9e5; margin-top:6px;">
+            {a_desc}
+        </div>
         <div style="font-size:12px; color:#8b949e; margin-top:4px;">
-            Device: <b style="color:#cdd9e5;">{run.device}</b> &nbsp;|&nbsp;
-            Incident: <b style="color:#cdd9e5;">{run.incident_id}</b> &nbsp;|&nbsp;
-            Severity: <b style="color:#cc8800;">{run.severity.upper()}</b>
+            Target: <b style="color:#cdd9e5;">{headline_target}</b> &nbsp;|&nbsp;
+            State: <b style="color:#cc8800;">{a_state or 'n/a'}</b> &nbsp;|&nbsp;
+            Incident: <b style="color:#cdd9e5;">{run.incident_id}</b>
         </div>
     </div>""", unsafe_allow_html=True)
+
+    # What the AI will actually do, in plain CLI terms.
+    if run.anomaly_type == "interface_down" and iface:
+        st.markdown("**Action the AI will take (after approval):**")
+        st.code(f"configure terminal\n interface {iface}\n no shutdown\nend", language="text")
 
     col_rca, col_plan = st.columns([3, 2])
     with col_rca:
@@ -464,7 +478,28 @@ def _render_approval_card(run_id: str, data: dict) -> None:
     with col_approve:
         if st.button(f"✅ APPROVE FIX", key=f"approve_{run_id}", type="primary", use_container_width=True):
             monitor.approved_run_ids.add(run_id)
-            st.success("Fix approved — executing on next cycle...")
+            # Run a cycle immediately so the fix executes now, not on next refresh.
+            try:
+                cyc = run_monitor_cycle()
+            except Exception as _e:
+                cyc = {}
+            # Report what actually happened (live vs simulated, success/fail).
+            last_fix = getattr(monitor, "last_fix_result", None)
+            if last_fix is None:
+                st.success("Fix approved — executing on the next monitoring cycle...")
+            elif last_fix.get("success") and last_fix.get("simulated"):
+                st.warning(
+                    "⚠️ Fix ran in SIMULATION mode (no live router connection). "
+                    "The real router was NOT changed. Set GNS3_ROUTER_HOST / "
+                    "GNS3_ROUTER_PORT / GNS3_DEVICE_TYPE in Secrets to apply live."
+                )
+            elif last_fix.get("success"):
+                st.success(
+                    f"✅ Fix applied LIVE on {last_fix.get('device','router')}: "
+                    f"{', '.join(last_fix.get('commands', [])) or 'no shutdown'}"
+                )
+            else:
+                st.error(f"❌ Fix attempt failed: {last_fix.get('error','unknown error')}")
             st.rerun()
     with col_reject:
         if st.button(f"❌ REJECT", key=f"reject_{run_id}", use_container_width=True):
