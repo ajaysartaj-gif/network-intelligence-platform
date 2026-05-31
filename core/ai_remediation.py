@@ -124,8 +124,15 @@ def _parse_command_json(text: str) -> Optional[Dict[str, List[str]]]:
     return out
 
 
-def build_prompt(anomaly: Dict[str, Any], device_facts: str = "") -> str:
+def build_prompt(anomaly: Dict[str, Any], device_facts: str = "",
+                 knowledge: str = "") -> str:
     """Construct a tightly-scoped prompt that asks ONLY for IOS commands."""
+    knowledge_block = ""
+    if knowledge:
+        knowledge_block = (
+            "\nRelevant runbook knowledge and past incidents (use this to ground "
+            "your fix in THIS network's practices):\n" + knowledge + "\n"
+        )
     return (
         "You are a senior Cisco IOS network engineer. A monitoring system "
         "detected the issue below on a live router. Respond with the exact "
@@ -135,7 +142,8 @@ def build_prompt(anomaly: Dict[str, Any], device_facts: str = "") -> str:
         f"Interface: {anomaly.get('interface','N/A')}\n"
         f"State: {anomaly.get('state','N/A')}\n"
         f"Log description: {anomaly.get('description','N/A')}\n"
-        f"{device_facts}\n\n"
+        f"{device_facts}\n"
+        f"{knowledge_block}\n"
         "STRICT RULES:\n"
         "- Output ONLY a JSON object, no prose, no markdown.\n"
         "- Keys: \"diagnostic\" (read-only show commands), \"fix\" (config "
@@ -157,6 +165,7 @@ def generate_fix_commands(
     anomaly: Dict[str, Any],
     ai_call,                       # callable(str) -> str
     device_facts: str = "",
+    knowledge: str = "",
 ) -> Dict[str, Any]:
     """
     Ask the AI for remediation commands and validate them.
@@ -185,7 +194,7 @@ def generate_fix_commands(
         return result
 
     try:
-        prompt = build_prompt(anomaly, device_facts)
+        prompt = build_prompt(anomaly, device_facts, knowledge)
         raw = ai_call(prompt) or ""
         result["raw"] = raw
     except Exception as e:
