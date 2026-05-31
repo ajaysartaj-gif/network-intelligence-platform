@@ -118,27 +118,36 @@ def _parse_json(text: str) -> Optional[Dict[str, Any]]:
 def build_prompt(request: str, device: str, device_facts: str = "") -> str:
     return (
         "You are a senior Cisco IOS engineer. Convert the operator's request "
-        "into the exact Cisco IOS configuration commands to run on the device. "
-        "Be conservative and standard.\n\n"
+        "into Cisco IOS commands to run on the device.\n\n"
         f"Device: {device}\n"
         f"{device_facts}\n\n"
         f"Operator request: {request}\n\n"
         "STRICT RULES:\n"
         "- Output ONLY a JSON object, no prose, no markdown.\n"
-        "- Keys: \"commands\" (ordered list of config-mode IOS commands), "
-        "\"summary\" (one plain-English sentence of what this does), "
+        "- Keys: \"mode\" (\"config\" for changes, or \"diagnostic\" for read-only "
+        "checks like 'show'/'confirm'/'check status'), \"commands\" (ordered list "
+        "of IOS commands), \"summary\" (one plain-English sentence), "
         "\"risk\" (\"low\"|\"medium\"|\"high\").\n"
-        "- Begin with 'configure terminal' and end with 'end'.\n"
+        "- If the request only asks to CHECK/CONFIRM/SHOW something (not change "
+        "it), set mode='diagnostic' and use read-only 'show' commands only "
+        "(e.g. 'show ip interface brief', 'show interfaces Loopback0'). Do NOT "
+        "enter configure terminal for diagnostics.\n"
+        "- If the request CHANGES configuration, set mode='config', begin with "
+        "'configure terminal' and end with 'end'.\n"
         "- NEVER produce commands that could lock out management access "
         "(no VTY ACLs, no removing IP addresses, no disabling SSH, no "
         "touching usernames/enable secrets/aaa), and NEVER destructive "
         "commands (reload, erase, delete, write erase, no router, no ip routing).\n"
-        "- If the request would require any of those, return commands: [] and "
-        "explain in summary why it cannot be done safely.\n"
+        "- If a config request would require any of those, return commands: [] "
+        "and explain in summary why it cannot be done safely.\n"
         "- Use real interface names; do not invent IPs unless the request gives them.\n\n"
-        "Example — request 'add a description to Gig1/0':\n"
-        "{\"commands\":[\"configure terminal\",\"interface GigabitEthernet1/0\","
-        "\"description Uplink to core\",\"end\"],"
+        "Example — 'confirm the lo0 status':\n"
+        "{\"mode\":\"diagnostic\",\"commands\":[\"show interfaces Loopback0\","
+        "\"show ip interface brief\"],\"summary\":\"Checks the status of Loopback0.\","
+        "\"risk\":\"low\"}\n"
+        "Example — 'add a description to Gig1/0':\n"
+        "{\"mode\":\"config\",\"commands\":[\"configure terminal\","
+        "\"interface GigabitEthernet1/0\",\"description Uplink to core\",\"end\"],"
         "\"summary\":\"Sets a description on GigabitEthernet1/0.\",\"risk\":\"low\"}"
     )
 
@@ -159,7 +168,7 @@ def generate_config(request: str, device: str, ai_call,
     """
     out: Dict[str, Any] = {
         "status": "unavailable", "commands": [], "summary": "",
-        "risk": "unknown", "blocked": [], "reasons": [], "raw": "",
+        "risk": "unknown", "mode": "config", "blocked": [], "reasons": [], "raw": "",
     }
     if not ai_call:
         out["reasons"] = ["No AI client configured (set OPENROUTER_API_KEY)."]
@@ -187,6 +196,7 @@ def generate_config(request: str, device: str, ai_call,
     cmds = [str(c).strip() for c in cmds if str(c).strip()]
     out["summary"] = str(data.get("summary", "")).strip()
     out["risk"] = str(data.get("risk", "unknown")).strip().lower()
+    out["mode"] = str(data.get("mode", "config")).strip().lower() or "config"
 
     if not cmds:
         out["status"] = "empty"
