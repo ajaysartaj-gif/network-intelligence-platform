@@ -101,7 +101,7 @@ MODEL_NAME      = "anthropic/claude-3.5-sonnet"
 
 # Build version — bump this whenever code changes so we can confirm at a glance
 # in the running app that the latest deploy is actually live.
-BUILD_VERSION = "2026.05.31-ai-remediation-9"
+BUILD_VERSION = "2026.05.31-rag-nlp-10"
 
 
 def _load_secrets_into_env() -> None:
@@ -802,6 +802,49 @@ if workspace == "dashboard":
 elif workspace == "Workflows":
     st.markdown("## 🤖 AI Action — Autonomous Remediation")
     st.caption("Detect → Analyze → Plan → **APPROVE** → Fix → Verify → Close")
+
+    # ── Natural-language query box (ask about incidents/logs in plain English) ─
+    with st.expander("💬 Ask about your network (natural language)", expanded=False):
+        st.caption("e.g. \"why did R2's interface go down?\", \"how many interface_down "
+                   "incidents this session?\", \"what was the last fix on R2?\"")
+        nlq = st.text_input("Your question", key="nl_query",
+                            placeholder="Ask about incidents, logs, or fixes...")
+        if st.button("Ask", key="nl_ask") and nlq.strip():
+            with st.spinner("Analyzing your network data..."):
+                # Build a compact context from real incidents + recent log events.
+                incidents = orchestrator.state.get_all_incidents()
+                inc_lines = []
+                for inc in list(incidents.values())[-15:]:
+                    last_note = inc["timeline"][-1]["note"] if inc.get("timeline") else ""
+                    inc_lines.append(
+                        f"- [{inc.get('status')}] {inc.get('title','')} on "
+                        f"{','.join(inc.get('affected_devices') or [])}: {last_note}"
+                    )
+                log_lines = []
+                gh = getattr(monitor, "github_log", None)
+                if gh:
+                    for e in gh.recent_events[:20]:
+                        log_lines.append(
+                            f"- {e['ts']} {e['device']} {e['mnemonic']} "
+                            f"{e.get('interface') or ''} {e.get('state') or ''}")
+                context = ("Incidents:\n" + ("\n".join(inc_lines) or "none") +
+                           "\n\nRecent log events:\n" + ("\n".join(log_lines) or "none"))
+                prompt = (
+                    "You are a network operations assistant. Answer the user's "
+                    "question using ONLY the data below. Be concise and factual. "
+                    "If the data doesn't contain the answer, say so.\n\n"
+                    f"{context}\n\nQuestion: {nlq.strip()}\nAnswer:"
+                )
+                try:
+                    answer = call_ai(prompt)
+                except Exception as e:
+                    answer = ""
+                if answer:
+                    st.markdown(answer)
+                else:
+                    st.warning("AI is unavailable (check OPENROUTER_API_KEY). "
+                               "Showing raw data instead:")
+                    st.code(context, language="text")
 
     # ── SECTION 1: Pending approvals (most important) ─────────────────────────
     pending = getattr(monitor, "pending_approvals", {})
