@@ -101,7 +101,7 @@ MODEL_NAME      = "anthropic/claude-3.5-sonnet"
 
 # Build version — bump this whenever code changes so we can confirm at a glance
 # in the running app that the latest deploy is actually live.
-BUILD_VERSION = "2026.05.31-nl-config-13"
+BUILD_VERSION = "2026.05.31-nl-config-14"
 
 
 def _load_secrets_into_env() -> None:
@@ -1424,14 +1424,6 @@ OPENROUTER_API_KEY = "your-key-here"
         for k, v in info.items():
             st.markdown(f"**{k}:** {v}")
 
-else:
-    st.header("🧠 NetBrain AI — Autonomous Network Operations")
-    st.info("Select a workspace from the sidebar.")
-    c1, c2, c3 = st.columns(3)
-    c1.markdown("**🖥 Dashboard**\nLive NOC with device health cards and event feed")
-    c2.markdown("**🔄 Workflows**\nApprove/reject fixes, watch 7-step pipeline")
-    c3.markdown("**⚙️ Admin**\nConfigure tunnel, credentials, thresholds")
-
     # ── AI Config tab (natural-language → router config, preview + approve) ────
     with tab_aicfg:
         st.markdown("### 🧠 Natural-Language Configuration")
@@ -1529,3 +1521,13 @@ else:
             else:
                 st.error("AI unavailable. " + "; ".join(res.get("reasons", [])))
                 st.caption("Check that OPENROUTER_API_KEY is set in Secrets.")
+
+
+
+else:
+    st.header("🧠 NetBrain AI — Autonomous Network Operations")
+    st.info("Select a workspace from the sidebar.")
+    c1, c2, c3 = st.columns(3)
+    c1.markdown("**🖥 Dashboard**\nLive NOC with device health cards and event feed")
+    c2.markdown("**🔄 Workflows**\nApprove/reject fixes, watch 7-step pipeline")
+    c3.markdown("**⚙️ Admin**\nConfigure tunnel, credentials, thresholds")
