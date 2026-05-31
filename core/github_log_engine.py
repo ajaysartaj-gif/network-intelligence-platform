@@ -163,6 +163,7 @@ class GitHubLogEngine:
         self._devices_seen: set = set()
         # rolling feed of recently parsed events (newest first), for the UI
         self.recent_events: List[Dict[str, Any]] = []
+        self._recent_actionable: List[Dict[str, Any]] = []
         self.last_poll_ts: Optional[str] = None
         self.last_error: Optional[str] = None
         self.total_lines_seen: int = 0
@@ -243,10 +244,53 @@ class GitHubLogEngine:
         # Replay events in order to reconstruct current interface state.
         self._iface_state.clear()
         self._devices_seen.clear()
+        self._recent_actionable = []
+        # Mnemonics worth surfacing (neighbor flaps, hardware, high CPU, etc.).
+        # These are diagnostic-class anomalies (operator visibility), not
+        # auto-fixed unless a known safe remedy exists.
+        NOTABLE = {
+            "OSPF": ("ospf_event", "high"),
+            "BGP": ("bgp_event", "high"),
+            "DUAL": ("eigrp_event", "high"),       # EIGRP neighbor change
+            "SYS-2": ("system_critical", "high"),
+            "SYS-3": ("system_error", "medium"),
+            "CPU": ("high_cpu", "high"),
+            "OSPF_ADJ": ("ospf_adjacency", "high"),
+        }
         for ev in events:
             self._devices_seen.add(ev.device)
             if ev.is_interface_event:
                 self._iface_state[(ev.device, ev.interface)] = ev.state
+                continue
+            # Flag other notable syslog by facility/mnemonic keyword.
+            tag = None
+            for key, (atype, sev) in NOTABLE.items():
+                if key in ev.facility or key in ev.mnemonic or key in f"{ev.facility}-{ev.severity_num}":
+                    tag = (atype, sev)
+                    break
+            # Also treat any severity 0-2 (emerg/alert/crit) as notable.
+            if tag is None and ev.severity_num <= 2 and ev.mnemonic != "CONFIG_I":
+                tag = ("critical_syslog", "high")
+            if tag:
+                atype, sev = tag
+                self._recent_actionable.append({
+                    "device": ev.device,
+                    "type": atype,
+                    "severity": sev,
+                    "description": f"{ev.facility}-{ev.severity_num}-{ev.mnemonic}: {ev.message[:120]}",
+                    "interface": ev.interface or "",
+                    "state": ev.state or "",
+                    "source": "github_syslog",
+                    "diagnostic_only": True,   # no canned fix; AI/operator handles
+                })
+        # De-duplicate actionable events by (device,type,description).
+        seen = set()
+        uniq = []
+        for a in self._recent_actionable:
+            k = (a["device"], a["type"], a["description"])
+            if k not in seen:
+                seen.add(k); uniq.append(a)
+        self._recent_actionable = uniq[-10:]   # cap
 
         # Build the UI feed (newest first, capped).
         self.recent_events = [
@@ -283,6 +327,12 @@ class GitHubLogEngine:
                 "state": state,
                 "source": "github_syslog",
             })
+
+        # Other actionable syslog events (neighbor flaps, high CPU, etc.).
+        # These are surfaced as anomalies so the operator sees them; they are
+        # diagnostic-class (no auto-fix command) unless a known remedy exists.
+        for ev in getattr(self, "_recent_actionable", []):
+            anomalies.append(ev)
         return anomalies
 
     # ── helpers for the UI ───────────────────────────────────────────────────
