@@ -309,14 +309,35 @@ class AutonomousMonitor:
 
             # Human-readable plan for the card (descriptive).
             plan = self._build_plan(anomaly, rca)
-            # Per operator policy: if the AI is unavailable OR proposed unsafe
-            # commands, we DO NOT auto-run canned commands. We mark this run as
-            # requiring manual handling.
-            needs_manual = ai_status != "ok"
+
+            # Decide whether this run can auto-remediate:
+            #  - ai_status == "ok"  → use AI commands.
+            #  - AI unavailable BUT a safe built-in fix exists for this known
+            #    anomaly type → fall back to the built-in commands (so basic
+            #    remediation keeps working even with no AI / free-tier down).
+            #  - AI proposed UNSAFE commands → always manual (never auto-run).
+            #  - AI unavailable AND no built-in fix → manual.
+            SAFE_BUILTIN_TYPES = {"interface_down"}   # has a known-safe 'no shutdown'
+            use_builtin_fallback = (
+                ai_status in ("unavailable", "empty")
+                and anomaly_type in SAFE_BUILTIN_TYPES
+            )
+            if ai_status == "ok":
+                needs_manual = False
+            elif ai_status == "unsafe":
+                needs_manual = True            # never auto-run unsafe AI output
+            elif use_builtin_fallback:
+                needs_manual = False           # safe hardcoded fix will be used
+                self.tracker.step_log(
+                    run_id, 4,
+                    "AI unavailable — using safe built-in remediation for "
+                    f"{anomaly_type} (no shutdown).")
+            else:
+                needs_manual = True
 
             self.tracker.step_complete(
                 run_id, 4,
-                f"Plan ready ({'AI-generated' if not needs_manual else 'MANUAL required'}) "
+                f"Plan ready ({'AI-generated' if ai_status=='ok' else 'built-in' if use_builtin_fallback else 'MANUAL required'}) "
                 f"— awaiting operator approval",
                 data={"plan": plan, "ai_status": ai_status},
             )
@@ -331,6 +352,7 @@ class AutonomousMonitor:
                 "ai_commands": ai_commands,      # safe AI commands, or None
                 "ai_status": ai_status,          # ok | unsafe | unavailable
                 "needs_manual": needs_manual,
+                "use_builtin_fallback": use_builtin_fallback,
                 "ai_block_reasons": ai_block_reasons,
             }
             run.status = "awaiting_approval"
@@ -395,7 +417,8 @@ class AutonomousMonitor:
         try:
             # ── STEP 5: Fix Execution ─────────────────────────────────────────
             self.tracker.step_start(run_id, 5)
-            self.tracker.step_log(run_id, 5, f"Executing AI fix for {anomaly_type} on {device}")
+            _src = "AI" if approval_data.get("ai_status") == "ok" else "built-in"
+            self.tracker.step_log(run_id, 5, f"Executing {_src} fix for {anomaly_type} on {device}")
 
             def step5_log(msg: str) -> None:
                 self.tracker.step_log(run_id, 5, msg)
