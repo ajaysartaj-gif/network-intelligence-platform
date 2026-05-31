@@ -128,11 +128,11 @@ def validate_router_login(
         return result
 
     # Step 3: login + read-only checks
+    is_telnet = device_type.endswith("_telnet")
     conn_config = {
         "device_type": device_type,
         "host": host,
         "port": port_i,
-        "username": username,
         "password": password,
         "secret": password,
         "fast_cli": False,
@@ -141,12 +141,21 @@ def validate_router_login(
         "auth_timeout": 30,
         "blocking_timeout": 30,
     }
+    # SSH always needs a username; a GNS3 Telnet console usually does NOT
+    # (login is configured on the console line, or there's no login at all).
+    if is_telnet:
+        if username:
+            conn_config["username"] = username
+        login_label = "Console login (telnet)" if not username else f"Console login as '{username}'"
+    else:
+        conn_config["username"] = username
+        login_label = f"Login as '{username}'"
     try:
         with ConnectHandler(**conn_config) as conn:
             prompt = conn.find_prompt()
             result["prompt"] = prompt
             result["can_login"] = True
-            steps.append(_step(f"Login as '{username}'", True, f"Device prompt: {prompt}"))
+            steps.append(_step(login_label, True, f"Device prompt: {prompt}"))
 
             try:
                 brief = conn.send_command("show ip interface brief", read_timeout=15)
@@ -177,16 +186,16 @@ def validate_router_login(
         return result
 
     except NetmikoAuthenticationException:
-        steps.append(_step(f"Login as '{username}'", False,
+        steps.append(_step(login_label, False,
                            "Rejected. Tunnel is fine but the username/password was refused."))
         result["summary"] = "Login rejected — check credentials."
         return result
     except NetmikoTimeoutException:
-        steps.append(_step(f"Login as '{username}'", False,
+        steps.append(_step(login_label, False,
                            "Handshake timed out. If the router is Telnet-only, use device type 'cisco_ios_telnet'."))
         result["summary"] = "Login handshake timed out."
         return result
     except Exception as e:
-        steps.append(_step(f"Login as '{username}'", False, str(e)))
+        steps.append(_step(login_label, False, str(e)))
         result["summary"] = f"Unexpected error: {e}"
         return result
