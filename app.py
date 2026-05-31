@@ -97,11 +97,24 @@ if DATABASE_AVAILABLE:
 
 # ── AI CONFIG (must be defined before _get_monitor references call_ai) ────────
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
-MODEL_NAME      = "anthropic/claude-3.5-sonnet"
+# Free model by default (no cost, no credit card). Override via the
+# OPENROUTER_MODEL secret if you want a different one. ':free' models and the
+# 'openrouter/free' auto-router are free on OpenRouter.
+def _resolve_model() -> str:
+    try:
+        import streamlit as _st
+        m = _st.secrets.get("OPENROUTER_MODEL", "")
+    except Exception:
+        m = ""
+    if not m:
+        m = os.environ.get("OPENROUTER_MODEL", "")
+    return (m or "deepseek/deepseek-chat-v3-0324:free").strip()
+
+MODEL_NAME = _resolve_model()
 
 # Build version — bump this whenever code changes so we can confirm at a glance
 # in the running app that the latest deploy is actually live.
-BUILD_VERSION = "2026.05.31-fastpoll-diag-15"
+BUILD_VERSION = "2026.05.31-free-model-builtin-17"
 
 
 def _load_secrets_into_env() -> None:
@@ -168,13 +181,39 @@ def call_ai(prompt: str) -> str:
                 )},
                 {"role": "user", "content": prompt},
             ],
-            max_tokens=600,
+            max_tokens=1200,
             temperature=0.1,
         )
         return resp.choices[0].message.content
     except Exception as e:
         logger.warning(f"AI call failed: {e}")
         return ""
+
+
+def diagnose_ai() -> dict:
+    """Make a real OpenRouter call and return the ACTUAL reason the AI isn't
+    working (bad key, no credits, wrong model) instead of a swallowed error."""
+    if not OPENAI_AVAILABLE:
+        return {"ok": False, "stage": "library",
+                "detail": "The 'openai' python package isn't installed."}
+    key = _resolve_api_key()
+    if not key:
+        return {"ok": False, "stage": "key",
+                "detail": "OPENROUTER_API_KEY is empty. Add it to Secrets and reboot."}
+    masked = key[:8] + "…" + key[-4:] if len(key) > 14 else "set"
+    try:
+        client = OpenAI(api_key=key, base_url=OPENROUTER_BASE)
+        resp = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "Reply with exactly: OK"}],
+            max_tokens=10, temperature=0,
+        )
+        return {"ok": True, "stage": "done",
+                "detail": f"Model responded: {resp.choices[0].message.content!r}",
+                "model": MODEL_NAME, "key": masked}
+    except Exception as e:
+        return {"ok": False, "stage": "request",
+                "detail": f"{type(e).__name__}: {e}", "model": MODEL_NAME, "key": masked}
 
 # ── PINGPY / TUNNEL CONFIG ────────────────────────────────────────────────────
 
@@ -1297,6 +1336,21 @@ OPENROUTER_API_KEY = "your-key-here"
             if st.form_submit_button("Save AI Key"):
                 os.environ["OPENROUTER_API_KEY"] = new_ai_key
                 st.success("AI key updated. Restart the app if the AI client was already cached.")
+
+        st.caption(f"Current model: `{MODEL_NAME}`  ·  set `OPENROUTER_MODEL` in Secrets to change it.")
+        if st.button("🔌 Test AI Connection"):
+            with st.spinner("Calling OpenRouter..."):
+                diag = diagnose_ai()
+            if diag["ok"]:
+                st.success(f"✅ AI is working. {diag['detail']}")
+                st.caption(f"Model: `{diag.get('model')}` · Key: `{diag.get('key')}`")
+            else:
+                st.error(f"❌ AI failed at stage: {diag['stage']}")
+                st.code(diag["detail"], language="text")
+                if diag["stage"] == "request":
+                    st.caption("Common causes: invalid/expired key, rate-limited, or the model "
+                               f"isn't available. Current model: `{MODEL_NAME}`. Free options: "
+                               "`deepseek/deepseek-chat-v3-0324:free`, `openrouter/free`.")
 
     # ── Thresholds tab ────────────────────────────────────────────────────────
     with tab_thresh:
