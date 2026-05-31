@@ -101,7 +101,7 @@ MODEL_NAME      = "anthropic/claude-3.5-sonnet"
 
 # Build version — bump this whenever code changes so we can confirm at a glance
 # in the running app that the latest deploy is actually live.
-BUILD_VERSION = "2026.05.31-nl-config-14"
+BUILD_VERSION = "2026.05.31-fastpoll-diag-15"
 
 
 def _load_secrets_into_env() -> None:
@@ -1473,41 +1473,72 @@ OPENROUTER_API_KEY = "your-key-here"
         if res:
             status = res.get("status")
             if status == "ok":
+                mode = res.get("mode", "config")
                 risk = res.get("risk", "unknown")
                 risk_icon = {"low": "🟢", "medium": "🟡", "high": "🟠"}.get(risk, "⚪")
-                st.success(f"✅ Safe configuration generated. Risk: {risk_icon} {risk}")
-                st.markdown(f"**What this does:** {res.get('summary','(no summary)')}")
-                st.markdown("**Commands to be applied (preview):**")
-                st.code("\n".join(res.get("commands", [])), language="text")
-                st.info("Review carefully. Click Apply only if this is exactly what you intend.")
-                if st.button("⚡ Apply to Router", type="primary", key="aicfg_apply"):
-                    with st.spinner(f"Applying configuration to {st.session_state.get('aicfg_device')}..."):
-                        try:
-                            cmds = res.get("commands", [])
-                            # Strip config-mode wrappers; NetworkFixer/netmiko adds them.
-                            inner = [c for c in cmds if c.lower() not in
-                                     ("configure terminal", "conf t", "end", "exit")]
-                            override = {"diagnostic": [], "fix": inner + ["end"], "verify": []}
-                            anomaly = {"device": st.session_state.get("aicfg_device"),
-                                       "type": "manual_config", "interface": ""}
-                            device_cfg = monitor._get_device_config(st.session_state.get("aicfg_device"))
-                            logs = []
-                            fr = fixer.fix(anomaly, device_config=device_cfg,
-                                           step_logger=lambda m: logs.append(m),
-                                           command_override=override)
-                        except Exception as e:
-                            fr = None
-                            logs = [f"Error: {e}"]
-                        if fr and getattr(fr, "success", False) and not getattr(fr, "simulated", True):
-                            st.success(f"✅ Applied LIVE to {st.session_state.get('aicfg_device')}.")
-                            st.code("\n".join(logs), language="text")
-                        elif fr and getattr(fr, "simulated", False):
-                            st.warning("⚠️ Ran in SIMULATION (no live tunnel). Router not changed. "
-                                       "Set GNS3_ROUTER_HOST/PORT/DEVICE_TYPE in Secrets.")
-                        else:
-                            st.error("❌ Apply failed.")
-                            st.code("\n".join(logs), language="text")
-                        st.session_state.pop("aicfg_result", None)
+
+                if mode == "diagnostic":
+                    st.info(f"🔍 Diagnostic query — read-only. {res.get('summary','')}")
+                    st.markdown("**Commands:**")
+                    st.code("\n".join(res.get("commands", [])), language="text")
+                    if st.button("▶ Run diagnostic on router", type="primary", key="aicfg_diag"):
+                        with st.spinner(f"Querying {st.session_state.get('aicfg_device')}..."):
+                            try:
+                                cmds = [c for c in res.get("commands", [])
+                                        if c.lower() not in ("configure terminal", "conf t", "end", "exit")]
+                                override = {"diagnostic": cmds, "fix": [], "verify": []}
+                                anomaly = {"device": st.session_state.get("aicfg_device"),
+                                           "type": "manual_diagnostic", "interface": ""}
+                                device_cfg = monitor._get_device_config(st.session_state.get("aicfg_device"))
+                                logs = []
+                                fr = fixer.fix(anomaly, device_config=device_cfg,
+                                               step_logger=lambda m: logs.append(m),
+                                               command_override=override)
+                            except Exception as e:
+                                fr, logs = None, [f"Error: {e}"]
+                            if fr and getattr(fr, "outputs", None):
+                                st.success("✅ Router output:")
+                                for cmd, outp in zip(getattr(fr, "commands_executed", []), fr.outputs):
+                                    st.markdown(f"`{cmd}`")
+                                    st.code(outp or "(no output)", language="text")
+                            elif fr and getattr(fr, "simulated", False):
+                                st.warning("⚠️ Ran in SIMULATION (no live tunnel).")
+                            else:
+                                st.code("\n".join(logs), language="text")
+                            st.session_state.pop("aicfg_result", None)
+                else:
+                    st.success(f"✅ Safe configuration generated. Risk: {risk_icon} {risk}")
+                    st.markdown(f"**What this does:** {res.get('summary','(no summary)')}")
+                    st.markdown("**Commands to be applied (preview):**")
+                    st.code("\n".join(res.get("commands", [])), language="text")
+                    st.info("Review carefully. Click Apply only if this is exactly what you intend.")
+                    if st.button("⚡ Apply to Router", type="primary", key="aicfg_apply"):
+                        with st.spinner(f"Applying configuration to {st.session_state.get('aicfg_device')}..."):
+                            try:
+                                cmds = res.get("commands", [])
+                                inner = [c for c in cmds if c.lower() not in
+                                         ("configure terminal", "conf t", "end", "exit")]
+                                override = {"diagnostic": [], "fix": inner + ["end"], "verify": []}
+                                anomaly = {"device": st.session_state.get("aicfg_device"),
+                                           "type": "manual_config", "interface": ""}
+                                device_cfg = monitor._get_device_config(st.session_state.get("aicfg_device"))
+                                logs = []
+                                fr = fixer.fix(anomaly, device_config=device_cfg,
+                                               step_logger=lambda m: logs.append(m),
+                                               command_override=override)
+                            except Exception as e:
+                                fr = None
+                                logs = [f"Error: {e}"]
+                            if fr and getattr(fr, "success", False) and not getattr(fr, "simulated", True):
+                                st.success(f"✅ Applied LIVE to {st.session_state.get('aicfg_device')}.")
+                                st.code("\n".join(logs), language="text")
+                            elif fr and getattr(fr, "simulated", False):
+                                st.warning("⚠️ Ran in SIMULATION (no live tunnel). Router not changed. "
+                                           "Set GNS3_ROUTER_HOST/PORT/DEVICE_TYPE in Secrets.")
+                            else:
+                                st.error("❌ Apply failed.")
+                                st.code("\n".join(logs), language="text")
+                            st.session_state.pop("aicfg_result", None)
             elif status == "unsafe":
                 st.error("❌ Blocked for safety — this request would run lockout/destructive commands.")
                 st.markdown("**Blocked commands:**")
