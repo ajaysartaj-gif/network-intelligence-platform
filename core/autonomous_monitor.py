@@ -631,31 +631,46 @@ class AutonomousMonitor:
 
     def _get_device_config(self, device: str) -> Optional[Dict[str, Any]]:
         """
-        Build SSH connection config for a device.
+        Build connection config for a device.
         Priority: env vars (GNS3_ROUTER_HOST/PORT) → netmiko device catalog → gns3 engine.
-        Includes paramiko workarounds required for old Cisco IOS.
+        Honors GNS3_DEVICE_TYPE so a GNS3 Telnet console (cisco_ios_telnet) is used
+        instead of SSH. Includes paramiko workarounds for old Cisco IOS over SSH.
         """
-        # 1. Env-var override (pingpy tunnel or direct SSH)
+        # 1. Env-var override (pinggy tunnel or direct connection)
         host = os.environ.get("GNS3_ROUTER_HOST")
         port_str = os.environ.get("GNS3_ROUTER_PORT")
-        username = os.environ.get("GNS3_ROUTER_USER")
-        password = os.environ.get("GNS3_ROUTER_PASS")
+        # Accept both naming conventions for credentials.
+        username = os.environ.get("GNS3_ROUTER_USER") or os.environ.get("GNS3_SSH_USER")
+        password = os.environ.get("GNS3_ROUTER_PASS") or os.environ.get("GNS3_SSH_PASS")
+        device_type = (os.environ.get("GNS3_DEVICE_TYPE", "cisco_ios").strip()
+                       or "cisco_ios")
 
         if host and port_str:
             try:
                 port = int(port_str)
             except ValueError:
                 port = 22
-            return {
-                "device_type": "cisco_ios",
+            cfg: Dict[str, Any] = {
+                "device_type": device_type,
                 "host": host,
                 "port": port,
-                "username": username or "admin",
                 "password": password or "admin",
+                "secret": password or "admin",
                 "timeout": 90,
                 "auth_timeout": 90,
                 "fast_cli": False,
             }
+            # A GNS3 Telnet console usually has NO username prompt (login is on
+            # the line, privilege 15). Passing a username makes netmiko wait for
+            # a prompt that never comes → timeout. So for telnet we omit the
+            # username unless a dedicated GNS3_TELNET_USER is explicitly set.
+            if device_type.endswith("_telnet"):
+                telnet_user = os.environ.get("GNS3_TELNET_USER", "").strip()
+                if telnet_user:
+                    cfg["username"] = telnet_user
+            else:
+                cfg["username"] = username or "admin"
+            return cfg
 
         # 2. Netmiko device catalog
         try:
