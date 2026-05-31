@@ -113,7 +113,7 @@ class AutonomousMonitor:
                 self.approved_run_ids.discard(run_id)
                 if data:
                     logger.info(f"[MONITOR] Run {run_id} approved — starting Phase 2")
-                    self._run_phase2(data["run"], data["anomaly"])
+                    self._run_phase2(data["run"], data["anomaly"], data)
 
             # ── 3. Telemetry + anomaly detection ─────────────────────────────
             if LIVE_ONLY:
@@ -278,15 +278,46 @@ class AutonomousMonitor:
                 note=f"AI RCA: {rca[:200]}"
             )
 
-            # ── STEP 4: Remediation Planning ──────────────────────────────────
+            # ── STEP 4: Remediation Planning (AI-generated + safety-filtered) ─
             self.tracker.step_start(run_id, 4)
+
+            ai_commands = None
+            ai_status = "unavailable"
+            ai_block_reasons: List[str] = []
+            try:
+                from core.ai_remediation import generate_fix_commands
+                device_facts = self._device_facts(device)
+                gen = generate_fix_commands(anomaly, self.ai_call, device_facts)
+                ai_status = gen["status"]
+                if ai_status == "ok":
+                    ai_commands = gen["commands"]
+                    self.tracker.step_log(run_id, 4, "AI generated remediation commands (passed safety filter)")
+                    for c in ai_commands.get("fix", []):
+                        self.tracker.step_log(run_id, 4, f"  • {c}")
+                elif ai_status == "unsafe":
+                    ai_block_reasons = gen["reasons"]
+                    self.tracker.step_log(run_id, 4,
+                        f"AI proposed UNSAFE commands — blocked: {gen.get('blocked')}")
+                else:
+                    ai_block_reasons = gen["reasons"]
+                    self.tracker.step_log(run_id, 4,
+                        f"AI unavailable: {'; '.join(gen.get('reasons', []))}")
+            except Exception as e:
+                logger.warning(f"[MONITOR] AI command generation error: {e}")
+                ai_block_reasons = [str(e)]
+
+            # Human-readable plan for the card (descriptive).
             plan = self._build_plan(anomaly, rca)
-            for p in plan:
-                self.tracker.step_log(run_id, 4, f"  • {p}")
+            # Per operator policy: if the AI is unavailable OR proposed unsafe
+            # commands, we DO NOT auto-run canned commands. We mark this run as
+            # requiring manual handling.
+            needs_manual = ai_status != "ok"
+
             self.tracker.step_complete(
                 run_id, 4,
-                f"Plan ready: {len(plan)} actions — awaiting operator approval",
-                data={"plan": plan},
+                f"Plan ready ({'AI-generated' if not needs_manual else 'MANUAL required'}) "
+                f"— awaiting operator approval",
+                data={"plan": plan, "ai_status": ai_status},
             )
 
             # Store for Phase 2; do NOT advance to step 5
@@ -296,6 +327,10 @@ class AutonomousMonitor:
                 "plan": plan,
                 "rca": rca,
                 "incident_id": incident_id,
+                "ai_commands": ai_commands,      # safe AI commands, or None
+                "ai_status": ai_status,          # ok | unsafe | unavailable
+                "needs_manual": needs_manual,
+                "ai_block_reasons": ai_block_reasons,
             }
             run.status = "awaiting_approval"
             logger.info(f"[MONITOR] Phase 1 complete: {run_id} — awaiting approval")
@@ -311,11 +346,16 @@ class AutonomousMonitor:
 
     # ── Phase 2: Fix Execution → Verification → Closure ─────────────────────
 
-    def _run_phase2(self, run: WorkflowRun, anomaly: Dict[str, Any]) -> None:
+    def _run_phase2(self, run: WorkflowRun, anomaly: Dict[str, Any],
+                    approval_data: Optional[Dict[str, Any]] = None) -> None:
         """
         Execute steps 5-7 on an existing WorkflowRun after operator approval.
         Removes signature from _active_signatures only if recovery is verified.
+        Uses AI-generated, safety-filtered commands. If the AI was unavailable
+        or proposed unsafe commands (needs_manual), the fix is NOT auto-run —
+        the run is escalated for manual handling.
         """
+        approval_data = approval_data or {}
         run_id = run.run_id
         device = anomaly.get("device", "unknown")
         anomaly_type = anomaly.get("type", "unknown")
@@ -330,16 +370,41 @@ class AutonomousMonitor:
         fix_result = None
         recovered = False
 
+        # ── Policy gate: if AI couldn't safely produce commands, escalate ────
+        if approval_data.get("needs_manual"):
+            self.tracker.step_start(run_id, 5)
+            reasons = "; ".join(approval_data.get("ai_block_reasons", [])) or \
+                      "AI did not produce safe commands"
+            self.tracker.step_fail(
+                run_id, 5,
+                f"Manual intervention required — {reasons}. No commands were run.")
+            self.orchestrator.state.update_incident(
+                incident_id, status="investigating",
+                note=f"AI remediation unavailable/unsafe ({reasons}). Escalated for manual handling."
+            )
+            run.complete("Escalated for manual handling — no automated fix applied")
+            self.last_fix_result = {
+                "success": False, "simulated": False, "commands": [],
+                "error": f"Manual required: {reasons}", "device": device,
+                "manual": True,
+            }
+            logger.info(f"[MONITOR] {run_id} escalated for manual handling")
+            return
+
         try:
             # ── STEP 5: Fix Execution ─────────────────────────────────────────
             self.tracker.step_start(run_id, 5)
-            self.tracker.step_log(run_id, 5, f"Executing fix for {anomaly_type} on {device}")
+            self.tracker.step_log(run_id, 5, f"Executing AI fix for {anomaly_type} on {device}")
 
             def step5_log(msg: str) -> None:
                 self.tracker.step_log(run_id, 5, msg)
 
             device_cfg = self._get_device_config(device)
-            fix_result = self.fixer.fix(anomaly, device_config=device_cfg, step_logger=step5_log)
+            ai_commands = approval_data.get("ai_commands")  # safe AI commands
+            fix_result = self.fixer.fix(
+                anomaly, device_config=device_cfg, step_logger=step5_log,
+                command_override=ai_commands,
+            )
 
             # Expose the outcome so the UI can show live-vs-sim and commands run.
             self.last_fix_result = {
@@ -641,6 +706,26 @@ class AutonomousMonitor:
             affected_services=impacted,
         )
         return incident_id
+
+    def _device_facts(self, device: str) -> str:
+        """Short factual context about the device for the AI prompt."""
+        facts = []
+        try:
+            m = self.orchestrator.state.get_device_metrics(device)
+            if m:
+                facts.append(f"reachable={getattr(m,'reachable',True)}")
+                facts.append(f"interface_errors={getattr(m,'interface_errors',0)}")
+        except Exception:
+            pass
+        try:
+            if self.github_log:
+                health = self.github_log.get_device_health().get(device, {})
+                down = health.get("down_interfaces", [])
+                if down:
+                    facts.append(f"down_interfaces={','.join(down)}")
+        except Exception:
+            pass
+        return ("Device facts: " + "; ".join(facts)) if facts else ""
 
     def _get_device_config(self, device: str) -> Optional[Dict[str, Any]]:
         """
