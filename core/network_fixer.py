@@ -180,10 +180,13 @@ class NetworkFixer:
         anomaly: Dict[str, Any],
         device_config: Optional[Dict[str, Any]] = None,
         step_logger=None,
+        command_override: Optional[Dict[str, List[str]]] = None,
     ) -> FixResult:
         """
         Execute remediation for an anomaly.
         step_logger: callable(str) → logs to the workflow step.
+        command_override: AI-generated {diagnostic,fix,verify} commands. When
+            provided, these are used INSTEAD of the built-in table.
         """
         device = anomaly.get("device", "unknown")
         anomaly_type = anomaly.get("type", "unknown")
@@ -200,8 +203,17 @@ class NetworkFixer:
         if not conn_config and self.gns3:
             conn_config = self.gns3.get_netmiko_config(device)
 
-        # 2. Get fix commands for this anomaly type
-        commands = self._resolve_commands(anomaly_type, anomaly)
+        # 2. Commands: prefer AI-generated (already safety-validated upstream),
+        #    otherwise fall back to the built-in table.
+        if command_override and command_override.get("fix"):
+            commands = {
+                "diagnostic": command_override.get("diagnostic", []),
+                "fix": command_override.get("fix", []),
+                "verify": command_override.get("verify", []),
+            }
+            _log("Using AI-generated remediation commands")
+        else:
+            commands = self._resolve_commands(anomaly_type, anomaly)
 
         # 3. Execute (live or simulated)
         if conn_config and NETMIKO_AVAILABLE:
