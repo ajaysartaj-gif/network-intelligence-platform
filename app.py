@@ -1096,9 +1096,14 @@ OPENROUTER_API_KEY = "your-key-here"
 
             # Offer to save working settings
             if res["success"]:
+                # Remember the working host/port/type so the real fixer uses them.
+                os.environ["GNS3_ROUTER_HOST"] = test_host.strip()
+                os.environ["GNS3_ROUTER_PORT"] = test_port.strip()
+                os.environ["GNS3_DEVICE_TYPE"] = test_dtype
                 st.info(
-                    "These settings work. To make the platform use them for real fixes, "
-                    "click **Apply Connection Settings** above (or add them to Streamlit Secrets)."
+                    "These settings work and have been applied for this session. "
+                    "To persist across restarts, add them to Streamlit Secrets "
+                    f"(including `GNS3_DEVICE_TYPE = \"{test_dtype}\"`)."
                 )
 
         # ── GitHub log source ─────────────────────────────────────────────────
