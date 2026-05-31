@@ -1368,13 +1368,16 @@ OPENROUTER_API_KEY = "your-key-here"
                                 "aes128-cbc","aes192-cbc","aes256-cbc",
                             )
                             from netmiko import ConnectHandler
-                            conn = ConnectHandler(
-                                device_type="cisco_ios",
+                            _dtype = os.environ.get("GNS3_DEVICE_TYPE", "cisco_ios").strip() or "cisco_ios"
+                            _cfg = dict(
+                                device_type=_dtype,
                                 host=host, port=int(port),
-                                username=fixer.default_username,
                                 password=fixer.default_password,
                                 timeout=20, auth_timeout=20, fast_cli=False,
                             )
+                            if not _dtype.endswith("_telnet"):
+                                _cfg["username"] = fixer.default_username
+                            conn = ConnectHandler(**_cfg)
                             out = conn.send_command("show ip interface brief")
                             conn.disconnect()
                             st.success("Connection successful!")
