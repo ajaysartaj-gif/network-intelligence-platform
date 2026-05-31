@@ -244,12 +244,17 @@ class NetworkFixer:
                 fix_cmds = commands.get("fix", [])
                 if fix_cmds:
                     log(f"Executing {len(fix_cmds)} fix command(s)")
+                    # CRITICAL: interpolate placeholders ({interface}, {peer}) BEFORE
+                    # sending. Otherwise the router receives literal text like
+                    # 'interface {interface}' and rejects it, so the fix never applies.
+                    rendered_fix = [self._interpolate(c, anomaly) for c in fix_cmds]
                     if any(c in ["end", "exit", "wr", "write memory"] for c in fix_cmds):
                         try:
-                            cfg_cmds = [c for c in fix_cmds if c not in ("end", "exit")]
+                            cfg_cmds = [self._interpolate(c, anomaly)
+                                        for c in fix_cmds if c not in ("end", "exit")]
                             output = conn.send_config_set(cfg_cmds)
-                            for cmd in fix_cmds:
-                                result.commands_executed.append(self._interpolate(cmd, anomaly))
+                            for cmd in rendered_fix:
+                                result.commands_executed.append(cmd)
                                 log(f"   OK: {cmd}")
                             result.outputs.append(output)
                         except Exception as e:
