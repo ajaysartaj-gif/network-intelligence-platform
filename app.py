@@ -101,7 +101,7 @@ MODEL_NAME      = "anthropic/claude-3.5-sonnet"
 
 # Build version — bump this whenever code changes so we can confirm at a glance
 # in the running app that the latest deploy is actually live.
-BUILD_VERSION = "2026.05.31-no-fake-topo-11"
+BUILD_VERSION = "2026.05.31-ui-theme-12"
 
 
 def _load_secrets_into_env() -> None:
@@ -366,66 +366,9 @@ WORKSPACES = [
 ]
 
 # ── CSS ───────────────────────────────────────────────────────────────────────
-st.markdown("""
-<style>
-/* Dark NOC theme */
-.main { background: #0d1117; }
-[data-testid="stSidebar"] { background: #161b22 !important; }
-
-/* Metric cards */
-[data-testid="metric-container"] {
-    background: #161b22;
-    border: 1px solid #30363d;
-    border-radius: 8px;
-    padding: 12px;
-}
-
-/* Alert banner */
-.alert-critical {
-    background: linear-gradient(135deg, #cc000022, #cc000011);
-    border-left: 4px solid #cc0000;
-    border-radius: 6px;
-    padding: 10px 14px;
-    margin: 4px 0;
-}
-
-/* Step pipeline */
-.step-box {
-    border-radius: 8px;
-    padding: 10px;
-    text-align: center;
-    transition: all 0.3s ease;
-}
-
-/* Scrollable terminal */
-.terminal {
-    background: #0d1117;
-    border: 1px solid #30363d;
-    border-radius: 6px;
-    padding: 12px;
-    font-family: monospace;
-    font-size: 12px;
-    max-height: 300px;
-    overflow-y: auto;
-    color: #58a6ff;
-}
-
-/* Fix dataframe headers */
-.dataframe th { background: #1c2128 !important; color: #cdd9e5 !important; }
-
-/* Device health card */
-.dev-card { border-radius:10px; padding:14px; margin:4px 0; }
-
-/* Approval card */
-.approval-card {
-    background: linear-gradient(135deg, #1a1200, #0d0d00);
-    border: 2px solid #cc8800;
-    border-radius: 10px;
-    padding: 16px 20px;
-    margin-bottom: 12px;
-}
-</style>
-""", unsafe_allow_html=True)
+# ── CSS (theme lives in ui/app_theme.py — presentation only) ──────────────────
+from ui.app_theme import inject_theme
+inject_theme()
 
 # ── helper: render a single device health card ────────────────────────────────
 def _device_card(hostname: str, m, health: dict) -> None:
