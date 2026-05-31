@@ -114,7 +114,7 @@ MODEL_NAME = _resolve_model()
 
 # Build version — bump this whenever code changes so we can confirm at a glance
 # in the running app that the latest deploy is actually live.
-BUILD_VERSION = "2026.05.31-free-model-builtin-17"
+BUILD_VERSION = "2026.05.31-diag-override-18"
 
 
 def _load_secrets_into_env() -> None:
