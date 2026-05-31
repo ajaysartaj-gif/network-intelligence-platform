@@ -1,8 +1,12 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
+import os
 import time
 from datetime import datetime
 from typing import Dict, List, Optional, Any
+
+# Live-only mode: do not seed any simulated topology / services.
+LIVE_ONLY = os.environ.get("NETBRAIN_LIVE_ONLY", "1").strip().lower() not in ("0", "false", "no")
 import logging
 
 from core.compliance_engine import ComplianceEngine
@@ -441,7 +445,11 @@ class OperationsOrchestrator:
         ])
 
     def _seed_knowledge_graph(self) -> None:
-        # Seed basic network topology relationships
+        # In live-only mode, the knowledge graph is built from REAL devices as
+        # they are discovered from the logs — do not seed fake topology.
+        if LIVE_ONLY:
+            return
+        # Seed basic network topology relationships (demo mode only)
         devices = ["DEL-CORE-01", "MUM-EDGE-01", "BLR-FW-01", "HYD-LEAF-02"]
         services = ["Internet", "Intranet", "Database", "Web"]
         
@@ -463,6 +471,10 @@ class OperationsOrchestrator:
 
     def _initialize_service_topology(self) -> None:
         """Initialize enterprise service dependency topology."""
+        # In live-only mode there are no simulated services/sites.
+        if LIVE_ONLY:
+            logger.info("Live-only mode: skipping simulated service topology")
+            return
         services = {
             "Email Service": ["dc1-delhi", "dc1-mumbai"],
             "Finance Portal": ["dc1-delhi", "sw1-delhi", "fw-delhi"],
@@ -866,94 +878,6 @@ class OperationsOrchestrator:
             "incidents": len(self.state.incidents),
         }
 
-
-    def get_sample_devices(self) -> List[Dict[str, object]]:
-        return [
-            {
-                "hostname": "DEL-CORE-01",
-                "vendor": "Cisco",
-                "model": "IOS-XR",
-                "role": "Core Router",
-                "site": "DEL",
-                "os_version": "7.5.3",
-                "status": "healthy",
-                "cpu": 32.0,
-                "memory": 44.0,
-                "password_encryption": True,
-                "management_protocol": "ssh",
-                "ntp_servers": ["10.0.0.10"],
-                "ospf_enabled": True,
-                "ospf_auth": True,
-            },
-            {
-                "hostname": "MUM-EDGE-01",
-                "vendor": "Juniper",
-                "model": "MX480",
-                "role": "Edge Router",
-                "site": "MUM",
-                "os_version": "20.4R3",
-                "status": "warning",
-                "cpu": 78.0,
-                "memory": 72.0,
-                "password_encryption": True,
-                "management_protocol": "ssh",
-                "ntp_servers": ["10.0.0.11"],
-                "ospf_enabled": False,
-                "ospf_auth": False,
-            },
-            {
-                "hostname": "BLR-FW-01",
-                "vendor": "Fortinet",
-                "model": "FortiGate-600C",
-                "role": "Firewall",
-                "site": "BLR",
-                "os_version": "7.2.0",
-                "status": "critical",
-                "cpu": 91.0,
-                "memory": 87.0,
-                "password_encryption": False,
-                "management_protocol": "https",
-                "ntp_servers": [],
-                "ospf_enabled": False,
-                "ospf_auth": False,
-            },
-            {
-                "hostname": "HYD-LEAF-02",
-                "vendor": "Arista",
-                "model": "7280R",
-                "role": "Leaf Switch",
-                "site": "HYD",
-                "os_version": "4.29.2F",
-                "status": "healthy",
-                "cpu": 28.0,
-                "memory": 39.0,
-                "password_encryption": True,
-                "management_protocol": "ssh",
-                "ntp_servers": ["10.0.0.12"],
-                "ospf_enabled": False,
-                "ospf_auth": False,
-            },
-        ]
-
-    def get_sample_topology(self) -> Dict[str, List[Dict[str, object]]]:
-        return {
-            "interfaces": [
-                {"device": "DEL-CORE-01", "interface_name": "Gig1/0/1", "utilization": 82.0, "packet_loss": 0.2},
-                {"device": "MUM-EDGE-01", "interface_name": "Gig0/0/0", "utilization": 95.0, "packet_loss": 1.8},
-                {"device": "BLR-FW-01", "interface_name": "Ethernet1/2", "utilization": 44.0, "packet_loss": 0.0},
-                {"device": "HYD-LEAF-02", "interface_name": "Port-Channel10", "utilization": 61.0, "packet_loss": 0.1},
-            ],
-            "bgp_peers": [
-                {"local_device": "DEL-CORE-01", "peer_ip": "192.168.100.1", "state": "Established", "prefixes_received": 850},
-                {"local_device": "MUM-EDGE-01", "peer_ip": "192.168.200.1", "state": "Idle", "prefixes_received": 0},
-                {"local_device": "BLR-FW-01", "peer_ip": "10.100.1.2", "state": "Established", "prefixes_received": 120},
-            ],
-            "links": [
-                {"source_device": "DEL-CORE-01", "destination_device": "MUM-EDGE-01", "link_type": "mpls", "status": "up", "bandwidth_mbps": 1000.0},
-                {"source_device": "DEL-CORE-01", "destination_device": "HYD-LEAF-02", "link_type": "evpn", "status": "up", "bandwidth_mbps": 10000.0},
-                {"source_device": "BLR-FW-01", "destination_device": "MUM-EDGE-01", "link_type": "internet", "status": "warning", "bandwidth_mbps": 500.0},
-            ],
-        }
 
     def service_dependencies(self, dependencies: List[Dict[str, object]]) -> None:
         for dependency in dependencies:
