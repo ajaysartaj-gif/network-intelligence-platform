@@ -2,254 +2,213 @@
 ui/app_theme.py
 ===============
 
-Polished visual theme for the NetBrain AI platform. This module contains ONLY
-presentation (CSS + tiny render helpers). It changes no application logic.
+Polished, high-contrast visual theme for the NetBrain AI platform.
 
-app.py activates it with a single call:
+PRESENTATION ONLY — no application logic. app.py activates it with one call:
 
     from ui.app_theme import inject_theme
     inject_theme()
 
-All CSS class names already used by app.py are preserved and enhanced, so
-existing markup keeps working:
-    .approval-card  .alert-critical  .dev-card  .step-box  .terminal
-Plus Streamlit-native containers (metrics, buttons, inputs, expanders, tabs).
+This stylesheet is intentionally aggressive: many of app.py's elements use
+inline styles (e.g. background:#161b22 on the top status boxes), which normally
+beat class selectors. We override them with attribute selectors and high
+specificity so the whole UI is transformed without touching any markup/logic.
+All existing class names are preserved: .approval-card .alert-critical
+.dev-card .step-box .terminal
 """
 from __future__ import annotations
 
-# ── The full design-system stylesheet ────────────────────────────────────────
 APP_THEME_CSS = r"""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
 :root{
-  --bg-base:#0a0e14;
-  --bg-surface:#121821;
-  --bg-elevated:#171f2b;
-  --bg-overlay:#1e2733;
-  --border-subtle:#1f2730;
-  --border-default:#2b3543;
-  --text-primary:#e8eef5;
-  --text-secondary:#94a3b5;
-  --text-tertiary:#5f6b7a;
-  --accent:#3b82f6;
-  --accent-glow:rgba(59,130,246,.35);
-  --green:#3fb950;
-  --amber:#e3b341;
-  --red:#f85149;
-  --purple:#a371f7;
-  --radius:14px;
-  --radius-sm:10px;
-  --shadow-sm:0 1px 2px rgba(0,0,0,.4);
-  --shadow-md:0 6px 24px rgba(0,0,0,.35);
-  --shadow-lg:0 18px 50px rgba(0,0,0,.45);
+  --bg-base:#070b12;
+  --bg-1:#0e151f;
+  --bg-2:#141d2a;
+  --bg-3:#1b2533;
+  --line:#243043;
+  --line-soft:#1a2331;
+  --tx-1:#f0f4fa;
+  --tx-2:#9aa9bd;
+  --tx-3:#5d6b7e;
+  --blue:#4c8dff;
+  --blue-deep:#2563eb;
+  --green:#3fd27a;
+  --amber:#f5b942;
+  --red:#ff5f56;
+  --purple:#b07cff;
+  --glow:rgba(76,141,255,.45);
 }
 
-/* ── Base ── */
+/* ── Canvas ── */
 html,body,[class*="css"]{font-family:'Inter',-apple-system,sans-serif!important}
 .stApp{
   background:
-    radial-gradient(1200px 600px at 15% -10%, rgba(59,130,246,.08), transparent 60%),
-    radial-gradient(1000px 500px at 100% 0%, rgba(163,113,247,.06), transparent 55%),
-    var(--bg-base)!important;
+    radial-gradient(1100px 520px at 12% -8%, rgba(76,141,255,.10), transparent 58%),
+    radial-gradient(900px 480px at 100% -5%, rgba(176,124,255,.08), transparent 55%),
+    linear-gradient(180deg,#080d15,#070b12)!important;
 }
 #MainMenu,footer{visibility:hidden}
-h1,h2,h3,h4{color:var(--text-primary)!important;letter-spacing:-.02em!important;font-weight:700!important}
-h2{font-size:1.5rem!important}
-p,span,label,li{color:var(--text-secondary)}
-a{color:var(--accent)!important;text-decoration:none}
-code,kbd,pre{font-family:'JetBrains Mono',monospace!important}
-hr{border-color:var(--border-subtle)!important;margin:1rem 0!important}
+.block-container{padding-top:1.2rem!important}
 
-/* ── Sidebar ── */
-section[data-testid="stSidebar"]{
-  background:linear-gradient(180deg,var(--bg-surface),var(--bg-base))!important;
-  border-right:1px solid var(--border-subtle)!important;
+h1,h2,h3,h4{color:var(--tx-1)!important;letter-spacing:-.02em!important;font-weight:800!important}
+h3{font-size:1.18rem!important;margin-bottom:.5rem!important}
+/* Accent bar before section headers (Device Health, Live Event Feed, etc.) */
+.main h3::before{
+  content:"";display:inline-block;width:4px;height:18px;border-radius:2px;
+  margin-right:10px;vertical-align:-3px;
+  background:linear-gradient(180deg,var(--blue),var(--purple));
 }
-section[data-testid="stSidebar"] *{color:var(--text-secondary)}
+p,span,label,li{color:var(--tx-2)}
+hr{border-color:var(--line-soft)!important}
 
-/* ── Sidebar nav buttons ── */
+/* ════════ SIDEBAR ════════ */
+section[data-testid="stSidebar"]{
+  background:linear-gradient(180deg,#0c1320,#070b12)!important;
+  border-right:1px solid var(--line-soft)!important;
+}
 section[data-testid="stSidebar"] div[data-testid="stButton"] button{
   width:100%!important;text-align:left!important;justify-content:flex-start!important;
   background:transparent!important;border:1px solid transparent!important;
-  color:var(--text-secondary)!important;font-weight:600!important;
-  border-radius:var(--radius-sm)!important;padding:10px 14px!important;
+  color:var(--tx-2)!important;font-weight:600!important;font-size:13.5px!important;
+  border-radius:11px!important;padding:11px 14px!important;margin:2px 0!important;
   transition:all .18s ease!important;
 }
 section[data-testid="stSidebar"] div[data-testid="stButton"] button:hover{
-  background:var(--bg-elevated)!important;color:var(--text-primary)!important;
-  border-color:var(--border-default)!important;transform:translateX(2px);
+  background:var(--bg-2)!important;color:var(--tx-1)!important;
+  border-color:var(--line)!important;transform:translateX(3px);
 }
 section[data-testid="stSidebar"] div[data-testid="stButton"] button[kind="primary"]{
-  background:linear-gradient(135deg,var(--accent),#2563eb)!important;
+  background:linear-gradient(135deg,var(--blue),var(--blue-deep))!important;
   color:#fff!important;border:none!important;
-  box-shadow:0 4px 14px var(--accent-glow)!important;
+  box-shadow:0 6px 18px var(--glow)!important;
 }
 
-/* ── Buttons (main area) ── */
+/* ════════ BUTTONS (main) ════════ */
 div[data-testid="stButton"] button{
-  border-radius:var(--radius-sm)!important;font-weight:600!important;
-  font-family:'Inter',sans-serif!important;transition:all .18s ease!important;
-  border:1px solid var(--border-default)!important;
-  background:var(--bg-elevated)!important;color:var(--text-primary)!important;
+  border-radius:11px!important;font-weight:600!important;transition:all .18s ease!important;
+  border:1px solid var(--line)!important;background:var(--bg-2)!important;color:var(--tx-1)!important;
 }
 div[data-testid="stButton"] button:hover{
-  border-color:var(--accent)!important;transform:translateY(-1px);
-  box-shadow:var(--shadow-md)!important;
+  border-color:var(--blue)!important;transform:translateY(-1px);box-shadow:0 8px 22px rgba(0,0,0,.4)!important;
 }
 div[data-testid="stButton"] button[kind="primary"]{
-  background:linear-gradient(135deg,var(--accent),#2563eb)!important;
-  border:none!important;color:#fff!important;
-  box-shadow:0 4px 16px var(--accent-glow)!important;
-}
-div[data-testid="stButton"] button[kind="primary"]:hover{
-  box-shadow:0 6px 22px var(--accent-glow)!important;filter:brightness(1.06);
+  background:linear-gradient(135deg,var(--blue),var(--blue-deep))!important;border:none!important;color:#fff!important;
+  box-shadow:0 6px 20px var(--glow)!important;
 }
 
-/* ── Inputs ── */
-div[data-testid="stTextInput"] input,
-div[data-testid="stTextArea"] textarea,
-div[data-testid="stNumberInput"] input,
-div[data-baseweb="select"]>div{
-  border-radius:var(--radius-sm)!important;
-  background:var(--bg-elevated)!important;
-  border:1px solid var(--border-default)!important;
-  color:var(--text-primary)!important;
+/* ════════ INPUTS ════════ */
+div[data-testid="stTextInput"] input,div[data-testid="stTextArea"] textarea,
+div[data-testid="stNumberInput"] input,div[data-baseweb="select"]>div{
+  border-radius:11px!important;background:var(--bg-2)!important;
+  border:1px solid var(--line)!important;color:var(--tx-1)!important;
 }
-div[data-testid="stTextInput"] input:focus,
-div[data-testid="stTextArea"] textarea:focus{
-  border-color:var(--accent)!important;
-  box-shadow:0 0 0 3px var(--accent-glow)!important;
+div[data-testid="stTextInput"] input:focus,div[data-testid="stTextArea"] textarea:focus{
+  border-color:var(--blue)!important;box-shadow:0 0 0 3px var(--glow)!important;
 }
 
-/* ── Metric cards ── */
-div[data-testid="stMetric"],[data-testid="metric-container"]{
-  background:linear-gradient(160deg,var(--bg-surface),var(--bg-elevated))!important;
-  border:1px solid var(--border-subtle)!important;
-  border-radius:var(--radius)!important;padding:16px 18px!important;
-  box-shadow:var(--shadow-sm)!important;transition:all .2s ease;
-  position:relative;overflow:hidden;
+/* ════════ NATIVE METRICS ════════ */
+div[data-testid="stMetric"]{
+  background:linear-gradient(165deg,var(--bg-1),var(--bg-2))!important;
+  border:1px solid var(--line-soft)!important;border-radius:16px!important;
+  padding:18px 20px!important;box-shadow:0 2px 4px rgba(0,0,0,.4)!important;
+  position:relative;overflow:hidden;transition:all .2s ease;
 }
-div[data-testid="stMetric"]:hover{
-  border-color:var(--border-default)!important;box-shadow:var(--shadow-md)!important;
-  transform:translateY(-2px);
-}
-div[data-testid="stMetric"]::before{
-  content:"";position:absolute;top:0;left:0;width:100%;height:2px;
-  background:linear-gradient(90deg,var(--accent),transparent);opacity:.6;
-}
-div[data-testid="stMetric"] label{color:var(--text-tertiary)!important;
-  font-size:11px!important;letter-spacing:.08em!important;text-transform:uppercase!important;font-weight:600!important}
-div[data-testid="stMetric"] [data-testid="stMetricValue"]{
-  color:var(--text-primary)!important;font-weight:800!important;font-size:1.9rem!important}
+div[data-testid="stMetric"]:hover{transform:translateY(-2px);box-shadow:0 10px 30px rgba(0,0,0,.45)!important;border-color:var(--line)!important}
+div[data-testid="stMetric"]::before{content:"";position:absolute;top:0;left:0;width:100%;height:2px;background:linear-gradient(90deg,var(--blue),transparent)}
+div[data-testid="stMetric"] label{color:var(--tx-3)!important;font-size:11px!important;letter-spacing:.09em!important;text-transform:uppercase!important;font-weight:700!important}
+div[data-testid="stMetric"] [data-testid="stMetricValue"]{color:var(--tx-1)!important;font-weight:900!important;font-size:2rem!important}
 
-/* ── Tabs ── */
-div[data-testid="stTabs"] button[role="tab"]{
-  color:var(--text-secondary)!important;font-weight:600!important;border-radius:8px 8px 0 0!important;
+/* ════════ OVERRIDE app.py INLINE-STYLED BOXES ════════
+   The top status boxes & device cards use inline background:#161b22.
+   We override those inline styles by attribute-matching them. */
+.main div[style*="#161b22"]{
+  background:linear-gradient(165deg,var(--bg-1),var(--bg-2))!important;
+  border-radius:16px!important;
+  box-shadow:0 4px 18px rgba(0,0,0,.4)!important;
+  transition:all .2s ease!important;
 }
-div[data-testid="stTabs"] button[role="tab"][aria-selected="true"]{
-  color:var(--text-primary)!important;
-  border-bottom:2px solid var(--accent)!important;
+.main div[style*="#161b22"]:hover{
+  transform:translateY(-2px)!important;box-shadow:0 12px 34px rgba(0,0,0,.5)!important;
+}
+/* Big numbers inside those boxes */
+.main div[style*="#161b22"] div[style*="font-size:28px"],
+.main div[style*="#161b22"] div[style*="font-size: 28px"]{
+  font-weight:900!important;letter-spacing:-.02em!important;
+}
+/* The small caption labels under the numbers */
+.main div[style*="#161b22"] div[style*="#8b949e"]{
+  color:var(--tx-3)!important;text-transform:uppercase!important;
+  letter-spacing:.09em!important;font-weight:700!important;font-size:10.5px!important;
 }
 
-/* ── Expander ── */
+/* ════════ TABS ════════ */
+div[data-testid="stTabs"] button[role="tab"]{color:var(--tx-2)!important;font-weight:600!important}
+div[data-testid="stTabs"] button[role="tab"][aria-selected="true"]{color:var(--tx-1)!important;border-bottom:2px solid var(--blue)!important}
+
+/* ════════ EXPANDER ════════ */
 div[data-testid="stExpander"]{
-  border-radius:var(--radius)!important;border:1px solid var(--border-subtle)!important;
-  background:var(--bg-surface)!important;overflow:hidden;box-shadow:var(--shadow-sm);
+  border-radius:14px!important;border:1px solid var(--line-soft)!important;
+  background:var(--bg-1)!important;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.3);
 }
-div[data-testid="stExpander"] summary{color:var(--text-primary)!important;font-weight:600!important}
-div[data-testid="stExpander"] summary:hover{color:var(--accent)!important}
+div[data-testid="stExpander"] summary{color:var(--tx-1)!important;font-weight:600!important}
+div[data-testid="stExpander"] summary:hover{color:var(--blue)!important}
 
-/* ── Alerts ── */
-.stAlert{border-radius:var(--radius)!important;border:1px solid var(--border-default)!important}
+/* ════════ ALERTS / INFO PANELS ════════ */
+.stAlert{border-radius:14px!important;border:1px solid var(--line)!important}
+div[data-baseweb="notification"]{border-radius:14px!important}
 
-/* ── DataFrames ── */
-.dataframe{border-radius:var(--radius-sm)!important;overflow:hidden!important;
-  border:1px solid var(--border-subtle)!important}
-.dataframe th{background:var(--bg-overlay)!important;color:var(--text-primary)!important;
-  font-weight:600!important;border:none!important;text-transform:uppercase;font-size:11px;letter-spacing:.05em}
-.dataframe td{background:var(--bg-surface)!important;color:var(--text-secondary)!important;
-  border-color:var(--border-subtle)!important}
+/* ════════ DATAFRAMES ════════ */
+.dataframe{border-radius:12px!important;overflow:hidden!important;border:1px solid var(--line-soft)!important}
+.dataframe th{background:var(--bg-3)!important;color:var(--tx-1)!important;font-weight:700!important;
+  text-transform:uppercase;font-size:10.5px;letter-spacing:.06em;border:none!important}
+.dataframe td{background:var(--bg-1)!important;color:var(--tx-2)!important;border-color:var(--line-soft)!important}
 
-/* ════════════════════════════════════════════════════════════════════
-   App-specific classes (PRESERVED names, enhanced styling)
-   ════════════════════════════════════════════════════════════════════ */
-
-/* Approval card — the hero element of the AI Action page */
+/* ════════ APP-SPECIFIC CLASSES (preserved, enhanced) ════════ */
 .approval-card{
-  background:linear-gradient(160deg,var(--bg-surface),var(--bg-elevated));
-  border:1px solid var(--border-default);
-  border-left:4px solid var(--amber);
-  border-radius:var(--radius);
-  padding:18px 20px;margin:10px 0;
-  box-shadow:var(--shadow-md);
-  position:relative;
+  background:linear-gradient(165deg,var(--bg-1),var(--bg-2))!important;
+  border:1px solid var(--line);border-left:4px solid var(--amber);
+  border-radius:16px;padding:20px 22px;margin:12px 0;
+  box-shadow:0 10px 34px rgba(0,0,0,.45),0 0 30px rgba(245,185,66,.06);
   animation:cardIn .35s cubic-bezier(.16,1,.3,1);
 }
-.approval-card::after{
-  content:"";position:absolute;inset:0;border-radius:var(--radius);
-  box-shadow:0 0 0 1px rgba(227,179,65,.10),0 0 30px rgba(227,179,65,.06);
-  pointer-events:none;
-}
-@keyframes cardIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+@keyframes cardIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
 
-/* Critical alert banner */
 .alert-critical{
-  background:linear-gradient(135deg,rgba(248,81,73,.14),rgba(248,81,73,.05));
-  border:1px solid rgba(248,81,73,.3);
-  border-left:4px solid var(--red);
-  border-radius:var(--radius-sm);
-  padding:12px 16px;margin:6px 0;color:var(--text-primary);
-  box-shadow:0 0 24px rgba(248,81,73,.08);
+  background:linear-gradient(135deg,rgba(255,95,86,.16),rgba(255,95,86,.05));
+  border:1px solid rgba(255,95,86,.32);border-left:4px solid var(--red);
+  border-radius:12px;padding:12px 16px;margin:6px 0;color:var(--tx-1);
+  box-shadow:0 0 26px rgba(255,95,86,.10);
 }
-
-/* Device health card */
 .dev-card{
-  background:linear-gradient(160deg,var(--bg-surface),var(--bg-elevated));
-  border:1px solid var(--border-subtle);
-  border-radius:var(--radius);padding:16px;margin:6px 0;
-  box-shadow:var(--shadow-sm);transition:all .2s ease;
+  background:linear-gradient(165deg,var(--bg-1),var(--bg-2))!important;
+  border:1px solid var(--line-soft);border-radius:16px;padding:16px;margin:6px 0;
+  box-shadow:0 4px 16px rgba(0,0,0,.4);transition:all .2s ease;
 }
-.dev-card:hover{transform:translateY(-2px);box-shadow:var(--shadow-md);border-color:var(--border-default)}
-
-/* Step pipeline boxes */
-.step-box{
-  border-radius:var(--radius-sm);padding:12px;text-align:center;
-  background:var(--bg-elevated);border:1px solid var(--border-subtle);
-  transition:all .3s ease;
-}
-
-/* Terminal / log output */
+.dev-card:hover{transform:translateY(-2px);box-shadow:0 12px 30px rgba(0,0,0,.5);border-color:var(--line)}
+.step-box{border-radius:12px;padding:12px;text-align:center;background:var(--bg-2);border:1px solid var(--line-soft);transition:all .3s ease}
 .terminal{
-  background:#070b10;border:1px solid var(--border-default);
-  border-radius:var(--radius-sm);padding:14px 16px;
+  background:#05080d;border:1px solid var(--line);border-radius:12px;padding:14px 16px;
   font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.6;
-  max-height:320px;overflow-y:auto;color:#7ee787;
-  box-shadow:inset 0 2px 12px rgba(0,0,0,.4);
+  max-height:320px;overflow-y:auto;color:#7ee787;box-shadow:inset 0 2px 14px rgba(0,0,0,.5);
 }
-.terminal::-webkit-scrollbar{width:8px}
-.terminal::-webkit-scrollbar-thumb{background:var(--border-default);border-radius:4px}
 
-/* Reusable pill/badge helpers (optional, for future use) */
+/* ════════ STATUS PILL HELPERS ════════ */
 .nb-pill{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;
-  font-family:'JetBrains Mono',monospace;padding:4px 10px;border-radius:999px;white-space:nowrap}
-.nb-pill-ok{background:rgba(63,185,80,.13);color:var(--green);border:1px solid rgba(63,185,80,.28)}
-.nb-pill-warn{background:rgba(227,179,65,.13);color:var(--amber);border:1px solid rgba(227,179,65,.28)}
-.nb-pill-err{background:rgba(248,81,73,.13);color:var(--red);border:1px solid rgba(248,81,73,.28)}
-.nb-pill-info{background:rgba(59,130,246,.13);color:var(--accent);border:1px solid rgba(59,130,246,.28)}
+  font-family:'JetBrains Mono',monospace;padding:4px 11px;border-radius:999px;white-space:nowrap}
+.nb-pill-ok{background:rgba(63,210,122,.14);color:var(--green);border:1px solid rgba(63,210,122,.3)}
+.nb-pill-warn{background:rgba(245,185,66,.14);color:var(--amber);border:1px solid rgba(245,185,66,.3)}
+.nb-pill-err{background:rgba(255,95,86,.14);color:var(--red);border:1px solid rgba(255,95,86,.3)}
+.nb-pill-info{background:rgba(76,141,255,.14);color:var(--blue);border:1px solid rgba(76,141,255,.3)}
 .nb-pill .dot{width:6px;height:6px;border-radius:50%;background:currentColor;animation:pulse 2s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
 
-/* Section header helper */
-.nb-section{display:flex;align-items:center;gap:10px;margin:8px 0 4px}
-.nb-section .bar{width:3px;height:18px;border-radius:2px;background:linear-gradient(180deg,var(--accent),var(--purple))}
-.nb-section .title{font-size:1.15rem;font-weight:700;color:var(--text-primary);letter-spacing:-.01em}
-
-/* Scrollbar (global) */
+/* ════════ SCROLLBARS ════════ */
 ::-webkit-scrollbar{width:10px;height:10px}
 ::-webkit-scrollbar-track{background:var(--bg-base)}
-::-webkit-scrollbar-thumb{background:var(--border-default);border-radius:5px}
-::-webkit-scrollbar-thumb:hover{background:var(--text-tertiary)}
+::-webkit-scrollbar-thumb{background:var(--line)!important;border-radius:5px}
+::-webkit-scrollbar-thumb:hover{background:var(--tx-3)!important}
 </style>
 """
 
@@ -260,15 +219,8 @@ def inject_theme() -> None:
     st.markdown(APP_THEME_CSS, unsafe_allow_html=True)
 
 
-# ── Optional presentation helpers (pure markup; app.py may use later) ─────────
 def pill(text: str, kind: str = "info") -> str:
-    """Return HTML for a status pill. kind: ok|warn|err|info."""
+    """HTML status pill. kind: ok|warn|err|info."""
     cls = {"ok": "nb-pill-ok", "warn": "nb-pill-warn",
            "err": "nb-pill-err", "info": "nb-pill-info"}.get(kind, "nb-pill-info")
     return f'<span class="nb-pill {cls}"><span class="dot"></span>{text}</span>'
-
-
-def section_header(title: str) -> str:
-    """Return HTML for a styled section header with an accent bar."""
-    return (f'<div class="nb-section"><div class="bar"></div>'
-            f'<div class="title">{title}</div></div>')
