@@ -100,6 +100,36 @@ OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 MODEL_NAME      = "anthropic/claude-3.5-sonnet"
 
 
+def _load_secrets_into_env() -> None:
+    """
+    Streamlit Secrets are NOT automatically environment variables. The network
+    fixer and log engine read os.environ, so we must copy the relevant secrets
+    into os.environ at startup. Without this, settings like GNS3_DEVICE_TYPE are
+    silently ignored and the fixer falls back to SSH (cisco_ios), producing the
+    'SSH-2.0-paramiko' error against a Telnet console.
+    Existing os.environ values (e.g. set via the Admin UI) take precedence.
+    """
+    keys = [
+        "GNS3_TUNNEL_URL", "GNS3_ROUTER_HOST", "GNS3_ROUTER_PORT",
+        "GNS3_DEVICE_TYPE", "GNS3_SSH_USER", "GNS3_SSH_PASS", "GNS3_SSH_SECRET",
+        "GNS3_TELNET_USER", "GNS3_ROUTER_USER", "GNS3_ROUTER_PASS",
+        "GNS3_LOG_GITHUB_URL", "GNS3_LOG_DEFAULT_DEVICE", "GNS3_LOG_GITHUB_TOKEN",
+        "NETBRAIN_LIVE_ONLY", "OPENROUTER_API_KEY",
+    ]
+    for k in keys:
+        try:
+            val = st.secrets.get(k, None)
+        except Exception:
+            val = None
+        # Only fill from secrets if not already set in the environment.
+        if val is not None and str(val).strip() and not os.environ.get(k):
+            os.environ[k] = str(val).strip()
+
+
+# Copy secrets → env BEFORE any engine/monitor is constructed.
+_load_secrets_into_env()
+
+
 def _resolve_api_key() -> str:
     try:
         return st.secrets.get("OPENROUTER_API_KEY", "")
