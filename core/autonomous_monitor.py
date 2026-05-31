@@ -55,6 +55,7 @@ class AutonomousMonitor:
         self.ai_call = ai_call_fn
         self.cycle_count = 0
         self.last_cycle_result: Dict[str, Any] = {}
+        self.last_fix_result: Optional[Dict[str, Any]] = None
 
         # GitHub log source — reads router syslog pushed to the gns3-router-logs
         # repo.  This is the primary anomaly source for cloud deployments where
@@ -75,6 +76,12 @@ class AutonomousMonitor:
         # Sets populated by the UI / operator
         self.approved_run_ids: set = set()
         self.rejected_run_ids: set = set()
+        # Signatures recently remediated → (cycle_count when fixed). Prevents the
+        # fix→up→down flapping loop: we do NOT re-act on an interface we just
+        # brought up. Cleared after REMEDIATION_COOLDOWN cycles AND only once the
+        # interface has been confirmed stable (not in the current anomaly set).
+        self._remediation_cooldown: Dict[str, int] = {}
+        self.REMEDIATION_COOLDOWN = 6  # cycles to suppress re-action after a fix
 
     # ── public API ──────────────────────────────────────────────────────────
 
@@ -160,10 +167,19 @@ class AutonomousMonitor:
                 sig = f"{anomaly.get('device')}:{anomaly.get('type')}"
                 if sig in self._active_signatures:
                     continue  # already being handled
+                if sig in self._remediation_cooldown:
+                    # We recently fixed this. Don't re-act on a flap.
+                    logger.info(f"[MONITOR] {sig} in remediation cooldown — skipping re-action")
+                    continue
                 run = self._run_phase1(anomaly)
                 if run:
                     self._active_signatures[sig] = run.run_id
                     workflows_started.append(run.run_id)
+
+            # ── 5b. Expire cooldowns once enough cycles have passed ──────────
+            for sig in list(self._remediation_cooldown.keys()):
+                if self.cycle_count - self._remediation_cooldown[sig] >= self.REMEDIATION_COOLDOWN:
+                    self._remediation_cooldown.pop(sig, None)
 
             # ── 6. Clean up stale signatures (anomaly no longer present) ──────
             for sig in list(self._active_signatures.keys()):
@@ -321,8 +337,20 @@ class AutonomousMonitor:
             device_cfg = self._get_device_config(device)
             fix_result = self.fixer.fix(anomaly, device_config=device_cfg, step_logger=step5_log)
 
+            # Expose the outcome so the UI can show live-vs-sim and commands run.
+            self.last_fix_result = {
+                "success": bool(getattr(fix_result, "success", False)),
+                "simulated": bool(getattr(fix_result, "simulated", True)),
+                "commands": list(getattr(fix_result, "commands_executed", []) or []),
+                "error": getattr(fix_result, "error", None),
+                "device": device,
+            }
+
             if fix_result.success:
                 mode = "[SIM]" if fix_result.simulated else "[LIVE]"
+                # Start the anti-flap cooldown the moment a fix is applied — BEFORE
+                # verification — so a rapid down→up→down flap can't re-trigger us.
+                self._remediation_cooldown[sig] = self.cycle_count
                 self.tracker.step_complete(
                     run_id, 5,
                     f"{mode} Executed {len(fix_result.commands_executed)} commands successfully",
@@ -363,7 +391,10 @@ class AutonomousMonitor:
                 )
                 # Verified clear — remove signature so fresh incidents can open if needed
                 self._active_signatures.pop(sig, None)
-                logger.info(f"[MONITOR] Signature {sig} cleared after verified recovery")
+                # Start a cooldown: the interface we just brought UP will emit
+                # "up" then possibly flap; we must NOT re-act on it for a while.
+                self._remediation_cooldown[sig] = self.cycle_count
+                logger.info(f"[MONITOR] Signature {sig} cleared + cooldown started after verified recovery")
             else:
                 self.orchestrator.state.update_incident(
                     incident_id, status="investigating",
@@ -801,8 +832,17 @@ class AutonomousMonitor:
         )
 
     def _verify_recovery(self, device: str, anomaly_type: str) -> bool:
-        """Re-run anomaly detection and check if the specific anomaly is gone."""
+        """Re-check the live log source to see if the anomaly is actually gone."""
         try:
+            # In live-only mode, recovery must be confirmed from the GitHub log
+            # (the real router state), not the simulated telemetry engine.
+            if self.github_log is not None:
+                live = self.github_log.poll()
+                still_present = any(
+                    a.get("device") == device and a.get("type") == anomaly_type
+                    for a in live
+                )
+                return not still_present
             new_anomalies = self.orchestrator.telemetry.detect_anomalies()
             still_present = any(
                 a.get("device") == device and a.get("type") == anomaly_type
