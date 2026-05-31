@@ -354,7 +354,12 @@ class NetworkFixer:
         })
 
     def _build_tunnel_config(self) -> Optional[Dict[str, Any]]:
-        """Build SSH config from GNS3_ROUTER_HOST/PORT env vars (pingpy tunnel)."""
+        """Build connection config from GNS3_ROUTER_HOST/PORT env vars (pinggy tunnel).
+
+        Supports both SSH (cisco_ios) and GNS3 Telnet console (cisco_ios_telnet)
+        via GNS3_DEVICE_TYPE. GNS3 routers are usually only reachable through the
+        GNS3 VM's Telnet console port, not direct SSH.
+        """
         host = os.environ.get("GNS3_ROUTER_HOST", "")
         port_str = os.environ.get("GNS3_ROUTER_PORT", "")
         if not host or not port_str:
@@ -363,16 +368,23 @@ class NetworkFixer:
             port = int(port_str)
         except ValueError:
             return None
-        return {
-            "device_type": "cisco_ios",
+        device_type = os.environ.get("GNS3_DEVICE_TYPE", "cisco_ios").strip() or "cisco_ios"
+        cfg: Dict[str, Any] = {
+            "device_type": device_type,
             "host": host,
             "port": port,
             "username": self.default_username,
             "password": self.default_password,
+            "secret": self.default_password,
             "timeout": 90,
             "auth_timeout": 90,
             "fast_cli": False,
         }
+        # A Telnet console often has no username prompt (login is on the line,
+        # not local AAA). Netmiko tolerates an empty username for telnet.
+        if device_type.endswith("_telnet"):
+            cfg["username"] = os.environ.get("GNS3_SSH_USER", "") or ""
+        return cfg
 
     def _interpolate(self, cmd: str, anomaly: Dict[str, Any]) -> str:
         interface = (
