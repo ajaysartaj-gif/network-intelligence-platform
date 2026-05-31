@@ -114,7 +114,7 @@ MODEL_NAME = _resolve_model()
 
 # Build version — bump this whenever code changes so we can confirm at a glance
 # in the running app that the latest deploy is actually live.
-BUILD_VERSION = "2026.05.31-ai-interpret-19"
+BUILD_VERSION = "2026.05.31-tunnel-logs-20"
 
 
 def _load_secrets_into_env() -> None:
@@ -610,12 +610,31 @@ with st.sidebar:
     # GNS3 / tunnel
     gns3_engine = getattr(orchestrator, "gns3", None)
     gns3_host, gns3_port = _resolve_gns3_endpoint()
-    if gns3_engine and gns3_engine.available:
+
+    # The tool talks to the router over a TELNET tunnel (not the GNS3 HTTP API),
+    # so check the actual router host:port the fixer uses — that's the truth.
+    def _router_tunnel_reachable() -> bool:
+        host = os.environ.get("GNS3_ROUTER_HOST", "").strip()
+        port = os.environ.get("GNS3_ROUTER_PORT", "").strip()
+        if not host or not port:
+            return False
+        import socket
+        try:
+            with socket.create_connection((host, int(port)), timeout=4):
+                return True
+        except Exception:
+            return False
+
+    _rhost = os.environ.get("GNS3_ROUTER_HOST", "").strip()
+    if _rhost:
+        if _router_tunnel_reachable():
+            st.success(f"🟢 Router tunnel UP\n{_rhost}:{os.environ.get('GNS3_ROUTER_PORT','')}")
+        else:
+            st.error("🔴 Router tunnel DOWN\nStart Pinggy & update Secrets")
+    elif gns3_engine and gns3_engine.available:
         st.success(f"🟢 GNS3 v{gns3_engine.version}\n{len(gns3_engine.nodes)} nodes")
-    elif gns3_host != "localhost":
-        st.warning("🟡 Tunnel — waiting GNS3")
     else:
-        st.info("🔵 Simulation mode")
+        st.info("🔵 No tunnel configured")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # WORKSPACE CONTENT
