@@ -53,7 +53,7 @@ try:
 except Exception:
     WORKSPACES = [
         ("Net Ops",      "⚡",  "NOC Operations"),
-        ("Workflows",    "🔄",  "Autonomous Workflows"),
+        ("Workflows",    "🤖",  "AI Action"),
         ("incident",     "🚨",  "Incident Room"),
         ("topology",     "🗺",  "Network Topology"),
         ("Observability","📡",  "Observability"),
@@ -322,7 +322,7 @@ def run_monitor_cycle() -> Dict[str, Any]:
 # ── WORKSPACES list (updated to include Admin) ───────────────────────────────
 WORKSPACES = [
     ("dashboard", "🖥",  "Dashboard"),
-    ("Workflows", "🔄",  "Workflows"),
+    ("Workflows", "🤖",  "AI Action"),
     ("incident",  "🚨",  "Incidents"),
     ("topology",  "🗺",  "Topology"),
     ("Observability", "📡", "Observability"),
@@ -706,7 +706,7 @@ if workspace == "dashboard":
 # WORKSPACE: WORKFLOWS + APPROVALS
 # ══════════════════════════════════════════════════════════════════════════════
 elif workspace == "Workflows":
-    st.markdown("## 🔄 Autonomous Remediation Workflows")
+    st.markdown("## 🤖 AI Action — Autonomous Remediation")
     st.caption("Detect → Analyze → Plan → **APPROVE** → Fix → Verify → Close")
 
     # ── SECTION 1: Pending approvals (most important) ─────────────────────────
@@ -1140,7 +1140,19 @@ OPENROUTER_API_KEY = "your-key-here"
             colp, colr = st.columns([1, 4])
             with colp:
                 if st.button("🔄 Poll Now"):
+                    # Run a FULL monitoring cycle (not just a feed refresh) so any
+                    # down interface is analyzed and turned into an approval card.
                     gh_engine.poll()
+                    try:
+                        run_monitor_cycle()
+                    except Exception as _e:
+                        st.warning(f"Cycle ran with a note: {_e}")
+                    _pend = len(getattr(monitor, "pending_approvals", {}))
+                    if _pend:
+                        st.success(f"Cycle complete — {_pend} fix(es) now awaiting approval. "
+                                   "Open **Workflows** to approve.")
+                    else:
+                        st.info("Cycle complete — no fixable interfaces are currently down.")
                     st.rerun()
             status = gh_engine.status()
             if status["last_error"]:
