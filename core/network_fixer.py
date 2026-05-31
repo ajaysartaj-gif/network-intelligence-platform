@@ -205,13 +205,16 @@ class NetworkFixer:
 
         # 2. Commands: prefer AI-generated (already safety-validated upstream),
         #    otherwise fall back to the built-in table.
-        if command_override and command_override.get("fix"):
+        #    Honor the override if it has EITHER fix OR diagnostic commands —
+        #    a read-only diagnostic query has fix=[] but a populated diagnostic
+        #    list, and must NOT fall back to the default 'show version'.
+        if command_override and (command_override.get("fix") or command_override.get("diagnostic")):
             commands = {
                 "diagnostic": command_override.get("diagnostic", []),
                 "fix": command_override.get("fix", []),
                 "verify": command_override.get("verify", []),
             }
-            _log("Using AI-generated remediation commands")
+            _log("Using AI-generated commands")
         else:
             commands = self._resolve_commands(anomaly_type, anomaly)
 
