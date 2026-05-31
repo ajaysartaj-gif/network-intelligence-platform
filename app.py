@@ -101,7 +101,7 @@ MODEL_NAME      = "anthropic/claude-3.5-sonnet"
 
 # Build version — bump this whenever code changes so we can confirm at a glance
 # in the running app that the latest deploy is actually live.
-BUILD_VERSION = "2026.05.31-ui-theme-12"
+BUILD_VERSION = "2026.05.31-nl-config-13"
 
 
 def _load_secrets_into_env() -> None:
@@ -1034,8 +1034,8 @@ elif workspace == "admin":
     st.markdown("## ⚙️ Administration")
     st.caption("Configure connection settings, credentials, thresholds, and system actions.")
 
-    tab_conn, tab_creds, tab_thresh, tab_actions = st.tabs(
-        ["Connection", "Credentials", "Thresholds", "System Actions"]
+    tab_conn, tab_creds, tab_thresh, tab_actions, tab_aicfg = st.tabs(
+        ["Connection", "Credentials", "Thresholds", "System Actions", "🧠 AI Config"]
     )
 
     # ── Connection tab ────────────────────────────────────────────────────────
@@ -1431,3 +1431,101 @@ else:
     c1.markdown("**🖥 Dashboard**\nLive NOC with device health cards and event feed")
     c2.markdown("**🔄 Workflows**\nApprove/reject fixes, watch 7-step pipeline")
     c3.markdown("**⚙️ Admin**\nConfigure tunnel, credentials, thresholds")
+
+    # ── AI Config tab (natural-language → router config, preview + approve) ────
+    with tab_aicfg:
+        st.markdown("### 🧠 Natural-Language Configuration")
+        st.caption(
+            "Describe what you want in plain English. The AI proposes Cisco IOS "
+            "commands, a safety filter blocks anything that could lock out or damage "
+            "the device, you preview the exact commands, then approve to apply to the router."
+        )
+        st.warning(
+            "Advanced feature. Commands run on the **live router** only after you click "
+            "Apply. Lockout/destructive commands (VTY ACLs, removing IPs, reload, "
+            "credential changes, etc.) are always blocked — no exceptions."
+        )
+
+        target_dev = st.text_input(
+            "Target device", value="R2",
+            help="Hostname as seen in logs. Connection uses the same tunnel settings as remediation.",
+        )
+        nl_request = st.text_area(
+            "What do you want to configure?",
+            placeholder="e.g. 'add description Uplink-to-core on GigabitEthernet1/0' or "
+                        "'enable OSPF process 1 and advertise 10.0.0.0/24 in area 0'",
+            height=80,
+        )
+
+        if st.button("🔍 Generate & Preview (no changes yet)", type="primary"):
+            if not nl_request.strip():
+                st.error("Please describe what you want to configure.")
+            else:
+                with st.spinner("Generating configuration and running safety checks..."):
+                    try:
+                        from core.ai_config import generate_config
+                        facts = ""
+                        try:
+                            facts = monitor._device_facts(target_dev.strip())
+                        except Exception:
+                            pass
+                        res = generate_config(nl_request.strip(), target_dev.strip(),
+                                              call_ai, facts)
+                    except Exception as e:
+                        res = {"status": "unavailable", "reasons": [str(e)],
+                               "commands": [], "summary": "", "blocked": []}
+                st.session_state["aicfg_result"] = res
+                st.session_state["aicfg_device"] = target_dev.strip()
+
+        res = st.session_state.get("aicfg_result")
+        if res:
+            status = res.get("status")
+            if status == "ok":
+                risk = res.get("risk", "unknown")
+                risk_icon = {"low": "🟢", "medium": "🟡", "high": "🟠"}.get(risk, "⚪")
+                st.success(f"✅ Safe configuration generated. Risk: {risk_icon} {risk}")
+                st.markdown(f"**What this does:** {res.get('summary','(no summary)')}")
+                st.markdown("**Commands to be applied (preview):**")
+                st.code("\n".join(res.get("commands", [])), language="text")
+                st.info("Review carefully. Click Apply only if this is exactly what you intend.")
+                if st.button("⚡ Apply to Router", type="primary", key="aicfg_apply"):
+                    with st.spinner(f"Applying configuration to {st.session_state.get('aicfg_device')}..."):
+                        try:
+                            cmds = res.get("commands", [])
+                            # Strip config-mode wrappers; NetworkFixer/netmiko adds them.
+                            inner = [c for c in cmds if c.lower() not in
+                                     ("configure terminal", "conf t", "end", "exit")]
+                            override = {"diagnostic": [], "fix": inner + ["end"], "verify": []}
+                            anomaly = {"device": st.session_state.get("aicfg_device"),
+                                       "type": "manual_config", "interface": ""}
+                            device_cfg = monitor._get_device_config(st.session_state.get("aicfg_device"))
+                            logs = []
+                            fr = fixer.fix(anomaly, device_config=device_cfg,
+                                           step_logger=lambda m: logs.append(m),
+                                           command_override=override)
+                        except Exception as e:
+                            fr = None
+                            logs = [f"Error: {e}"]
+                        if fr and getattr(fr, "success", False) and not getattr(fr, "simulated", True):
+                            st.success(f"✅ Applied LIVE to {st.session_state.get('aicfg_device')}.")
+                            st.code("\n".join(logs), language="text")
+                        elif fr and getattr(fr, "simulated", False):
+                            st.warning("⚠️ Ran in SIMULATION (no live tunnel). Router not changed. "
+                                       "Set GNS3_ROUTER_HOST/PORT/DEVICE_TYPE in Secrets.")
+                        else:
+                            st.error("❌ Apply failed.")
+                            st.code("\n".join(logs), language="text")
+                        st.session_state.pop("aicfg_result", None)
+            elif status == "unsafe":
+                st.error("❌ Blocked for safety — this request would run lockout/destructive commands.")
+                st.markdown("**Blocked commands:**")
+                st.code("\n".join(res.get("blocked", [])), language="text")
+                st.caption("Per policy, these are never applied. Rephrase to avoid changing "
+                           "management access, credentials, routing processes, or device state.")
+            elif status == "empty":
+                st.warning("The AI did not produce safe commands for this request.")
+                for r in res.get("reasons", []):
+                    st.caption(f"• {r}")
+            else:
+                st.error("AI unavailable. " + "; ".join(res.get("reasons", [])))
+                st.caption("Check that OPENROUTER_API_KEY is set in Secrets.")
