@@ -114,7 +114,7 @@ MODEL_NAME = _resolve_model()
 
 # Build version — bump this whenever code changes so we can confirm at a glance
 # in the running app that the latest deploy is actually live.
-BUILD_VERSION = "2026.05.31-diag-override-18"
+BUILD_VERSION = "2026.05.31-ai-interpret-19"
 
 
 def _load_secrets_into_env() -> None:
@@ -1550,14 +1550,49 @@ OPENROUTER_API_KEY = "your-key-here"
                                                command_override=override)
                             except Exception as e:
                                 fr, logs = None, [f"Error: {e}"]
-                            if fr and getattr(fr, "outputs", None):
-                                st.success("✅ Router output:")
-                                for cmd, outp in zip(getattr(fr, "commands_executed", []), fr.outputs):
-                                    st.markdown(f"`{cmd}`")
-                                    st.code(outp or "(no output)", language="text")
-                            elif fr and getattr(fr, "simulated", False):
-                                st.warning("⚠️ Ran in SIMULATION (no live tunnel).")
+                            # Detect simulation FIRST — don't show fake output as real.
+                            if fr and getattr(fr, "simulated", False):
+                                st.warning(
+                                    "⚠️ No live router connection — the tunnel is down "
+                                    "(sidebar shows 'waiting GNS3'). The output below would "
+                                    "be simulated/fake, so it's not shown. Start your Pinggy "
+                                    "tunnel and make sure GNS3_ROUTER_HOST/PORT in Secrets "
+                                    "match it, then try again."
+                                )
+                            elif fr and getattr(fr, "outputs", None):
+                                # Collect the REAL router output.
+                                pairs = list(zip(getattr(fr, "commands_executed", []), fr.outputs))
+                                raw_block = "\n\n".join(
+                                    f"$ {c}\n{o}" for c, o in pairs if o)
+
+                                # AI interpretation — explain what the output means.
+                                st.markdown("### 🤖 AI Analysis")
+                                with st.spinner("Analyzing the router output..."):
+                                    interp_prompt = (
+                                        "You are a senior Cisco network engineer. The operator "
+                                        f"asked: \"{nl_request.strip()}\".\n\n"
+                                        "Here is the ACTUAL output from the router:\n\n"
+                                        f"{raw_block}\n\n"
+                                        "Answer the operator's question directly and concisely in "
+                                        "plain English. State clearly whether things are OK or not, "
+                                        "what the key findings are, and any concern or next step. "
+                                        "Do not just repeat the raw output — interpret it."
+                                    )
+                                    try:
+                                        answer = call_ai(interp_prompt)
+                                    except Exception:
+                                        answer = ""
+                                if answer:
+                                    st.markdown(answer)
+                                else:
+                                    st.info("AI interpretation unavailable — showing raw output below.")
+
+                                with st.expander("📄 Raw router output"):
+                                    for c, o in pairs:
+                                        st.markdown(f"`{c}`")
+                                        st.code(o or "(no output)", language="text")
                             else:
+                                st.error("No output returned. Check tunnel/console.")
                                 st.code("\n".join(logs), language="text")
                             st.session_state.pop("aicfg_result", None)
                 else:
