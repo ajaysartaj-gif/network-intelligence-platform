@@ -146,12 +146,16 @@ class AutonomousMonitor:
                         anomalies.append(ga)
                         existing_sigs.add(gsig)
 
-            # 4b. Direct GNS3 SSH syslog (used when the lab is reachable).
-            for ga in self._poll_gns3_logs():
-                gsig = f"{ga.get('device')}:{ga.get('type')}"
-                if gsig not in existing_sigs:
-                    anomalies.append(ga)
-                    existing_sigs.add(gsig)
+            # 4b. Direct GNS3 SSH syslog (only when NOT in live-only mode).
+            #     In live-only mode the GitHub log is the sole source, so we must
+            #     NOT open an SSH session every cycle — doing so spams the router
+            #     console with 'SSH-2.0-paramiko' and corrupts the Telnet console.
+            if not LIVE_ONLY:
+                for ga in self._poll_gns3_logs():
+                    gsig = f"{ga.get('device')}:{ga.get('type')}"
+                    if gsig not in existing_sigs:
+                        anomalies.append(ga)
+                        existing_sigs.add(gsig)
 
             # ── 5. Kick off Phase 1 for new high/critical anomalies ──────────
             workflows_started = []
@@ -553,17 +557,26 @@ class AutonomousMonitor:
                 port = int(port_str)
             except ValueError:
                 port = 22
-            return {
-                "device_type": "cisco_ios",
+            device_type = (os.environ.get("GNS3_DEVICE_TYPE", "cisco_ios").strip()
+                           or "cisco_ios")
+            cfg: Dict[str, Any] = {
+                "device_type": device_type,
                 "host": host,
                 "port": port,
-                "username": username or "admin",
                 "password": password or "admin",
+                "secret": password or "admin",
                 "timeout": 90,
                 "auth_timeout": 90,
                 "fast_cli": False,
                 "_device_name": f"gns3-{host}",
             }
+            if device_type.endswith("_telnet"):
+                tu = os.environ.get("GNS3_TELNET_USER", "").strip()
+                if tu:
+                    cfg["username"] = tu
+            else:
+                cfg["username"] = username or "admin"
+            return cfg
 
         # Fallback: ask gns3 engine for the first available node's console config
         try:
