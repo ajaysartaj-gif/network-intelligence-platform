@@ -5,8 +5,13 @@ Network simulation engine for realistic enterprise topology and state simulation
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any
+import os
 import random
 from datetime import datetime
+
+# Live-only mode: do not generate any simulated devices or anomalies.
+# Set NETBRAIN_LIVE_ONLY=0 to re-enable the built-in demo topology.
+LIVE_ONLY = os.environ.get("NETBRAIN_LIVE_ONLY", "1").strip().lower() not in ("0", "false", "no")
 
 
 @dataclass
@@ -77,7 +82,8 @@ class SimulationEngine:
         self.workflow_stage: int = 0  # Track the cascading workflow stage
         self.workflow_active: bool = True  # Continuous workflow flag
         self.last_stage_change: int = 0  # Track when we last changed stages
-        self._initialize_enterprise_topology()
+        if not LIVE_ONLY:
+            self._initialize_enterprise_topology()
 
     # ═══════════════════════════════════════════════════════════════
     # TOPOLOGY INITIALIZATION
@@ -246,6 +252,10 @@ class SimulationEngine:
             "updates": [],
             "anomalies": [],
         }
+
+        if LIVE_ONLY:
+            # No simulated activity in live-only mode.
+            return changes
 
         # Continuous cascading workflow: Packet Loss → WAN Latency → BGP Instability → Voice Degradation → Critical Incident
         if self.workflow_active:
@@ -466,96 +476,6 @@ class SimulationEngine:
 
     def _simulate_anomaly(self) -> Optional[Dict[str, Any]]:
         """Simulate a network anomaly (legacy method)."""
-        anomaly_types = [
-            "cpu_spike",
-            "memory_exhaustion",
-            "interface_flap",
-            "packet_loss",
-            "latency_spike",
-            "bgp_instability",
-            "wan_degradation",
-        ]
-        
-        anomaly_type = random.choice(anomaly_types)
-        device = random.choice(list(self.devices.values()))
-        
-        if anomaly_type == "cpu_spike":
-            device.cpu = min(98, device.cpu + random.uniform(20, 40))
-            return {
-                "type": "cpu_spike",
-                "device": device.hostname,
-                "value": device.cpu,
-                "severity": "high" if device.cpu > 85 else "medium",
-            }
-        
-        elif anomaly_type == "memory_exhaustion":
-            device.memory = min(98, device.memory + random.uniform(15, 35))
-            return {
-                "type": "memory_exhaustion",
-                "device": device.hostname,
-                "value": device.memory,
-                "severity": "high" if device.memory > 85 else "medium",
-            }
-        
-        elif anomaly_type == "interface_flap":
-            if device.interfaces:
-                iface = random.choice(device.interfaces)
-                iface["status"] = "down"
-                return {
-                    "type": "interface_flap",
-                    "device": device.hostname,
-                    "interface": iface["name"],
-                    "severity": "high",
-                }
-        
-        elif anomaly_type == "packet_loss":
-            if device.interfaces:
-                iface = random.choice(device.interfaces)
-                loss = random.uniform(1, 10)
-                return {
-                    "type": "packet_loss",
-                    "device": device.hostname,
-                    "interface": iface["name"],
-                    "loss_pct": loss,
-                    "severity": "high" if loss > 5 else "medium",
-                }
-        
-        elif anomaly_type == "latency_spike":
-            latency = random.uniform(50, 200)
-            return {
-                "type": "latency_spike",
-                "device": device.hostname,
-                "latency_ms": latency,
-                "severity": "medium" if latency < 100 else "high",
-            }
-        
-        elif anomaly_type == "bgp_instability":
-            if device.bgp_sessions:
-                session = random.choice(device.bgp_sessions)
-                session["state"] = "Idle"
-                return {
-                    "type": "bgp_instability",
-                    "device": device.hostname,
-                    "peer": session.get("peer_ip"),
-                    "severity": "high",
-                }
-        
-        elif anomaly_type == "wan_degradation":
-            wan_link = next(
-                (l for l in self.links if "wan" in l.source.lower() or "wan" in l.destination.lower()),
-                None,
-            )
-            if wan_link:
-                wan_link.current_latency_ms = min(wan_link.max_latency_ms, wan_link.current_latency_ms + 100)
-                return {
-                    "type": "wan_degradation",
-                    "link": f"{wan_link.source}→{wan_link.destination}",
-                    "latency_ms": wan_link.current_latency_ms,
-                    "severity": "high",
-                }
-        
-        return None
-        """Simulate a network anomaly."""
         anomaly_types = [
             "cpu_spike",
             "memory_exhaustion",

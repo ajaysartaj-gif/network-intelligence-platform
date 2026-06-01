@@ -1,142 +1,153 @@
-
 """
-NetBrain AI — Stable Edition
+NetBrain AI — Enterprise Autonomous Network Operations Platform
+===============================================================
+Every network issue is detected, analyzed, fixed, and verified automatically.
+The full remediation pipeline is visible step-by-step in real time.
 """
 
-# =========================================================
-# STREAMLIT CONFIG (MUST BE FIRST)
-# =========================================================
-
+# ── MUST BE FIRST ────────────────────────────────────────────────────────────
 import streamlit as st
 
 st.set_page_config(
-    page_title="NetBrain AI",
+    page_title="NetBrain AI — Autonomous NOC",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# =========================================================
-# IMPORTS
-# =========================================================
-
+# ── IMPORTS ───────────────────────────────────────────────────────────────────
 import os
-from core.ai_engine import ask_ai, get_api_key
-from core.orchestration_engine import OperationsOrchestrator
 import time
-import random
 import logging
-from typing import List, Dict
+import random
 from datetime import datetime
+from typing import List, Dict, Any, Optional
 
 import pandas as pd
 
-# =========================================================
-# SAFE OPTIONAL IMPORTS
-# =========================================================
+# ── LOGGING ───────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+logger = logging.getLogger(__name__)
 
+# ── OPTIONAL IMPORTS ──────────────────────────────────────────────────────────
 OPENAI_AVAILABLE = False
-
 try:
     from openai import OpenAI
     OPENAI_AVAILABLE = True
-except Exception:
-    OPENAI_AVAILABLE = False
-
-# =========================================================
-# LOGGING
-# =========================================================
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
-
-logger = logging.getLogger(__name__)
-
-# =========================================================
-# SAFE DATABASE IMPORTS
-# =========================================================
+except ImportError:
+    pass
 
 DATABASE_AVAILABLE = False
-
 try:
-    from database.database import (
-        seed_database,
-        get_devices,
-        get_incidents,
-        get_changes,
-        get_auto_actions,
-    )
-
+    from database.database import seed_database, get_devices, get_incidents
     DATABASE_AVAILABLE = True
-
 except Exception as e:
     logger.warning(f"Database import failed: {e}")
-    DATABASE_AVAILABLE = False
 
-# =========================================================
-# WORKSPACES
-# =========================================================
-
+# ── WORKSPACES ────────────────────────────────────────────────────────────────
 try:
     from config.workspaces import WORKSPACES
 except Exception:
     WORKSPACES = [
-        ("operations", "⚡", "Operations"),
-        ("incident", "🚨", "Incidents"),
-        ("topology", "🗺", "Topology"),
-        ("security", "🔒", "Security"),
-        ("executive", "📈", "Executive"),
+        ("Net Ops",      "⚡",  "NOC Operations"),
+        ("Workflows",    "🤖",  "AI Action"),
+        ("incident",     "🚨",  "Incident Room"),
+        ("topology",     "🗺",  "Network Topology"),
+        ("Observability","📡",  "Observability"),
+        ("security",     "🔒",  "Security"),
+        ("executive",    "📈",  "Executive"),
     ]
 
-# =========================================================
-# SESSION STATE
-# =========================================================
-
-DEFAULTS = {
-    "workspace": "Net Ops",
-    "chat_history": [],
-    "live_alerts": [],  # Live operational alerts
-    "last_telemetry_hash": None,  # For change detection
-    "incident_timeline": [],  # Live incident timeline
-    "ai_rca_active": False,  # AI RCA in progress
-    "ai_rca_steps": [],  # Progressive RCA steps
-    "live_event_feed": [],  # Continuous operational event feed
-    "last_anomaly_signatures": [],  # Anomaly signatures for recovery detection
-    "recovery_timeline": [],  # Recovery event stream
-    "remediation_workflow": {},  # Closed-loop remediation workflow state
-    "remediation_actions": [],  # Recommended remediation actions
-    "validation_commands": [],  # Recovery validation commands
-    "recovery_confidence": 0,  # Confidence for validation
-    "stabilization_status": "idle",
+# ── SESSION STATE DEFAULTS ────────────────────────────────────────────────────
+_DEFAULTS = {
+    "workspace":               "Net Ops",
+    "live_alerts":             [],
+    "last_telemetry_hash":     None,
+    "incident_timeline":       [],
+    "ai_rca_steps":            [],
+    "ai_rca_active":           False,
+    "live_event_feed":         [],
+    "last_anomaly_signatures": [],
+    "recovery_timeline":       [],
+    "remediation_workflow":    {},
+    "remediation_actions":     [],
+    "validation_commands":     [],
+    "recovery_confidence":     0,
+    "stabilization_status":    "idle",
+    "last_poll_time":          0.0,
+    "cycle_count":             0,
+    "total_anomalies_seen":    0,
+    "total_incidents_created": 0,
+    "total_fixes_executed":    0,
+    "selected_device":         None,
 }
+for k, v in _DEFAULTS.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
-for key, value in DEFAULTS.items():
-    if key not in st.session_state:
-        st.session_state[key] = value
-
-# =========================================================
-# DATABASE INIT
-# =========================================================
-
+# ── DATABASE INIT ─────────────────────────────────────────────────────────────
 if DATABASE_AVAILABLE:
     try:
         seed_database()
     except Exception as e:
-        logger.warning(f"Database seed failed: {e}")
+        logger.warning(f"DB seed failed: {e}")
 
-orchestrator = OperationsOrchestrator()
-
-# =========================================================
-# AI CONFIG
-# =========================================================
-
+# ── AI CONFIG (must be defined before _get_monitor references call_ai) ────────
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
-MODEL_NAME = "anthropic/claude-3.5-sonnet"
+# Free model by default (no cost, no credit card). Override via the
+# OPENROUTER_MODEL secret if you want a different one. ':free' models and the
+# 'openrouter/free' auto-router are free on OpenRouter.
+def _resolve_model() -> str:
+    try:
+        import streamlit as _st
+        m = _st.secrets.get("OPENROUTER_MODEL", "")
+    except Exception:
+        m = ""
+    if not m:
+        m = os.environ.get("OPENROUTER_MODEL", "")
+    return (m or "deepseek/deepseek-chat-v3-0324:free").strip()
+
+MODEL_NAME = _resolve_model()
+
+# Build version — bump this whenever code changes so we can confirm at a glance
+# in the running app that the latest deploy is actually live.
+BUILD_VERSION = "2026.05.31-tunnel-logs-20"
 
 
-def get_api_key():
+def _load_secrets_into_env() -> None:
+    """
+    Streamlit Secrets are NOT automatically environment variables. The network
+    fixer and log engine read os.environ, so we must copy the relevant secrets
+    into os.environ at startup. Without this, settings like GNS3_DEVICE_TYPE are
+    silently ignored and the fixer falls back to SSH (cisco_ios), producing the
+    'SSH-2.0-paramiko' error against a Telnet console.
+    Existing os.environ values (e.g. set via the Admin UI) take precedence.
+    """
+    keys = [
+        "GNS3_TUNNEL_URL", "GNS3_ROUTER_HOST", "GNS3_ROUTER_PORT",
+        "GNS3_DEVICE_TYPE", "GNS3_SSH_USER", "GNS3_SSH_PASS", "GNS3_SSH_SECRET",
+        "GNS3_TELNET_USER", "GNS3_ROUTER_USER", "GNS3_ROUTER_PASS",
+        "GNS3_LOG_GITHUB_URL", "GNS3_LOG_DEFAULT_DEVICE", "GNS3_LOG_GITHUB_TOKEN",
+        "NETBRAIN_LIVE_ONLY", "OPENROUTER_API_KEY",
+    ]
+    for k in keys:
+        try:
+            val = st.secrets.get(k, None)
+        except Exception:
+            val = None
+        # Only fill from secrets if not already set in the environment.
+        if val is not None and str(val).strip() and not os.environ.get(k):
+            os.environ[k] = str(val).strip()
+
+
+# Copy secrets → env BEFORE any engine/monitor is constructed.
+_load_secrets_into_env()
+
+
+def _resolve_api_key() -> str:
     try:
         return st.secrets.get("OPENROUTER_API_KEY", "")
     except Exception:
@@ -144,924 +155,1518 @@ def get_api_key():
 
 
 @st.cache_resource
-
-def get_ai_client():
+def _get_ai_client():
     if not OPENAI_AVAILABLE:
         return None
-
-    key = get_api_key()
-
+    key = _resolve_api_key()
     if not key:
         return None
-
     try:
-        return OpenAI(
-            api_key=key,
-            base_url=OPENROUTER_BASE,
-        )
+        return OpenAI(api_key=key, base_url=OPENROUTER_BASE)
     except Exception:
         return None
 
 
-SYSTEM_PROMPT = """
-You are NetBrain AI.
-You are an enterprise network operations assistant.
-Focus on troubleshooting, root cause analysis,
-and operational guidance.
-"""
-
-
-def call_ai(user_query: str):
-    if not OPENAI_AVAILABLE:
-        return "AI unavailable: OpenAI library not installed."
-    
-    api_key = get_api_key()
-    if not api_key:
-        return "AI unavailable: OPENROUTER_API_KEY not configured."
-    
-    client = get_ai_client()
-    if client is None:
-        return "AI unavailable: Failed to initialize client."
-
+def call_ai(prompt: str) -> str:
+    client = _get_ai_client()
+    if not client:
+        return ""
     try:
-        response = client.chat.completions.create(
+        resp = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[
-                {
-                    "role": "system",
-                    "content": SYSTEM_PROMPT,
-                },
-                {
-                    "role": "user",
-                    "content": user_query,
-                }
+                {"role": "system", "content": (
+                    "You are NetBrain AI — an expert autonomous network operations system. "
+                    "Be concise, technical, and action-oriented. Focus on root cause and fix steps."
+                )},
+                {"role": "user", "content": prompt},
             ],
             max_tokens=1200,
-            temperature=0.2,
+            temperature=0.1,
         )
-
-        return response.choices[0].message.content
-
+        return resp.choices[0].message.content
     except Exception as e:
-        return f"AI Error: {str(e)}"
+        logger.warning(f"AI call failed: {e}")
+        return ""
 
 
-# =========================================================
-# LIVE OPERATIONAL ENGINE
-# =========================================================
-
-def _anomaly_signature(anomaly: dict) -> str:
-    """Create a compact signature for an anomaly to support recovery detection."""
-    return f"{anomaly.get('device', 'unknown')}:{anomaly.get('type', 'unknown')}"
-
-
-def _resolve_incidents_for_device(device: str) -> None:
-    """Resolve open incidents when device anomalies clear."""
-    for inc_id, inc in orchestrator.state.get_all_incidents().items():
-        if device in inc.get("affected_devices", []) and inc["status"] in {"new", "investigating"}:
-            orchestrator.state.update_incident(inc_id, status="resolved", note="Recovery confirmed by live telemetry.")
-            st.session_state["incident_timeline"].insert(0, {
-                "timestamp": datetime.utcnow().isoformat(),
-                "event": f"Incident {inc_id} resolved",
-                "details": f"Recovery confirmed for device {device}",
-                "severity": "recovery",
-            })
-
-
-def _process_recovery_events(current_anomalies: List[dict]) -> None:
-    """Detect cleared anomaly signatures and generate recovery events."""
-    current_signatures = {_anomaly_signature(a) for a in current_anomalies}
-    previous_signatures = set(st.session_state.get("last_anomaly_signatures", []))
-    removed = previous_signatures - current_signatures
-
-    for signature in removed:
-        device, event_type = signature.split(":", 1) if ":" in signature else (signature, "unknown")
-        message = f"Recovery confirmed: {event_type.replace('_', ' ').title()} on {device}"
-        add_live_alert("recovery", message, {"device": device, "type": event_type})
-        st.session_state["recovery_timeline"].insert(0, {
-            "timestamp": datetime.utcnow().isoformat(),
-            "event": message,
-            "type": "recovery",
-            "details": "Telemetry indicates the issue has cleared.",
-        })
-        _resolve_incidents_for_device(device)
-
-    st.session_state["last_anomaly_signatures"] = list(current_signatures)
-
-
-def _fetch_device_interface_issues(device: str) -> List[dict]:
-    """Fetch current down or degraded interfaces for a device."""
-    inventory = orchestrator.telemetry.current_interface_inventory.get(device, {})
-    return [iface for iface in inventory.values() if iface.get("status") != "up"]
-
-
-def _build_validation_commands(anomaly: dict) -> List[str]:
-    """Build safe validation commands for the remediation center."""
-    device = anomaly.get("device", "unknown")
-    commands = [
-        "show interfaces status | include down",
-        "show ip route summary",
-        "show ip bgp summary",
-        "show ip ospf neighbor",
-        "show logging | include ERROR",
-    ]
-
-    if anomaly["type"] == "interface_down":
-        down_ifaces = _fetch_device_interface_issues(device)
-        if down_ifaces:
-            commands = [f"show interfaces {iface['name']} status" for iface in down_ifaces] + commands
-        else:
-            commands.insert(0, "show interfaces status | include down")
-    elif anomaly["type"] == "device_unreachable":
-        commands = ["show management status", f"show ip route | include {device}"] + commands
-    elif anomaly["type"] == "bgp_instability":
-        commands = ["show ip bgp neighbors", "show ip bgp summary"] + commands
-    elif anomaly["type"] == "packet_loss":
-        commands = ["show interfaces description", "show interfaces counters errors"] + commands
-    elif anomaly["type"] == "latency_spike":
-        commands = ["show interfaces accounting", "show controllers | include line protocol"] + commands
-
-    return commands
-
-
-def _build_closed_loop_remediation(incident_id: str, anomaly: dict) -> dict:
-    """Compose a safe remediation workflow for the given incident."""
-    device = anomaly.get("device", "unknown")
-    device_metrics = orchestrator.state.get_device_metrics(device)
-    device_state = vars(device_metrics) if device_metrics else {"hostname": device, "status": "unknown"}
-    device_state["status"] = "healthy" if getattr(device_metrics, "reachable", True) else "degraded"
-
-    alert_payload = {
-        "device": device,
-        "alert_type": anomaly.get("type", "operational"),
-        "severity": anomaly.get("severity", "high"),
-        "description": anomaly.get("description", ""),
-    }
-
-    remediation_actions = orchestrator.recommend_remediation([alert_payload], [device_state])
-    safe_actions = []
-    for action in remediation_actions:
-        if orchestrator.self_heal.validate_remediation(action, device_state):
-            simulated = orchestrator.self_heal.simulate_auto_remediation(action, approve=True)
-            safe_actions.append({
-                "action_id": simulated.action_id,
-                "description": simulated.description,
-                "risk": simulated.risk,
-                "approved": simulated.approved,
-                "executed": simulated.executed,
-                "comments": simulated.approval_comments,
-            })
-        else:
-            safe_actions.append({
-                "action_id": action.action_id,
-                "description": action.description,
-                "risk": action.risk,
-                "approved": False,
-                "executed": False,
-                "comments": "Remediation simulation deferred due to elevated risk.",
-            })
-
-    validation_commands = _build_validation_commands(anomaly)
-    workflow = {
-        "incident_id": incident_id,
-        "device": device,
-        "anomaly_type": anomaly.get("type", "unknown"),
-        "status": "in_progress",
-        "current_step": "Telemetry Validation",
-        "steps": [
-            {"name": "Telemetry Validation", "status": "completed", "note": "Collected interface, routing, and adjacency state."},
-            {"name": "Operational Correlation", "status": "completed", "note": "Correlated failure across device state and service impact."},
-            {"name": "AI RCA", "status": "completed", "note": "Root-cause summary prepared for remediation."},
-            {"name": "Recovery Recommendation", "status": "completed", "note": "Safe remediation actions recommended."},
-            {"name": "Recovery Validation", "status": "pending", "note": "Awaiting telemetry verification after corrective guidance."},
-            {"name": "Incident Closure", "status": "pending", "note": "Will close incident after successful validation."},
-        ],
-        "validation_commands": validation_commands,
-        "recommended_actions": safe_actions,
-        "confidence": 0,
-        "notes": [
-            f"Autonomous remediation workflow started for {device}.",
-        ],
-    }
-
-    st.session_state["remediation_actions"] = safe_actions
-    st.session_state["validation_commands"] = validation_commands
-    st.session_state["remediation_workflow"] = workflow
-    st.session_state["recovery_confidence"] = 0
-    st.session_state["stabilization_status"] = "in_progress"
-
-    return workflow
-
-
-def _update_remediation_workflow(incident: dict, anomaly: dict, telemetry_data: dict) -> None:
-    workflow = st.session_state.get("remediation_workflow", {})
-    if not workflow or workflow.get("incident_id") != incident["id"]:
-        return
-
-    validation_anomalies = orchestrator.telemetry.detect_anomalies()
-    device = workflow.get("device")
-    relevant_anomalies = [a for a in validation_anomalies if a.get("device") == device and a.get("type") == workflow.get("anomaly_type")]
-    recovered = len(relevant_anomalies) == 0
-
-    if recovered:
-        workflow["steps"][-2]["status"] = "completed"
-        workflow["steps"][-2]["note"] = "Recovery validation confirmed by telemetry."
-        workflow["steps"][-1]["status"] = "completed"
-        workflow["steps"][-1]["note"] = "Incident closed automatically after successful recovery verification."
-        workflow["status"] = "completed"
-        workflow["current_step"] = "Completed"
-        workflow["confidence"] = 92
-        st.session_state["stabilization_status"] = "stabilized"
-        orchestrator.state.update_incident(incident["id"], status="resolved", note="Incident closed after automated recovery validation.")
-        add_live_alert("recovery", f"Automated recovery verified for {device}", {"device": device, "type": workflow.get("anomaly_type")})
-        st.session_state["incident_timeline"].insert(0, {
-            "timestamp": datetime.utcnow().isoformat(),
-            "event": f"Automated recovery validated for {device}",
-            "details": "Platform confirmed restoration and closed the incident.",
-            "severity": "recovery",
-        })
-    else:
-        workflow["steps"][-2]["status"] = "in_progress"
-        workflow["current_step"] = "Recovery Validation"
-        workflow["confidence"] = max(20, min(85, 50 + len(workflow.get("recommended_actions", [])) * 10))
-        if "Waiting for telemetry to confirm issue clearance." not in workflow["notes"]:
-            workflow["notes"].append("Waiting for telemetry to confirm issue clearance.")
-        st.session_state["stabilization_status"] = "validating"
-
-    st.session_state["remediation_workflow"] = workflow
-
-
-def _attempt_autonomous_recovery(anomalies: List[dict], telemetry_data: dict) -> None:
-    """Start or continue closed-loop remediation for open incidents."""
-    open_incidents = [inc for inc in orchestrator.state.get_all_incidents().values() if inc["status"] in {"new", "investigating"}]
-    if not open_incidents:
-        return
-
-    primary_incident = open_incidents[0]
-    workflow = st.session_state.get("remediation_workflow", {})
-    if workflow.get("status") == "completed" and workflow.get("incident_id") == primary_incident["id"]:
-        return
-
-    related_anomaly = next((a for a in anomalies if a.get("device") in primary_incident.get("affected_devices", [])), anomalies[0] if anomalies else None)
-    if not related_anomaly:
-        return
-
-    if not workflow or workflow.get("incident_id") != primary_incident["id"]:
-        _build_closed_loop_remediation(primary_incident["id"], related_anomaly)
-        st.session_state["incident_timeline"].insert(0, {
-            "timestamp": datetime.utcnow().isoformat(),
-            "event": "Autonomous remediation workflow started",
-            "details": f"Started safe recovery orchestration for {related_anomaly.get('device', 'unknown')}",
-            "severity": "high",
-        })
-
-    _update_remediation_workflow(primary_incident, related_anomaly, telemetry_data)
-
-
-def poll_live_telemetry():
-    """Poll live telemetry and detect operational changes."""
+def diagnose_ai() -> dict:
+    """Make a real OpenRouter call and return the ACTUAL reason the AI isn't
+    working (bad key, no credits, wrong model) instead of a swallowed error."""
+    if not OPENAI_AVAILABLE:
+        return {"ok": False, "stage": "library",
+                "detail": "The 'openai' python package isn't installed."}
+    key = _resolve_api_key()
+    if not key:
+        return {"ok": False, "stage": "key",
+                "detail": "OPENROUTER_API_KEY is empty. Add it to Secrets and reboot."}
+    masked = key[:8] + "…" + key[-4:] if len(key) > 14 else "set"
     try:
-        telemetry_data = orchestrator.telemetry.collect_all_telemetry()
-        current_hash = hash(str(telemetry_data))
-        last_hash = st.session_state.get("last_telemetry_hash")
-        anomalies = orchestrator.telemetry.detect_anomalies()
-
-        if last_hash is None or current_hash != last_hash:
-            st.session_state["last_telemetry_hash"] = current_hash
-            incident_ids = orchestrator.events.process_anomalies(anomalies)
-            _process_recovery_events(anomalies)
-            st.session_state["live_event_feed"] = orchestrator.events.get_event_history(limit=20)
-
-            if incident_ids:
-                event_history = orchestrator.events.get_event_history(limit=15)
-                timeline_entries = [
-                    {
-                        "timestamp": event.get("timestamp"),
-                        "event": event.get("type", "unknown").replace("_", " ").title(),
-                        "details": event.get("description", ""),
-                        "severity": event.get("severity", "info"),
-                    }
-                    for event in event_history[-15:]
-                ]
-                st.session_state["incident_timeline"] = list(reversed(timeline_entries))
-
-        _attempt_autonomous_recovery(anomalies, telemetry_data)
-        return telemetry_data
-    except Exception as e:
-        logger.error(f"Live telemetry poll failed: {e}")
-        return {}
-
-
-def detect_operational_changes(telemetry_data):
-    """Detect operational changes and generate live events."""
-    anomalies = orchestrator.telemetry.detect_anomalies()
-    incident_ids = orchestrator.events.process_anomalies(anomalies)
-
-    for anomaly in anomalies:
-        if anomaly.get("severity") in ["critical", "high"]:
-            add_live_alert(
-                anomaly["severity"],
-                f"{anomaly['type'].replace('_', ' ').title()} on {anomaly.get('device', 'unknown')}",
-                anomaly,
-            )
-
-    if incident_ids:
-        event_history = orchestrator.events.get_event_history(limit=15)
-        timeline_entries = [
-            {
-                "timestamp": event.get("timestamp"),
-                "event": event.get("type", "unknown").replace("_", " ").title(),
-                "details": event.get("description", ""),
-                "severity": event.get("severity", "info"),
-            }
-            for event in event_history[-15:]
-        ]
-        st.session_state["incident_timeline"] = list(reversed(timeline_entries))
-
-    return incident_ids
-
-
-def add_live_alert(severity: str, message: str, anomaly: dict):
-    """Add a live operational alert."""
-    alert = {
-        "timestamp": datetime.utcnow().isoformat(),
-        "severity": severity,
-        "message": message,
-        "anomaly": anomaly,
-        "id": f"alert_{int(time.time() * 1000)}"
-    }
-    st.session_state["live_alerts"].insert(0, alert)
-
-    # Keep only recent alerts
-    if len(st.session_state["live_alerts"]) > 10:
-        st.session_state["live_alerts"] = st.session_state["live_alerts"][:10]
-
-
-def create_live_incident(anomaly: dict):
-    """Create incident from operational anomaly."""
-    try:
-        incident_id = f"INC-{int(time.time())}"
-        affected_devices = [anomaly["device"]] if anomaly.get("device") else []
-        impacted_services = orchestrator.state.calculate_service_impact(affected_devices).get("impacted_services", [])
-
-        orchestrator.state.create_incident(
-            incident_id=incident_id,
-            title=f"Critical: {anomaly['type'].replace('_', ' ').title()}",
-            description=anomaly.get("description", f"Operational anomaly detected: {anomaly['type']}"),
-            severity=anomaly["severity"],
-            affected_devices=affected_devices,
-            affected_services=impacted_services,
+        client = OpenAI(api_key=key, base_url=OPENROUTER_BASE)
+        resp = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "Reply with exactly: OK"}],
+            max_tokens=10, temperature=0,
         )
-
-        timeline_entry = {
-            "timestamp": datetime.utcnow().isoformat(),
-            "event": f"Incident {incident_id} created",
-            "type": "incident_created",
-            "details": f"Critical incident from {anomaly['type']} on {anomaly.get('device', 'unknown')}"
-        }
-        st.session_state["incident_timeline"].insert(0, timeline_entry)
-
-        start_ai_rca(incident_id, anomaly)
-
+        return {"ok": True, "stage": "done",
+                "detail": f"Model responded: {resp.choices[0].message.content!r}",
+                "model": MODEL_NAME, "key": masked}
     except Exception as e:
-        logger.error(f"Failed to create live incident: {e}")
+        return {"ok": False, "stage": "request",
+                "detail": f"{type(e).__name__}: {e}", "model": MODEL_NAME, "key": masked}
+
+# ── PINGPY / TUNNEL CONFIG ────────────────────────────────────────────────────
+
+def _resolve_gns3_endpoint() -> tuple:
+    """
+    Returns (host, port) for GNS3.
+    Priority: GNS3_TUNNEL_URL secret/env → localhost:3080.
+    GNS3_TUNNEL_URL examples: abc123.pinggy.io:12345  or  https://abc123.pinggy.io
+    """
+    try:
+        raw = st.secrets.get("GNS3_TUNNEL_URL", "")
+    except Exception:
+        raw = ""
+    if not raw:
+        raw = os.environ.get("GNS3_TUNNEL_URL", "")
+
+    if raw:
+        raw = raw.strip().rstrip("/")
+        for scheme in ("https://", "http://"):
+            if raw.startswith(scheme):
+                raw = raw[len(scheme):]
+                break
+        if ":" in raw:
+            host, port_str = raw.rsplit(":", 1)
+            try:
+                return host, int(port_str)
+            except ValueError:
+                return raw, 443
+        return raw, 443
+
+    return "localhost", 3080
 
 
-def _build_local_rca_summary(incident_id: str, anomaly: dict) -> str:
-    """Build a structured operational RCA summary when AI is limited."""
-    device = anomaly.get("device", "unknown")
-    metrics = orchestrator.state.get_device_metrics(device)
-    impacted_services = orchestrator.state.calculate_service_impact([device]).get("impacted_services", [])
-    service_text = ", ".join(impacted_services) if impacted_services else "None identified"
-    severity = anomaly.get("severity", "high").upper()
-    root_cause = "Correlated network degradation detected."
+def _check_tunnel_and_reconnect() -> bool:
+    """Returns True if GNS3 became newly reachable this call."""
+    host, port = _resolve_gns3_endpoint()
+    gns3 = getattr(orchestrator, "gns3", None)
+    if gns3 is None:
+        return False
 
-    if anomaly["type"] == "interface_down":
-        root_cause = "Interface operational failure on device causing path degradation and packet loss."
-    elif anomaly["type"] == "device_unreachable":
-        root_cause = "Device unreachable, causing routing and service path disruption."
-    elif anomaly["type"] == "bgp_instability":
-        root_cause = "BGP neighbor instability causing routing convergence issues."
-    elif anomaly["type"] == "latency_spike":
-        root_cause = "WAN path degradation causing elevated latency and retransmissions."
+    current_url = f"http://{host}:{port}/v2"
+    if gns3.base_url != current_url:
+        gns3.base_url = current_url
+        gns3.available = False
 
-    return (
-        "Operational Summary:\n"
-        f"Device: {device}\n"
-        f"Severity: {severity}\n"
-        f"Impacted Services: {service_text}\n"
-        f"Root Cause: {root_cause}\n"
-        "Recommended Actions: Validate interface state, confirm routing adjacency, and isolate the impacted WAN path.\n"
-        "Recovery Validation Steps: Confirm interface status, verify BGP adjacency, validate traffic forwarding, and recheck service reachability."
+    was_available = gns3.available
+    if not gns3.available:
+        gns3._check_connectivity()
+
+    newly_connected = (not was_available) and gns3.available
+    if newly_connected:
+        gns3.refresh()
+        logger.info(f"GNS3 tunnel connected: {current_url}")
+    return newly_connected
+
+# ── ORCHESTRATOR (singleton — survives reruns) ─────────────────────────────────
+@st.cache_resource
+def _get_orchestrator():
+    from core.orchestration_engine import OperationsOrchestrator
+    orc = OperationsOrchestrator()
+    try:
+        from core.gns3_engine import GNS3Engine
+        host, port = _resolve_gns3_endpoint()
+        orc.gns3 = GNS3Engine(host=host, port=port)
+    except Exception as e:
+        logger.warning(f"GNS3 engine init failed: {e}")
+        orc.gns3 = None
+    return orc
+
+@st.cache_resource
+def _get_workflow_tracker():
+    from core.workflow_tracker import WorkflowTracker
+    return WorkflowTracker(max_history=100)
+
+@st.cache_resource
+def _get_network_fixer(_orchestrator):
+    from core.network_fixer import NetworkFixer
+    try:
+        gns3 = getattr(_orchestrator, "gns3", None)
+    except Exception:
+        gns3 = None
+    return NetworkFixer(gns3_engine=gns3)
+
+@st.cache_resource
+def _get_monitor(_orchestrator, _tracker, _fixer):
+    from core.autonomous_monitor import AutonomousMonitor
+    # call_ai is defined above — safe to reference here
+    return AutonomousMonitor(
+        orchestrator=_orchestrator,
+        workflow_tracker=_tracker,
+        network_fixer=_fixer,
+        ai_call_fn=call_ai,
     )
 
+orchestrator = _get_orchestrator()
+tracker      = _get_workflow_tracker()
+fixer        = _get_network_fixer(orchestrator)
+monitor      = _get_monitor(orchestrator, tracker, fixer)
 
-def start_ai_rca(incident_id: str, anomaly: dict):
-    """Start autonomous AI RCA workflow."""
-    st.session_state["ai_rca_active"] = True
-    st.session_state["ai_rca_steps"] = []
+# ── ALERT HELPERS ─────────────────────────────────────────────────────────────
 
-    steps = [
-        "Analyzing telemetry data...",
-        "Validating interface state...",
-        "Checking routing state...",
-        "Validating neighboring links...",
-        "Checking BGP adjacency...",
-        "Correlating operational failures...",
-        "Generating root cause analysis...",
-        "Generating remediation recommendations..."
-    ]
+def add_live_alert(severity: str, message: str, anomaly: dict) -> None:
+    alert = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "severity":  severity,
+        "message":   message,
+        "anomaly":   anomaly,
+        "id":        f"ALT-{datetime.utcnow().strftime('%H%M%S%f')}",
+    }
+    st.session_state["live_alerts"].insert(0, alert)
+    st.session_state["live_alerts"] = st.session_state["live_alerts"][:15]
 
-    for step in steps:
-        st.session_state["ai_rca_steps"].append({
-            "timestamp": datetime.utcnow().isoformat(),
-            "step": step,
-            "status": "in_progress"
-        })
-        time.sleep(0.4)
 
+def _process_recovery(current_anomalies: list) -> None:
+    current_sigs  = {f"{a.get('device')}:{a.get('type')}" for a in current_anomalies}
+    previous_sigs = set(st.session_state.get("last_anomaly_signatures", []))
+    cleared       = previous_sigs - current_sigs
+    for sig in cleared:
+        device, atype = sig.split(":", 1) if ":" in sig else (sig, "unknown")
+        msg = f"Recovery confirmed: {atype.replace('_', ' ').title()} cleared on {device}"
+        add_live_alert("recovery", msg, {"device": device, "type": atype})
+        # Auto-resolve matching incidents
+        for inc_id, inc in orchestrator.state.get_all_incidents().items():
+            if device in inc.get("affected_devices", []) and inc["status"] in {"new", "investigating"}:
+                orchestrator.state.update_incident(
+                    inc_id, status="resolved",
+                    note="Recovery confirmed by autonomous telemetry monitoring."
+                )
+    st.session_state["last_anomaly_signatures"] = list(current_sigs)
+
+# ── MAIN POLL FUNCTION ─────────────────────────────────────────────────────────
+
+def run_monitor_cycle() -> Dict[str, Any]:
+    """
+    Execute one autonomous monitoring cycle.
+    This drives the entire detect → analyze → fix → verify pipeline.
+    """
     try:
-        rca_query = f"""
-        Analyze this operational incident:
-        Incident ID: {incident_id}
-        Type: {anomaly['type']}
-        Device: {anomaly.get('device', 'unknown')}
-        Severity: {anomaly.get('severity', 'high')}
-        Description: {anomaly.get('description', 'N/A')}
-        Current metrics: {orchestrator.state.get_device_metrics(anomaly.get('device', 'unknown'))}
-        Impacted services: {orchestrator.state.calculate_service_impact([anomaly.get('device', 'unknown')]).get('impacted_services', [])}
+        result = monitor.run_cycle()
+        anomalies = result.get("anomalies", [])
 
-        Provide an operational summary, root cause, impacted services, operational severity, recommended actions, and recovery validation steps.
-        """
+        st.session_state["cycle_count"]          = result.get("cycle", 0)
+        st.session_state["total_anomalies_seen"] += result.get("anomalies_found", 0)
 
-        if OPENAI_AVAILABLE:
-            rca_result = call_ai(rca_query)
-        else:
-            rca_result = _build_local_rca_summary(incident_id, anomaly)
+        # Generate live alerts for new high-severity anomalies
+        for a in anomalies:
+            if a.get("severity") in ("critical", "high"):
+                add_live_alert(
+                    a["severity"],
+                    f"{a['type'].replace('_', ' ').title()} on {a.get('device', 'unknown')}",
+                    a,
+                )
 
-        st.session_state["ai_rca_steps"][-1]["status"] = "completed"
-        st.session_state["ai_rca_steps"][-1]["result"] = rca_result
+        # Detect cleared anomalies → auto-resolve incidents
+        _process_recovery(anomalies)
 
-        orchestrator.state.update_incident(incident_id, status="investigating", note=f"AI RCA: {rca_result[:200]}...")
+        # Update event feed
+        st.session_state["live_event_feed"] = orchestrator.events.get_event_history(limit=25)
+
+        # Update incident timeline
+        event_history = orchestrator.events.get_event_history(limit=15)
+        st.session_state["incident_timeline"] = [
+            {
+                "timestamp": ev.get("timestamp", ""),
+                "event":     ev.get("type", "unknown").replace("_", " ").title(),
+                "details":   ev.get("description", "")[:80],
+                "severity":  ev.get("severity", "info"),
+            }
+            for ev in reversed(event_history)
+        ]
+
+        st.session_state["total_fixes_executed"] += result.get("workflows_started", 0)
+        return result
 
     except Exception as e:
-        logger.error(f"AI RCA failed: {e}")
-        st.session_state["ai_rca_steps"][-1]["status"] = "failed"
-        st.session_state["ai_rca_steps"][-1]["error"] = str(e)
+        logger.error(f"Monitor cycle failed: {e}", exc_info=True)
+        return {"error": str(e), "anomalies_found": 0}
 
-    st.session_state["ai_rca_active"] = False
+# ── WORKSPACES list (updated to include Admin) ───────────────────────────────
+WORKSPACES = [
+    ("dashboard", "🖥",  "Dashboard"),
+    ("Workflows", "🤖",  "AI Action"),
+    ("incident",  "🚨",  "Incidents"),
+    ("topology",  "🗺",  "Topology"),
+    ("Observability", "📡", "Observability"),
+    ("security",  "🔒",  "Security"),
+    ("executive", "📈",  "Executive"),
+    ("admin",     "⚙️",  "Admin"),
+]
+
+# ── CSS ───────────────────────────────────────────────────────────────────────
+# ── CSS (theme lives in ui/app_theme.py — presentation only) ──────────────────
+from ui.app_theme import inject_theme
+inject_theme()
+
+# ── helper: render a single device health card ────────────────────────────────
+def _device_card(hostname: str, m, health: dict) -> None:
+    score  = health.get("score", 100)
+    status = health.get("status", "healthy")
+    reachable = getattr(m, "reachable", True)
+    color  = {"critical": "#cc0000", "warning": "#cc8800", "healthy": "#00aa44"}.get(status, "#555")
+    icon   = {"critical": "🔴", "warning": "🟡", "healthy": "🟢"}.get(status, "⚫")
+
+    cpu_bar  = int(m.cpu)
+    mem_bar  = int(m.memory)
+    cpu_col  = "#cc0000" if m.cpu >= 90 else "#cc8800" if m.cpu >= 70 else "#00aa44"
+    mem_col  = "#cc0000" if m.memory >= 90 else "#cc8800" if m.memory >= 70 else "#00aa44"
+
+    st.markdown(f"""
+    <div style="background:#161b22; border:1px solid {color}; border-left:4px solid {color};
+                border-radius:10px; padding:14px; margin:4px 0;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+            <span style="font-weight:700; color:#cdd9e5; font-size:14px;">{icon} {hostname}</span>
+            <span style="font-size:11px; color:{color}; font-weight:600;">{status.upper()}</span>
+        </div>
+        <div style="font-size:11px; color:#8b949e; margin-bottom:6px;">
+            {'✅ Reachable' if reachable else '❌ Unreachable'} &nbsp;|&nbsp; Health: {score:.0f}%
+        </div>
+        <div style="font-size:11px; color:#8b949e; margin:2px 0;">CPU</div>
+        <div style="background:#30363d; border-radius:3px; height:6px; margin-bottom:4px;">
+            <div style="background:{cpu_col}; width:{min(cpu_bar,100)}%; height:6px; border-radius:3px;"></div>
+        </div>
+        <div style="font-size:11px; color:#8b949e; margin:2px 0;">Memory</div>
+        <div style="background:#30363d; border-radius:3px; height:6px; margin-bottom:6px;">
+            <div style="background:{mem_col}; width:{min(mem_bar,100)}%; height:6px; border-radius:3px;"></div>
+        </div>
+        <div style="font-size:11px; color:#8b949e;">
+            CPU {m.cpu:.1f}% &nbsp;|&nbsp; Mem {m.memory:.1f}%
+            &nbsp;|&nbsp; Lat {m.latency_ms:.0f}ms &nbsp;|&nbsp; Loss {m.packet_loss_pct:.2f}%
+        </div>
+    </div>""", unsafe_allow_html=True)
 
 
-# =========================================================
-# SAMPLE DATA
-# =========================================================
+# ── helper: render one pending-approval card ──────────────────────────────────
+def _render_approval_card(run_id: str, data: dict) -> None:
+    run     = data["run"]
+    anomaly = data["anomaly"]
+    plan    = data.get("plan", [])
+    rca     = data.get("rca", "Root cause analysis pending.")
+    sev_icon = {"critical": "🔴", "high": "🟠", "medium": "🟡"}.get(run.severity, "⚪")
+
+    # Build a clear, specific headline from the actual anomaly.
+    iface = anomaly.get("interface")
+    a_desc = anomaly.get("description") or f"{run.anomaly_type.replace('_',' ')} on {run.device}"
+    a_state = anomaly.get("state", "")
+    headline_target = f"{run.device} · {iface}" if iface else run.device
+
+    st.markdown(f"""
+    <div class="approval-card">
+        <div style="font-size:16px; font-weight:700; color:#cc8800;">
+            {sev_icon} APPROVAL REQUIRED — {run.anomaly_type.replace('_',' ').upper()}
+        </div>
+        <div style="font-size:13px; color:#cdd9e5; margin-top:6px;">
+            {a_desc}
+        </div>
+        <div style="font-size:12px; color:#8b949e; margin-top:4px;">
+            Target: <b style="color:#cdd9e5;">{headline_target}</b> &nbsp;|&nbsp;
+            State: <b style="color:#cc8800;">{a_state or 'n/a'}</b> &nbsp;|&nbsp;
+            Incident: <b style="color:#cdd9e5;">{run.incident_id}</b>
+        </div>
+    </div>""", unsafe_allow_html=True)
+
+    # What the AI will actually do, in plain CLI terms.
+    ai_status = data.get("ai_status", "unavailable")
+    ai_cmds = data.get("ai_commands")
+    needs_manual = data.get("needs_manual", False)
+
+    if needs_manual:
+        reasons = "; ".join(data.get("ai_block_reasons", [])) or "AI could not produce safe commands"
+        st.error(
+            f"⚠️ **Manual handling required.** The AI was unavailable or proposed "
+            f"unsafe commands, so no automated fix will run. Reason: {reasons}. "
+            f"Approving will mark this for manual review (no commands sent to the router)."
+        )
+    elif ai_cmds and ai_cmds.get("fix"):
+        st.markdown("**🤖 AI-generated commands (passed safety filter):**")
+        st.code("configure terminal\n " + "\n ".join(ai_cmds.get("fix", [])), language="text")
+    elif run.anomaly_type == "interface_down" and iface:
+        st.markdown("**Action the AI will take (after approval):**")
+        st.code(f"configure terminal\n interface {iface}\n no shutdown\nend", language="text")
+
+    col_rca, col_plan = st.columns([3, 2])
+    with col_rca:
+        st.markdown("**AI Root Cause Analysis**")
+        st.info(rca[:400])
+    with col_plan:
+        st.markdown("**Remediation Plan**")
+        for i, step in enumerate(plan, 1):
+            st.markdown(f"  {i}. {step}")
+
+    col_approve, col_reject, col_skip = st.columns([1, 1, 3])
+    with col_approve:
+        if st.button(f"✅ APPROVE FIX", key=f"approve_{run_id}", type="primary", use_container_width=True):
+            monitor.approved_run_ids.add(run_id)
+            # Run a cycle immediately so the fix executes now, not on next refresh.
+            try:
+                cyc = run_monitor_cycle()
+            except Exception as _e:
+                cyc = {}
+            # Report what actually happened (live vs simulated, success/fail).
+            last_fix = getattr(monitor, "last_fix_result", None)
+            if last_fix is None:
+                st.success("Fix approved — executing on the next monitoring cycle...")
+            elif last_fix.get("success") and last_fix.get("simulated"):
+                st.warning(
+                    "⚠️ Fix ran in SIMULATION mode (no live router connection). "
+                    "The real router was NOT changed. Set GNS3_ROUTER_HOST / "
+                    "GNS3_ROUTER_PORT / GNS3_DEVICE_TYPE in Secrets to apply live."
+                )
+            elif last_fix.get("success"):
+                st.success(
+                    f"✅ Fix applied LIVE on {last_fix.get('device','router')}: "
+                    f"{', '.join(last_fix.get('commands', [])) or 'no shutdown'}"
+                )
+            else:
+                st.error(f"❌ Fix attempt failed: {last_fix.get('error','unknown error')}")
+            st.rerun()
+    with col_reject:
+        if st.button(f"❌ REJECT", key=f"reject_{run_id}", use_container_width=True):
+            monitor.rejected_run_ids.add(run_id)
+            st.warning("Fix rejected.")
+            st.rerun()
+    with col_skip:
+        st.caption(f"Run: `{run_id}` · Elapsed: {run.elapsed_seconds:.0f}s")
 
 
-# =========================================================
-# SIDEBAR
-# =========================================================
-
+# ── SIDEBAR ───────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.title("🧠 NetBrain AI")
-    st.caption("Autonomous Network OS")
+    st.markdown("## 🧠 NetBrain AI")
+    st.caption("Autonomous NOC Platform")
+    st.divider()
+
+    # Health score ring
+    op_summary = orchestrator.state.get_operational_summary()
+    score = op_summary.get("operational_score", 100)
+    score_color = "#cc0000" if score < 60 else "#cc8800" if score < 80 else "#00aa44"
+    st.markdown(
+        f"""<div style="text-align:center; padding:12px; background:#161b22;
+                        border-radius:8px; border:2px solid {score_color}33; margin-bottom:8px;">
+                <div style="font-size:38px; font-weight:700; color:{score_color};">{score:.0f}</div>
+                <div style="font-size:11px; color:#8b949e; letter-spacing:1px;">HEALTH SCORE</div>
+            </div>""",
+        unsafe_allow_html=True,
+    )
+
+    # Quick stats
+    incidents_open   = sum(1 for i in orchestrator.state.get_all_incidents().values()
+                           if i["status"] in {"new", "investigating"})
+    anomaly_count    = len(orchestrator.telemetry.detect_anomalies())
+    active_wf        = len(tracker.get_active_runs())
+    pending_approvals_count = len(getattr(monitor, "pending_approvals", {}))
+
+    c1, c2 = st.columns(2)
+    c1.metric("Incidents",  incidents_open)
+    c2.metric("Anomalies",  anomaly_count)
+    c1.metric("Workflows",  active_wf)
+    c2.metric("Approvals",  pending_approvals_count)
+
+    if pending_approvals_count:
+        st.warning(f"⚠️ {pending_approvals_count} fix(es) awaiting approval")
 
     st.divider()
 
-    # Current workspace indicator
-    current_ws = st.session_state.workspace
-    workspace_names = {ws_id: label for ws_id, icon, label in WORKSPACES}
-    st.markdown(f"**Current Workspace:** {workspace_names.get(current_ws, 'Operations').upper()}")
-
-    st.divider()
-
-    # Workspace buttons
+    # Navigation
+    st.markdown("**NAVIGATION**")
+    current_ws = st.session_state["workspace"]
     for ws_id, icon, label in WORKSPACES:
-        is_active = (ws_id == current_ws)
-        button_style = "primary" if is_active else "secondary"
-        
-        if st.button(
-            f"{icon} {label}",
-            use_container_width=True,
-            key=f"ws_{ws_id}",
-            type=button_style,
-        ):
-            st.session_state.workspace = ws_id
+        badge = f" ({pending_approvals_count})" if ws_id == "Workflows" and pending_approvals_count else ""
+        btn_type = "primary" if ws_id == current_ws else "secondary"
+        if st.button(f"{icon} {label}{badge}", key=f"ws_{ws_id}",
+                     use_container_width=True, type=btn_type):
+            st.session_state["workspace"] = ws_id
             st.rerun()
 
     st.divider()
+    st.markdown("**SYSTEM**")
+    mode      = "🟢 LIVE" if orchestrator.telemetry.live_mode else "🔵 SIM"
+    ai_status = "🟢 AI" if _resolve_api_key() else "🟡 AI"
+    st.caption(f"{mode} | {ai_status}")
+    poll_age = time.time() - st.session_state.get("last_poll_time", 0)
+    st.caption(f"Cycle #{st.session_state['cycle_count']} · {poll_age:.0f}s ago")
 
-    st.markdown("### Platform Status")
+    # ── Build / deploy diagnostic (confirms the running app has latest code) ──
+    _dtype_now = os.environ.get("GNS3_DEVICE_TYPE", "(not set → SSH)")
+    try:
+        from core.autonomous_monitor import LIVE_ONLY as _LO
+    except Exception:
+        _LO = None
+    _conn_method = "TELNET ✅" if str(_dtype_now).endswith("_telnet") else "SSH ⚠️"
+    st.caption(f"🏷 Build: `{BUILD_VERSION}`")
+    st.caption(f"🔧 Fix uses: **{_conn_method}** ({_dtype_now})")
+    st.caption(f"📡 Live-only: {'ON ✅' if _LO else 'OFF ⚠️'}")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        if OPENAI_AVAILABLE:
-            st.success("AI ✓")
+    # GNS3 / tunnel
+    gns3_engine = getattr(orchestrator, "gns3", None)
+    gns3_host, gns3_port = _resolve_gns3_endpoint()
+
+    # The tool talks to the router over a TELNET tunnel (not the GNS3 HTTP API),
+    # so check the actual router host:port the fixer uses — that's the truth.
+    def _router_tunnel_reachable() -> bool:
+        host = os.environ.get("GNS3_ROUTER_HOST", "").strip()
+        port = os.environ.get("GNS3_ROUTER_PORT", "").strip()
+        if not host or not port:
+            return False
+        import socket
+        try:
+            with socket.create_connection((host, int(port)), timeout=4):
+                return True
+        except Exception:
+            return False
+
+    _rhost = os.environ.get("GNS3_ROUTER_HOST", "").strip()
+    if _rhost:
+        if _router_tunnel_reachable():
+            st.success(f"🟢 Router tunnel UP\n{_rhost}:{os.environ.get('GNS3_ROUTER_PORT','')}")
         else:
-            st.error("AI ✗")
-        
-        if DATABASE_AVAILABLE:
-            st.success("DB ✓")
-        else:
-            st.warning("DB ✗")
-    
-    with col2:
-        st.success("Streamlit ✓")
-        st.info("v2.0")
+            st.error("🔴 Router tunnel DOWN\nStart Pinggy & update Secrets")
+    elif gns3_engine and gns3_engine.available:
+        st.success(f"🟢 GNS3 v{gns3_engine.version}\n{len(gns3_engine.nodes)} nodes")
+    else:
+        st.info("🔵 No tunnel configured")
 
-# =========================================================
+# ══════════════════════════════════════════════════════════════════════════════
 # WORKSPACE CONTENT
-# =========================================================
+# ══════════════════════════════════════════════════════════════════════════════
 
-workspace = st.session_state.workspace
+workspace     = st.session_state["workspace"]
+POLL_INTERVAL = 5  # seconds
 
-if workspace == "operations":
-    st.header("� Autonomous NOC Operations Center")
-    st.markdown("### Live operational intelligence — real-time failure correlation")
+# ── Check tunnel + poll monitor ───────────────────────────────────────────────
+tunnel_just_connected = _check_tunnel_and_reconnect()
+if tunnel_just_connected:
+    try:
+        orchestrator.telemetry.live_mode = True
+        gns3_nodes = list(orchestrator.gns3.nodes.keys()) if getattr(orchestrator, "gns3", None) else []
+        add_live_alert("recovery",
+            f"GNS3 tunnel connected — {len(gns3_nodes)} device(s) now live",
+            {"type": "tunnel_connected", "device": "gns3"},
+        )
+    except Exception:
+        pass
 
-    if "live_initialized" not in st.session_state:
-        st.session_state["live_initialized"] = True
+now = time.time()
+if now - st.session_state["last_poll_time"] >= POLL_INTERVAL:
+    cycle_result = run_monitor_cycle()
+    st.session_state["last_poll_time"] = now
+else:
+    cycle_result = {}
 
-    if "last_poll_time" not in st.session_state:
-        st.session_state["last_poll_time"] = time.time()
-    
-    current_time = time.time()
-    if current_time - st.session_state["last_poll_time"] > 5:
-        telemetry_data = poll_live_telemetry()
-        st.session_state["last_poll_time"] = current_time
-        st.experimental_rerun()
+# ── Workflow fallback renderer (no ui module needed) ──────────────────────────
+def _render_workflow_fallback(run) -> None:
+    sev_icon     = {"critical": "🔴", "high": "🟠", "medium": "🟡"}.get(run.severity, "⚪")
+    status_badge = {"running": "🔄 RUNNING", "awaiting_approval": "⏳ AWAITING APPROVAL",
+                    "completed": "✅ DONE", "failed": "❌ FAILED"}.get(run.status, run.status)
+    st.markdown(f"### {sev_icon} {run.anomaly_type.replace('_',' ').upper()} — {status_badge}")
+    st.caption(f"Device: **{run.device}** | Incident: `{run.incident_id}` | Run: `{run.run_id}`")
+    if run.progress_pct:
+        st.progress(run.progress_pct / 100)
+    cols = st.columns(len(run.steps))
+    for step, col in zip(run.steps, cols):
+        with col:
+            st.markdown(f"**{step.icon}**\n\n<small>{step.name}</small>", unsafe_allow_html=True)
+    completed = [s for s in run.steps if s.status.value == "completed"]
+    running   = [s for s in run.steps if s.status.value == "running"]
+    detail    = running[0] if running else (completed[-1] if completed else None)
+    if detail and detail.output:
+        with st.expander(f"▶ Step {detail.step_id}: {detail.name}", expanded=True):
+            st.code("\n".join(detail.output[-20:]), language="bash")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# WORKSPACE: DASHBOARD (main NOC view)
+# ══════════════════════════════════════════════════════════════════════════════
+if workspace == "dashboard":
+    op_summary  = orchestrator.state.get_operational_summary()
+    inc_summary = op_summary.get("incidents", {})
+    svc_summary = op_summary.get("services", {})
+    score       = op_summary.get("operational_score", 100)
+    open_inc    = inc_summary.get("new", 0) + inc_summary.get("investigating", 0)
+    svc_down    = svc_summary.get("down", 0)
+    anomalies   = orchestrator.telemetry.detect_anomalies()
+
+    # ── Top status ribbon ─────────────────────────────────────────────────────
+    score_color = "#cc0000" if score < 60 else "#cc8800" if score < 80 else "#00aa44"
+    pending_cnt = len(getattr(monitor, "pending_approvals", {}))
+    st.markdown(f"""
+    <div style="display:flex; gap:10px; margin-bottom:16px; flex-wrap:wrap;">
+        <div style="flex:1; min-width:120px; background:#161b22; border:1px solid {score_color};
+                    border-radius:8px; padding:12px; text-align:center;">
+            <div style="font-size:28px; font-weight:700; color:{score_color};">{score:.0f}%</div>
+            <div style="font-size:11px; color:#8b949e;">HEALTH SCORE</div>
+        </div>
+        <div style="flex:1; min-width:120px; background:#161b22; border:1px solid {'#cc0000' if open_inc else '#30363d'};
+                    border-radius:8px; padding:12px; text-align:center;">
+            <div style="font-size:28px; font-weight:700; color:{'#cc0000' if open_inc else '#cdd9e5'};">{open_inc}</div>
+            <div style="font-size:11px; color:#8b949e;">OPEN INCIDENTS</div>
+        </div>
+        <div style="flex:1; min-width:120px; background:#161b22; border:1px solid {'#cc8800' if anomalies else '#30363d'};
+                    border-radius:8px; padding:12px; text-align:center;">
+            <div style="font-size:28px; font-weight:700; color:{'#cc8800' if anomalies else '#cdd9e5'};">{len(anomalies)}</div>
+            <div style="font-size:11px; color:#8b949e;">ANOMALIES</div>
+        </div>
+        <div style="flex:1; min-width:120px; background:#161b22; border:1px solid {'#cc8800' if pending_cnt else '#30363d'};
+                    border-radius:8px; padding:12px; text-align:center;">
+            <div style="font-size:28px; font-weight:700; color:{'#cc8800' if pending_cnt else '#cdd9e5'};">{pending_cnt}</div>
+            <div style="font-size:11px; color:#8b949e;">AWAITING APPROVAL</div>
+        </div>
+        <div style="flex:1; min-width:120px; background:#161b22; border:1px solid #30363d;
+                    border-radius:8px; padding:12px; text-align:center;">
+            <div style="font-size:28px; font-weight:700; color:#cdd9e5;">{st.session_state['total_fixes_executed']}</div>
+            <div style="font-size:11px; color:#8b949e;">FIXES APPLIED</div>
+        </div>
+    </div>""", unsafe_allow_html=True)
+
+    # ── Alert ticker ──────────────────────────────────────────────────────────
+    live_alerts = st.session_state["live_alerts"]
+    critical_alerts = [a for a in live_alerts if a["severity"] in ("critical", "high")]
+    if critical_alerts:
+        msgs = "  &nbsp;|&nbsp;  ".join(
+            f"🔴 {a['message']} ({a['timestamp'][-8:]})" for a in critical_alerts[:4]
+        )
+        st.markdown(f"""<div style="background:#1a0000; border:1px solid #cc000066; border-radius:6px;
+            padding:8px 14px; font-size:12px; color:#ff6666; margin-bottom:12px;
+            white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+            🚨 LIVE ALERTS &nbsp;|&nbsp; {msgs}</div>""", unsafe_allow_html=True)
+
+    # ── Pending approvals banner ───────────────────────────────────────────────
+    if pending_cnt:
+        st.warning(f"⚠️ **{pending_cnt} fix(es) awaiting your approval.** Go to **Workflows** to approve or reject.")
+
+    # ── Device health cards ───────────────────────────────────────────────────
+    st.markdown("### Device Health")
+    all_metrics = orchestrator.state.get_all_device_metrics()
+    if all_metrics:
+        items   = list(all_metrics.items())
+        n_cols  = min(4, len(items))
+        cols    = st.columns(n_cols)
+        for idx, (hostname, m) in enumerate(items):
+            h = orchestrator.telemetry.get_device_health_score(hostname)
+            with cols[idx % n_cols]:
+                _device_card(hostname, m, h)
     else:
-        telemetry_data = orchestrator.telemetry.collect_all_telemetry()
+        st.info("⏳ No telemetry yet — first poll in progress...")
 
-    status = orchestrator.get_operational_status()
-    summary = status["operational_summary"]
-    live_alerts = st.session_state.get("live_alerts", [])
-    event_feed = st.session_state.get("live_event_feed", [])
-    recovery_feed = st.session_state.get("recovery_timeline", [])
-    active_incidents = [inc for inc in orchestrator.state.get_all_incidents().values() if inc["status"] in {"new", "investigating"}]
-    degraded_services = [svc for svc, dep in orchestrator.state.service_dependencies.items() if dep.status in {"degraded", "down"}]
-    impacted_wan = [svc for svc in degraded_services if "WAN" in svc or "VPN" in svc or "Internet" in svc]
+    # ── Two-column: events + active incidents ─────────────────────────────────
+    st.markdown("### Live Event Feed & Active Incidents")
+    col_ev, col_inc = st.columns([3, 2])
 
-    critical_count = summary["incidents"]["new"] + summary["incidents"]["investigating"]
-    outage_count = summary["services"]["down"]
-    mttr_minutes = max(5, critical_count * 4)
-    stability = summary["operational_score"]
+    with col_ev:
+        event_feed = st.session_state.get("live_event_feed", [])
+        if event_feed:
+            feed_rows = [
+                {"Time": ev.get("timestamp","")[-8:],
+                 "Event": ev.get("type","?").replace("_"," ").title(),
+                 "Sev": ev.get("severity","info").upper(),
+                 "Detail": ev.get("description","")[:70]}
+                for ev in event_feed[-15:]
+            ]
+            st.dataframe(pd.DataFrame(feed_rows), use_container_width=True, height=280)
+        else:
+            st.info("Events will appear here once monitoring starts.")
 
-    if live_alerts:
-        with st.container():
-            st.markdown("<div style='background:#660000;padding:12px;border-radius:8px;color:#fff;'>"
-                        "<strong>CRITICAL ALERT CENTER</strong> — Live operational failures detected</div>", unsafe_allow_html=True)
-            for alert in live_alerts[:5]:
-                severity_icon = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢", "recovery": "✅"}.get(alert["severity"], "⚪")
-                st.markdown(f"{severity_icon} **{alert['severity'].upper()}** — {alert['message']} — {alert['timestamp'][-8:]}")
-            if len(live_alerts) > 5:
-                st.markdown(f"*...and {len(live_alerts) - 5} more alerts*")
+    with col_inc:
+        active_inc = [i for i in orchestrator.state.get_all_incidents().values()
+                      if i["status"] in {"new", "investigating"}]
+        if active_inc:
+            for inc in active_inc[:5]:
+                sev_icon = {"critical":"🔴","high":"🟠","medium":"🟡"}.get(inc["severity"],"⚪")
+                with st.expander(f"{sev_icon} {inc['id']} — {inc['title'][:40]}",
+                                 expanded=inc["severity"] == "critical"):
+                    st.caption(f"Status: {inc['status']} | {inc.get('created_at','')[-8:]}")
+                    st.caption(f"Devices: {', '.join(inc.get('affected_devices',[]) or ['—'])}")
+                    if inc.get("timeline"):
+                        st.markdown(f"  `{inc['timeline'][-1]['timestamp'][-8:]}` {inc['timeline'][-1]['note'][:60]}")
+        else:
+            st.success("✅ No active incidents")
 
-    executive_col1, executive_col2, executive_col3, executive_col4 = st.columns(4)
-    with executive_col1:
-        st.metric("Operational Stability", f"{stability:.0f}%", delta=f"{outage_count} outages")
-    with executive_col2:
-        st.metric("Active Incidents", critical_count, delta=f"{len(active_incidents)} active")
-    with executive_col3:
-        st.metric("Degraded Services", len(degraded_services), delta=f"{outage_count} down")
-    with executive_col4:
-        st.metric("MTTR Estimate", f"{mttr_minutes}m", delta="Recovery tracking")
+    # ── Auto-refresh ──────────────────────────────────────────────────────────
+    remaining = max(0.0, POLL_INTERVAL - (time.time() - st.session_state["last_poll_time"]))
+    st.caption(f"🔄 Next refresh in {remaining:.0f}s | Cycle #{st.session_state['cycle_count']}")
+    time.sleep(remaining)
+    st.rerun()
 
-    st.progress(int(max(0, min(100, stability))))
+# ══════════════════════════════════════════════════════════════════════════════
+# WORKSPACE: WORKFLOWS + APPROVALS
+# ══════════════════════════════════════════════════════════════════════════════
+elif workspace == "Workflows":
+    st.markdown("## 🤖 AI Action — Autonomous Remediation")
+    st.caption("Detect → Analyze → Plan → **APPROVE** → Fix → Verify → Close")
 
-    st.divider()
-    st.markdown("### Live Event Feed")
-    if event_feed:
-        feed_rows = [
-            {
-                "time": item.get("timestamp", "")[-8:],
-                "event": item.get("type", "unknown").replace("_", " ").title(),
-                "severity": item.get("severity", "info").upper(),
-                "detail": item.get("description", item.get("details", ""))[:80],
-            }
-            for item in event_feed[-20:]
-        ]
-        st.dataframe(pd.DataFrame(feed_rows).sort_values(by="time", ascending=False))
+    # ── Natural-language query box (ask about incidents/logs in plain English) ─
+    with st.expander("💬 Ask about your network (natural language)", expanded=False):
+        st.caption("e.g. \"why did R2's interface go down?\", \"how many interface_down "
+                   "incidents this session?\", \"what was the last fix on R2?\"")
+        nlq = st.text_input("Your question", key="nl_query",
+                            placeholder="Ask about incidents, logs, or fixes...")
+        if st.button("Ask", key="nl_ask") and nlq.strip():
+            with st.spinner("Analyzing your network data..."):
+                # Build a compact context from real incidents + recent log events.
+                incidents = orchestrator.state.get_all_incidents()
+                inc_lines = []
+                for inc in list(incidents.values())[-15:]:
+                    last_note = inc["timeline"][-1]["note"] if inc.get("timeline") else ""
+                    inc_lines.append(
+                        f"- [{inc.get('status')}] {inc.get('title','')} on "
+                        f"{','.join(inc.get('affected_devices') or [])}: {last_note}"
+                    )
+                log_lines = []
+                gh = getattr(monitor, "github_log", None)
+                if gh:
+                    for e in gh.recent_events[:20]:
+                        log_lines.append(
+                            f"- {e['ts']} {e['device']} {e['mnemonic']} "
+                            f"{e.get('interface') or ''} {e.get('state') or ''}")
+                context = ("Incidents:\n" + ("\n".join(inc_lines) or "none") +
+                           "\n\nRecent log events:\n" + ("\n".join(log_lines) or "none"))
+                prompt = (
+                    "You are a network operations assistant. Answer the user's "
+                    "question using ONLY the data below. Be concise and factual. "
+                    "If the data doesn't contain the answer, say so.\n\n"
+                    f"{context}\n\nQuestion: {nlq.strip()}\nAnswer:"
+                )
+                try:
+                    answer = call_ai(prompt)
+                except Exception as e:
+                    answer = ""
+                if answer:
+                    st.markdown(answer)
+                else:
+                    st.warning("AI is unavailable (check OPENROUTER_API_KEY). "
+                               "Showing raw data instead:")
+                    st.code(context, language="text")
+
+    # ── SECTION 1: Pending approvals (most important) ─────────────────────────
+    pending = getattr(monitor, "pending_approvals", {})
+    if pending:
+        st.markdown(f"### ⏳ Awaiting Approval ({len(pending)})")
+        st.markdown("Review the AI analysis and remediation plan, then approve or reject each fix.")
+        for run_id, data in list(pending.items()):
+            _render_approval_card(run_id, data)
+            st.divider()
     else:
-        st.info("Waiting for live operational events...")
+        st.success("✅ No fixes awaiting approval")
 
-    st.divider()
-    st.markdown("### Incident & Recovery Timeline")
-    if active_incidents or recovery_feed:
-        timeline_rows = []
-        for event in st.session_state.get("incident_timeline", [])[:15]:
-            timeline_rows.append({
-                "time": event.get("timestamp", "")[-8:],
-                "event": event.get("event", "unknown"),
-                "severity": event.get("severity", "info").upper(),
-                "details": event.get("details", "")[:80],
+    # ── SECTION 2: Active (approved, running) workflows ───────────────────────
+    try:
+        from ui.workflow_viz import render_workflow_run, render_no_active_workflow
+        UI_VIZ = True
+    except ImportError:
+        UI_VIZ = False
+
+    active_runs = tracker.get_active_runs()
+    if active_runs:
+        st.markdown("### 🔴 LIVE — Executing Fix")
+        for run in active_runs:
+            render_workflow_run(run) if UI_VIZ else _render_workflow_fallback(run)
+            st.divider()
+    elif not pending:
+        if UI_VIZ:
+            render_no_active_workflow()
+        else:
+            st.info("No workflows running. Anomalies will be processed automatically every 5 seconds.")
+
+    # ── SECTION 3: Workflow history ───────────────────────────────────────────
+    recent_runs = tracker.get_recent_runs(15)
+    if recent_runs:
+        st.divider()
+        st.markdown("### 📋 Workflow History")
+        wf_rows = []
+        for run in recent_runs:
+            s_icon = {"running":"🔄","awaiting_approval":"⏳","completed":"✅","failed":"❌"}.get(run.status,"⬜")
+            v_icon = {"critical":"🔴","high":"🟠","medium":"🟡"}.get(run.severity,"⚪")
+            wf_rows.append({
+                "Run ID":   run.run_id,
+                "Device":   run.device,
+                "Issue":    run.anomaly_type.replace("_"," ").title(),
+                "Sev":      f"{v_icon} {run.severity.upper()}",
+                "Status":   f"{s_icon} {run.status}",
+                "Progress": f"{run.progress_pct}%",
+                "Duration": f"{run.elapsed_seconds:.1f}s",
+                "Summary":  (run.summary or "—")[:55],
             })
-        for event in recovery_feed[:5]:
-            timeline_rows.append({
-                "time": event.get("timestamp", "")[-8:],
-                "event": event.get("event", "recovery"),
-                "severity": "RECOVERY",
-                "details": event.get("details", ""),
-            })
-        st.dataframe(pd.DataFrame(timeline_rows).sort_values(by="time", ascending=False))
-    else:
-        st.info("No incidents or recovery actions recorded yet.")
+        st.dataframe(pd.DataFrame(wf_rows), use_container_width=True)
 
     st.divider()
-    st.markdown("### Active Critical Incidents")
-    if active_incidents:
-        for inc in active_incidents:
-            severity_icon = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(inc["severity"], "⚪")
-            with st.expander(f"{severity_icon} **{inc['id']}** — {inc['title']} — {inc['status'].upper()}", expanded=inc["severity"] == "critical"):
-                st.markdown(f"**Severity:** {inc['severity'].upper()}")
-                if inc.get("affected_devices"):
-                    st.markdown(f"**Devices:** {', '.join(inc['affected_devices'])}")
-                if inc.get("affected_services"):
-                    st.markdown(f"**Services:** {', '.join(inc['affected_services'])}")
+    wf_s = tracker.export_summary()
+    s1, s2, s3, s4, s5 = st.columns(5)
+    s1.metric("Total",     wf_s["total_runs"])
+    s2.metric("Active",    wf_s["active_runs"])
+    s3.metric("Pending",   len(pending))
+    s4.metric("Completed", wf_s["completed_runs"])
+    s5.metric("Failed",    wf_s["failed_runs"])
+
+    remaining = max(0.0, POLL_INTERVAL - (time.time() - st.session_state["last_poll_time"]))
+    st.caption(f"🔄 Refreshing in {remaining:.0f}s")
+    time.sleep(max(0.5, remaining))
+    st.rerun()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# WORKSPACE: INCIDENT ROOM
+# ══════════════════════════════════════════════════════════════════════════════
+elif workspace == "incident":
+    st.markdown("## 🚨 Incident War Room")
+    all_incidents = orchestrator.state.get_all_incidents()
+    open_inc  = sum(1 for i in all_incidents.values() if i["status"] in {"new","investigating"})
+    resolved  = sum(1 for i in all_incidents.values() if i["status"] == "resolved")
+    critical  = sum(1 for i in all_incidents.values() if i.get("severity") == "critical")
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Open",     open_inc,        delta_color="inverse" if open_inc else "off")
+    c2.metric("Critical", critical,        delta_color="inverse" if critical else "off")
+    c3.metric("Resolved", resolved)
+    c4.metric("Total",    len(all_incidents))
+
+    tab_live, tab_all = st.tabs(["Live Alerts", "All Incidents"])
+
+    with tab_live:
+        live_alerts = st.session_state.get("live_alerts", [])
+        if live_alerts:
+            for a in live_alerts[:10]:
+                s_icon = {"critical":"🔴","high":"🟠","medium":"🟡","low":"🟢","recovery":"✅"}.get(a["severity"],"⚪")
+                with st.expander(f"{s_icon} {a['message']} — {a['timestamp'][-8:]}",
+                                 expanded=a["severity"] == "critical"):
+                    st.json(a.get("anomaly", {}))
+        else:
+            st.info("No alerts yet")
+
+    with tab_all:
+        filter_status = st.selectbox("Filter", ["All", "Open", "Resolved"], key="inc_filter")
+        for inc_id, inc in sorted(all_incidents.items(), key=lambda x: x[1]["created_at"], reverse=True):
+            if filter_status == "Open" and inc["status"] not in {"new","investigating"}:
+                continue
+            if filter_status == "Resolved" and inc["status"] != "resolved":
+                continue
+            s_icon = {"critical":"🔴","high":"🟠","medium":"🟡","low":"🟢"}.get(inc["severity"],"⚪")
+            st_icon = {"new":"🔴","investigating":"🟠","resolved":"🟢","closed":"⚫"}.get(inc["status"],"⚪")
+            with st.expander(f"{s_icon} {inc_id} — {inc['title']} — {st_icon} {inc['status'].upper()}",
+                             expanded=False):
+                c1, c2 = st.columns(2)
+                c1.markdown(f"**Severity:** {inc['severity'].upper()}")
+                c1.markdown(f"**Devices:** {', '.join(inc.get('affected_devices',[]) or ['—'])}")
+                c2.markdown(f"**Status:** {inc['status']}")
+                c2.markdown(f"**Created:** {inc.get('created_at','N/A')[-19:]}")
                 if inc.get("timeline"):
                     st.markdown("**Timeline:**")
-                    for note in inc["timeline"][-3:]:
-                        st.markdown(f"- {note['timestamp'][-8:]}: {note['note']}")
-    else:
-        st.success("No active critical incidents. Network operations stabilized.")
+                    for note in inc["timeline"][-5:]:
+                        st.markdown(f"  `{note['timestamp'][-8:]}` {note['note']}")
 
-    st.divider()
-    st.markdown("### Autonomous Investigation Workflow")
-    if st.session_state.get("ai_rca_steps"):
-        for step in st.session_state["ai_rca_steps"]:
-            status_icon = "✅" if step["status"] == "completed" else "⏳" if step["status"] == "in_progress" else "❌"
-            st.markdown(f"{status_icon} {step['step']}")
-            if step.get("result"):
-                st.markdown(f"> {step['result'][:220]}...")
-    else:
-        st.info("Awaiting autonomous investigation trigger...")
-
-    st.divider()
-    st.markdown("### Autonomous Remediation Center")
-    remediation_workflow = st.session_state.get("remediation_workflow", {})
-    if remediation_workflow:
-        st.markdown(f"**Workflow Status:** {remediation_workflow.get('status', 'idle').title()} - {remediation_workflow.get('current_step', 'pending')}")
-        st.markdown(f"**Device:** {remediation_workflow.get('device', 'N/A')}")
-        st.markdown(f"**Recovery Confidence:** {st.session_state.get('recovery_confidence', 0)}%")
-        st.markdown(f"**Stabilization Status:** {st.session_state.get('stabilization_status', 'idle').title()}")
-
-        if remediation_workflow.get("recommended_actions"):
-            st.subheader("Recommended Safe Remediation Actions")
-            for action in remediation_workflow["recommended_actions"]:
-                status_icon = "✅" if action["executed"] else "⚠️"
-                st.markdown(f"{status_icon} **{action['description']}** — Risk: {action['risk'].upper()} — {action['comments']}")
-
-        if remediation_workflow.get("validation_commands"):
-            st.subheader("Recovery Validation Commands")
-            for cmd in remediation_workflow["validation_commands"]:
-                st.code(cmd)
-
-        if remediation_workflow.get("steps"):
-            st.subheader("Workflow Progress")
-            for step in remediation_workflow["steps"]:
-                status_icon = "✅" if step["status"] == "completed" else "⏳" if step["status"] == "in_progress" else "⚪"
-                st.markdown(f"{status_icon} {step['name']} — {step['status']}\n> {step['note']}")
-    else:
-        st.info("No autonomous remediation workflow is active. The platform will start recovery orchestration when the next incident is detected.")
-
-    st.divider()
-    st.markdown("### Device Health Matrix")
-    health_rows = []
-    for hostname, metrics in orchestrator.state.get_all_device_metrics().items():
-        health = orchestrator.telemetry.get_device_health_score(hostname)
-        link_status = "GREEN" if getattr(metrics, "reachable", True) and metrics.packet_loss_pct < 3 else "AMBER" if metrics.packet_loss_pct < 8 else "RED"
-        health_rows.append({
-            "Device": hostname,
-            "Health": f"{health['score']:.0f}%",
-            "Status": f"{health['status'].upper()}",
-            "Latency": f"{metrics.latency_ms:.1f}ms",
-            "Loss": f"{metrics.packet_loss_pct:.1f}%",
-            "Link": link_status,
-        })
-    if health_rows:
-        st.dataframe(pd.DataFrame(health_rows))
-    else:
-        st.info("No device health telemetry available yet.")
-
-    st.divider()
-    st.markdown("### Topology Status")
-    topology_rows = []
-    for hostname, metrics in orchestrator.state.get_all_device_metrics().items():
-        topology_rows.append({
-            "Device": hostname,
-            "Path": "Healthy" if getattr(metrics, "reachable", True) else "Failed",
-            "Status": "GREEN" if getattr(metrics, "reachable", True) else "RED",
-        })
-    if topology_rows:
-        st.dataframe(pd.DataFrame(topology_rows))
-    else:
-        st.info("Topology nominal — no path data available.")
-
-elif workspace == "incident":
-    st.header("🚨 Incident Management")
-    
-    status = orchestrator.get_operational_status()
-    incidents_data = status["incidents"]
-    open_incidents = incidents_data["by_status"].get("new", 0) + incidents_data["by_status"].get("investigating", 0)
-    critical_count = sum(1 for inc in orchestrator.state.get_all_incidents().values() if inc.get("severity") == "critical")
-    resolved_today = incidents_data["by_status"].get("resolved", 0)
-
-    # Live alerts summary
-    live_alerts = st.session_state.get("live_alerts", [])
-    active_alerts = len([a for a in live_alerts if a["severity"] in ["critical", "high"]])
-
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Open Incidents", open_incidents)
-    with col2:
-        st.metric("Critical", critical_count)
-    with col3:
-        st.metric("Resolved Today", resolved_today)
-    with col4:
-        st.metric("Live Alerts", active_alerts, delta="active monitoring")
-
-    # Live Critical Alerts
-    if live_alerts:
-        st.subheader("🔴 Live Critical Alerts")
-        for alert in live_alerts[:5]:
-            severity_icon = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(alert["severity"], "⚪")
-            with st.expander(f"{severity_icon} {alert['message']} — {alert['timestamp'][-8:]}", expanded=alert["severity"] == "critical"):
-                st.markdown(f"**Severity:** {alert['severity'].upper()}")
-                st.markdown(f"**Time:** {alert['timestamp']}")
-                if alert.get("anomaly"):
-                    st.markdown(f"**Device:** {alert['anomaly'].get('device', 'N/A')}")
-                    st.markdown(f"**Type:** {alert['anomaly'].get('type', 'N/A').replace('_', ' ').title()}")
-                    if alert["anomaly"].get("description"):
-                        st.markdown(f"**Description:** {alert['anomaly']['description']}")
-
-    st.subheader("Active Incidents")
-    all_incidents = orchestrator.state.get_all_incidents()
-    
-    if all_incidents:
-        for inc_id, inc in all_incidents.items():
-            if inc["status"] in ["new", "investigating"]:
-                severity_color = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(inc["severity"], "⚪")
-                with st.expander(f"{severity_color} **{inc_id}**: {inc['title']} - {inc['status'].upper()}", expanded=inc["severity"] == "critical"):
-                    st.markdown(f"**Severity:** {inc['severity'].upper()}")
-                    st.markdown(f"**Status:** {inc['status']}")
-                    st.markdown(f"**Created:** {inc.get('created_at', 'N/A')}")
-                    if inc.get("affected_devices"):
-                        st.markdown(f"**Affected Devices:** {', '.join(inc['affected_devices'])}")
-                    if inc.get("affected_services"):
-                        st.markdown(f"**Affected Services:** {', '.join(inc['affected_services'])}")
-                    if inc.get("timeline"):
-                        st.markdown("**Timeline:**")
-                        for note in inc["timeline"][-5:]:
-                            st.markdown(f"- {note['timestamp'][-8:]}: {note['note']}")
-                    
-                    # AI RCA Results
-                    if st.session_state.get("ai_rca_active") and inc_id in [a.get("incident_id") for a in st.session_state.get("ai_rca_steps", []) if a.get("incident_id")]:
-                        st.markdown("**🤖 AI RCA In Progress:**")
-                        rca_steps = [s for s in st.session_state["ai_rca_steps"] if s.get("incident_id") == inc_id]
-                        for step in rca_steps[-3:]:
-                            status_icon = "⏳" if step["status"] == "in_progress" else "✅" if step["status"] == "completed" else "❌"
-                            st.markdown(f"{status_icon} {step['step']}")
-                            if step.get("result"):
-                                st.markdown(f"**Result:** {step['result'][:500]}...")
-    else:
-        st.info("No active incidents. All systems operational.")
-
+# ══════════════════════════════════════════════════════════════════════════════
+# WORKSPACE: TOPOLOGY
+# ══════════════════════════════════════════════════════════════════════════════
 elif workspace == "topology":
-    st.header("🗺 Network Topology")
-    
-    status = orchestrator.get_operational_status()
-    critical_devices = len(orchestrator.state.get_critical_devices())
-    unreachable_count = sum(1 for m in orchestrator.state.get_all_device_metrics().values() if getattr(m, "reachable", True) is False)
+    st.markdown("## 🗺 Network Topology")
+    try:
+        from ui.topology_view import (
+            render_topology_kpis, render_device_health_table,
+            render_site_summary, render_link_status, render_gns3_topology,
+        )
+        render_topology_kpis(orchestrator.state, orchestrator.simulator)
+        st.divider()
+        tab1, tab2, tab3, tab4 = st.tabs(["Device Health", "Sites", "Links", "GNS3 Live"])
+        with tab1:
+            render_device_health_table(orchestrator.state, orchestrator.telemetry)
+        with tab2:
+            render_site_summary(orchestrator.simulator)
+        with tab3:
+            render_link_status(orchestrator.simulator)
+        with tab4:
+            render_gns3_topology(getattr(orchestrator, "gns3", None))
+    except ImportError:
+        op_s = orchestrator.state.get_operational_summary()
+        d_s  = op_s.get("devices", {})
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total Devices", d_s.get("total", 0))
+        c2.metric("Healthy",       d_s.get("healthy", 0))
+        c3.metric("Critical",      d_s.get("critical", 0))
+        rows = []
+        for hn, m in orchestrator.state.get_all_device_metrics().items():
+            h = orchestrator.telemetry.get_device_health_score(hn)
+            rows.append({"Device":hn,"Health":f"{h['score']:.0f}%","CPU":f"{m.cpu:.1f}%",
+                         "Memory":f"{m.memory:.1f}%","Latency":f"{m.latency_ms:.1f}ms"})
+        if rows:
+            st.dataframe(pd.DataFrame(rows), use_container_width=True)
 
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Total Devices", status["operational_summary"]["devices"]["total"])
-    with col2:
-        st.metric("Healthy Devices", status["operational_summary"]["devices"]["healthy"], delta=f"{unreachable_count} unreachable")
-    with col3:
-        st.metric("Critical Devices", critical_devices)
-    with col4:
-        st.metric("Links Active", status["operational_summary"]["links"]["active"])
-    
-    st.subheader("Live Device Status")
-    
-    # Show all devices with live status
-    device_status_data = []
-    for hostname, metrics in orchestrator.state.get_all_device_metrics().items():
-        health_score = orchestrator.telemetry.get_device_health_score(hostname)
-        status_icon = "🟢" if health_score["status"] == "healthy" else "🟡" if health_score["status"] == "warning" else "🔴"
-        reachable_icon = "✅" if getattr(metrics, "reachable", True) else "❌"
-        
-        device_status_data.append({
-            "Device": hostname,
-            "Status": f"{status_icon} {health_score['status'].upper()}",
-            "Health Score": f"{health_score['score']:.0f}%",
-            "Reachable": reachable_icon,
-            "CPU": f"{metrics.cpu:.1f}%" if hasattr(metrics, 'cpu') else "N/A",
-            "Memory": f"{metrics.memory:.1f}%" if hasattr(metrics, 'memory') else "N/A",
-            "Issues": len(health_score.get("issues", []))
-        })
-    
-    if device_status_data:
-        st.dataframe(pd.DataFrame(device_status_data))
-        
-        # Show critical devices details
-        critical_devices_list = [d for d in device_status_data if "🔴" in d["Status"]]
-        if critical_devices_list:
-            st.subheader("🔴 Critical Devices Details")
-            for device in critical_devices_list:
-                with st.expander(f"Critical: {device['Device']}", expanded=True):
-                    health_score = orchestrator.telemetry.get_device_health_score(device["Device"])
-                    st.markdown(f"**Health Score:** {device['Health Score']}")
-                    st.markdown(f"**Issues:** {', '.join(health_score.get('issues', []))}")
-                    st.markdown(f"**Reachable:** {device['Reachable']}")
-    else:
-        st.info("No device telemetry available. Monitoring live...")
+# ══════════════════════════════════════════════════════════════════════════════
+# WORKSPACE: OBSERVABILITY
+# ══════════════════════════════════════════════════════════════════════════════
+elif workspace == "Observability":
+    st.markdown("## 📡 Observability & Metrics")
+    try:
+        from ui.metrics_panel import (
+            render_fleet_health_kpis, render_device_sparklines,
+            render_telemetry_history_chart, render_anomaly_summary,
+        )
+        render_fleet_health_kpis(orchestrator.state, orchestrator.telemetry)
+        st.divider()
+        render_anomaly_summary(orchestrator.telemetry.detect_anomalies())
+        st.divider()
+        render_device_sparklines(orchestrator.state)
+        st.divider()
+        devices = list(orchestrator.state.get_all_device_metrics().keys())
+        if devices:
+            sel = st.selectbox("History chart for device", devices)
+            if sel:
+                render_telemetry_history_chart(orchestrator.state, sel)
+    except ImportError:
+        health = orchestrator.telemetry.get_health_metrics()
+        if health.get("status") != "no_data":
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Avg CPU",     f"{health['cpu']['average']:.1f}%")
+            c2.metric("Avg Memory",  f"{health['memory']['average']:.1f}%")
+            c3.metric("Avg Latency", f"{health['latency_ms']['average']:.1f}ms")
+            c4.metric("Anomalies",   len(orchestrator.telemetry.detect_anomalies()))
 
-    st.subheader("Network Links Status")
-    # Show link status based on device reachability
-    link_status_data = []
-    device_metrics = orchestrator.state.get_all_device_metrics()
-    
-    # Simple link representation based on device connectivity
-    for hostname, metrics in device_metrics.items():
-        reachable = getattr(metrics, "reachable", True)
-        link_status_data.append({
-            "Source": "CORE",
-            "Target": hostname.upper(),
-            "Status": "UP" if reachable else "DOWN",
-            "Type": "WAN" if "wan" in hostname else "LAN",
-            "Bandwidth": "1Gbps" if reachable else "N/A"
-        })
-    
-    if link_status_data:
-        st.dataframe(pd.DataFrame(link_status_data))
-    else:
-        st.info("No link data available.")
-
+# ══════════════════════════════════════════════════════════════════════════════
+# WORKSPACE: SECURITY
+# ══════════════════════════════════════════════════════════════════════════════
 elif workspace == "security":
-    st.header("🔒 Security Operations")
-    
-    status = orchestrator.get_operational_status()
-    compliance_score = min(100, max(60, int(status["operational_summary"]["operational_score"] + 5)))
-    threat_count = sum(1 for inc in orchestrator.state.get_all_incidents().values() if inc.get("severity") in {"critical", "high"})
-    config_drift = len([cid for cid, comp in orchestrator.state.compliance_status.items() if comp.get("status") != "healthy"])
-    
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Threats Detected", threat_count, "+ network-aware")
-    with col2:
-        st.metric("Compliance Score", f"{compliance_score}%", "+ operational")
-    with col3:
-        st.metric("Config Drift Events", config_drift)
-    
-    st.subheader("Security Alerts")
-    for inc in orchestrator.state.get_all_incidents().values():
-        if inc.get("severity") in {"critical", "high"}:
-            st.error(f"🚨 {inc['title']}: {inc['description']}")
-        elif inc.get("severity") == "medium":
-            st.warning(f"⚠️ {inc['title']}: {inc['description']}")
-    if not orchestrator.state.get_all_incidents():
-        st.info("No active security incidents.")
-
-elif workspace == "executive":
-    st.header("📈 Executive Dashboard")
-    
-    status = orchestrator.get_operational_status()
-    health_score = status["operational_summary"]["operational_score"]
-    open_incidents = status["incidents"]["by_status"].get("new", 0) + status["incidents"]["by_status"].get("investigating", 0)
-    critical_incidents = sum(1 for inc in orchestrator.state.get_all_incidents().values() if inc.get("severity") in {"critical", "high"})
-    services_down = status["operational_summary"]["services"]["down"]
-
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Network Health", f"{health_score:.0f}%", f"{services_down} services impacted")
-    with col2:
-        st.metric("Open Incidents", open_incidents, f"{critical_incidents} critical")
-    with col3:
-        st.metric("MTTR", "~45 min", "demo metric")
-    with col4:
-        st.metric("Risk Exposure", f"{min(100, 100 - int(health_score))}%", "Operational risk")
-    
-    st.subheader("Key Insights")
-    insights = [
-        f"Health score is {health_score:.0f}% with {open_incidents} open incidents.",
-        f"Critical incidents are affecting {services_down} services and require NOC escalation.",
-        f"Autonomous workflows are tracking {status['operational_summary']['workflows_active']} active remediation workflows.",
-        "AI operational guidance is suggesting immediate WAN and BGP stabilization steps.",
-    ]
-    
-    for insight in insights:
-        st.success(f"✅ {insight}")
-    
-    st.subheader("Risk Analysis")
-    if health_score < 70:
-        st.error("🔴 Elevated risk: network health below 70% and critical service impact present.")
-    elif health_score < 85:
-        st.warning("🟠 Medium risk: maintain heightened monitoring and resolve open incidents.")
+    st.markdown("## 🔒 Security Operations")
+    op_s    = orchestrator.state.get_operational_summary()
+    score   = op_s.get("operational_score", 100)
+    threats = sum(1 for i in orchestrator.state.get_all_incidents().values()
+                  if i.get("severity") in {"critical","high"})
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Active Threats",    threats)
+    c2.metric("Compliance Score",  f"{min(100,max(60,int(score+5)))}%")
+    c3.metric("Config Drift",      len(orchestrator.state.compliance_status))
+    critical_inc = [i for i in orchestrator.state.get_all_incidents().values()
+                    if i.get("severity") in {"critical","high"} and i["status"] in {"new","investigating"}]
+    if critical_inc:
+        for inc in critical_inc:
+            st.error(f"🚨 **{inc['title']}** — {inc['description'][:120]}")
     else:
-        st.info("🟢 Low risk: continue running autonomous remediation workflows.")
+        st.success("✅ No active security threats")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# WORKSPACE: EXECUTIVE
+# ══════════════════════════════════════════════════════════════════════════════
+elif workspace == "executive":
+    st.markdown("## 📈 Executive Dashboard")
+    try:
+        op_status  = orchestrator.get_operational_status()
+        op_summary = op_status["operational_summary"]
+    except Exception:
+        op_summary = orchestrator.state.get_operational_summary()
+    score      = op_summary.get("operational_score", 100)
+    open_inc   = sum(1 for i in orchestrator.state.get_all_incidents().values()
+                     if i["status"] in {"new","investigating"})
+    wf_s = tracker.export_summary()
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Network Health",   f"{score:.0f}%")
+    c2.metric("Open Incidents",   open_inc)
+    c3.metric("Auto-Remediated",  wf_s["completed_runs"])
+    c4.metric("Risk Exposure",    f"{min(100,100-int(score))}%")
+    st.progress(int(max(0, min(100, score))))
+
+    for insight in [
+        f"Health score is **{score:.0f}%** with **{open_inc}** open incident(s).",
+        f"Autonomous system executed **{wf_s['total_runs']} workflows** ({wf_s['completed_runs']} completed).",
+        f"**{st.session_state['total_anomalies_seen']} anomalies** processed since session start.",
+    ]:
+        st.info(f"📌 {insight}")
+
+    if score < 70:
+        st.error("🔴 HIGH RISK — Immediate NOC escalation recommended.")
+    elif score < 85:
+        st.warning("🟠 MEDIUM RISK — Maintain elevated monitoring posture.")
+    else:
+        st.success("🟢 LOW RISK — Network operating normally.")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# WORKSPACE: ADMIN
+# ══════════════════════════════════════════════════════════════════════════════
+elif workspace == "admin":
+    st.markdown("## ⚙️ Administration")
+    st.caption("Configure connection settings, credentials, thresholds, and system actions.")
+
+    tab_conn, tab_creds, tab_thresh, tab_actions, tab_aicfg = st.tabs(
+        ["Connection", "Credentials", "Thresholds", "System Actions", "🧠 AI Config"]
+    )
+
+    # ── Connection tab ────────────────────────────────────────────────────────
+    with tab_conn:
+        st.markdown("### GNS3 Tunnel / Pingpy Configuration")
+        st.info(
+            "Set these in **Streamlit Secrets** (Settings → Secrets) for persistence. "
+            "Changes here apply for this session only."
+        )
+        current_gns3_url  = os.environ.get("GNS3_TUNNEL_URL", "")
+        current_router_h  = os.environ.get("GNS3_ROUTER_HOST", "")
+        current_router_p  = os.environ.get("GNS3_ROUTER_PORT", "22")
+
+        with st.form("conn_form"):
+            new_gns3_url = st.text_input(
+                "GNS3 API Tunnel URL (for topology fetch)",
+                value=current_gns3_url,
+                placeholder="e.g. abc123.pinggy.io:3080",
+                help="Used by GNS3Engine to fetch node/link topology via REST API",
+            )
+            new_router_h = st.text_input(
+                "Router SSH Host (pingpy tunnel for CLI access)",
+                value=current_router_h,
+                placeholder="e.g. ugtft-203-145-57-1.run.pinggy-free.link",
+            )
+            new_router_p = st.text_input(
+                "Router SSH Port",
+                value=current_router_p,
+                placeholder="37459",
+            )
+            if st.form_submit_button("Apply Connection Settings", type="primary"):
+                os.environ["GNS3_TUNNEL_URL"]   = new_gns3_url.strip()
+                os.environ["GNS3_ROUTER_HOST"]  = new_router_h.strip()
+                os.environ["GNS3_ROUTER_PORT"]  = new_router_p.strip()
+                st.success("Connection settings applied for this session.")
+                st.caption("Add to Streamlit secrets to persist across restarts.")
+
+        st.divider()
+        st.markdown("**Current GNS3 Status**")
+        g = getattr(orchestrator, "gns3", None)
+        if g and g.available:
+            st.success(f"🟢 Connected to GNS3 v{g.version} — {len(g.nodes)} nodes, {len(g.links)} links")
+            if st.button("🔄 Refresh Topology"):
+                g.refresh()
+                st.success("Topology refreshed.")
+        else:
+            st.warning("GNS3 not connected. Set tunnel URL above and click Apply.")
+            if st.button("Test Connection"):
+                _check_tunnel_and_reconnect()
+                g2 = getattr(orchestrator, "gns3", None)
+                if g2 and g2.available:
+                    st.success(f"Connected! v{g2.version}")
+                else:
+                    st.error("Connection failed. Check tunnel URL and GNS3 server.")
+
+        st.markdown("**Secrets file template** (paste into Streamlit → Settings → Secrets):")
+        st.code(f"""GNS3_TUNNEL_URL = "{new_gns3_url if 'new_gns3_url' in dir() else ''}"
+GNS3_ROUTER_HOST = "{new_router_h if 'new_router_h' in dir() else ''}"
+GNS3_ROUTER_PORT = "{new_router_p if 'new_router_p' in dir() else '22'}"
+GNS3_SSH_USER = "admin"
+GNS3_SSH_PASS = "admin"
+OPENROUTER_API_KEY = "your-key-here"
+""", language="toml")
+
+        # ── Router Login Test (Pinggy tunnel) ─────────────────────────────────
+        st.divider()
+        st.markdown("### 🔐 Router Login Test")
+        st.caption(
+            "Checks that the platform can reach your router through the Pinggy tunnel "
+            "and log in with admin credentials. **Read-only — nothing on the router is changed.**"
+        )
+        st.markdown(
+            "**How to get these values:** on the GNS3 host run "
+            "`ssh -p 443 -R0:<ROUTER_IP>:22 tcp@a.pinggy.io`. "
+            "Pinggy prints a line like `tcp://abcd-1-2-3-4.run.pinggy-free.link:33893` — "
+            "the part before the last colon is the **Host**, the number after is the **Port**."
+        )
+        with st.form("router_login_test_form"):
+            c1, c2 = st.columns([3, 1])
+            with c1:
+                test_host = st.text_input(
+                    "Tunnel Host",
+                    value=os.environ.get("GNS3_ROUTER_HOST", ""),
+                    placeholder="abcd-1-2-3-4.run.pinggy-free.link",
+                )
+            with c2:
+                test_port = st.text_input(
+                    "Tunnel Port",
+                    value=os.environ.get("GNS3_ROUTER_PORT", ""),
+                    placeholder="33893",
+                )
+            c3, c4, c5 = st.columns(3)
+            with c3:
+                test_user = st.text_input("Username", value=os.environ.get("GNS3_SSH_USER", "admin"))
+            with c4:
+                test_pass = st.text_input("Password", value=os.environ.get("GNS3_SSH_PASS", "admin"), type="password")
+            with c5:
+                test_dtype = st.selectbox(
+                    "Login type",
+                    options=["cisco_ios", "cisco_ios_telnet"],
+                    index=0,
+                    help="Use cisco_ios for SSH (default). Use cisco_ios_telnet only if the router has no SSH.",
+                )
+            run_test = st.form_submit_button("🔌 Test Router Login", type="primary")
+
+        if run_test:
+            with st.spinner("Connecting through the tunnel and attempting login..."):
+                try:
+                    from core.router_login_check import validate_router_login
+                    res = validate_router_login(
+                        host=test_host, port=test_port,
+                        username=test_user, password=test_pass,
+                        device_type=test_dtype,
+                    )
+                except Exception as e:
+                    res = {"success": False, "steps": [], "summary": f"Internal error: {e}",
+                           "interfaces": "", "prompt": "", "can_login": False, "can_config": False}
+
+            # Headline verdict
+            if res["success"]:
+                st.success("🎉 " + res["summary"])
+                st.balloons()
+            elif res.get("can_login"):
+                st.warning("⚠️ " + res["summary"])
+            else:
+                st.error("❌ " + res["summary"])
+
+            # Step-by-step breakdown
+            st.markdown("**Step-by-step:**")
+            for s in res["steps"]:
+                icon = "✅" if s["ok"] else "❌"
+                st.markdown(f"{icon} **{s['name']}** — {s['detail']}")
+
+            # Read-only interface output, if we got it
+            if res.get("interfaces"):
+                with st.expander("Router interface summary (read-only)"):
+                    st.code(res["interfaces"], language="text")
+
+            # Offer to save working settings
+            if res["success"]:
+                # Remember the working host/port/type so the real fixer uses them.
+                os.environ["GNS3_ROUTER_HOST"] = test_host.strip()
+                os.environ["GNS3_ROUTER_PORT"] = test_port.strip()
+                os.environ["GNS3_DEVICE_TYPE"] = test_dtype
+                st.info(
+                    "These settings work and have been applied for this session. "
+                    "To persist across restarts, add them to Streamlit Secrets "
+                    f"(including `GNS3_DEVICE_TYPE = \"{test_dtype}\"`)."
+                )
+
+        # ── GitHub log source ─────────────────────────────────────────────────
+        st.divider()
+        st.markdown("### 📥 GitHub Log Source")
+        st.caption(
+            "Pipeline: GNS3 Router → local syslog server → GitHub repo → this platform. "
+            "The autonomous monitor reads router syslog from the raw GitHub URL each cycle."
+        )
+        gh_engine = getattr(monitor, "github_log", None)
+        default_gh_url = (
+            gh_engine.raw_url if gh_engine else
+            os.environ.get("GNS3_LOG_GITHUB_URL", "")
+        )
+        with st.form("gh_log_form"):
+            new_gh_url = st.text_input(
+                "Raw log URL (network_audit.log)",
+                value=default_gh_url,
+                help="raw.githubusercontent.com URL of the log file in your gns3-router-logs repo",
+            )
+            new_gh_dev = st.text_input(
+                "Default device name (for log lines with no hostname)",
+                value=os.environ.get("GNS3_LOG_DEFAULT_DEVICE", "R1"),
+            )
+            if st.form_submit_button("Apply Log Source", type="primary"):
+                os.environ["GNS3_LOG_GITHUB_URL"] = new_gh_url.strip()
+                os.environ["GNS3_LOG_DEFAULT_DEVICE"] = new_gh_dev.strip()
+                if gh_engine:
+                    gh_engine.raw_url = new_gh_url.strip()
+                    gh_engine.default_device = new_gh_dev.strip() or "R1"
+                st.success("Log source applied for this session.")
+
+        if gh_engine:
+            colp, colr = st.columns([1, 4])
+            with colp:
+                if st.button("🔄 Poll Now"):
+                    # Run a FULL monitoring cycle (not just a feed refresh) so any
+                    # down interface is analyzed and turned into an approval card.
+                    gh_engine.poll()
+                    try:
+                        run_monitor_cycle()
+                    except Exception as _e:
+                        st.warning(f"Cycle ran with a note: {_e}")
+                    _pend = len(getattr(monitor, "pending_approvals", {}))
+                    if _pend:
+                        st.success(f"Cycle complete — {_pend} fix(es) now awaiting approval. "
+                                   "Open **Workflows** to approve.")
+                    else:
+                        st.info("Cycle complete — no fixable interfaces are currently down.")
+                    st.rerun()
+            status = gh_engine.status()
+            if status["last_error"]:
+                st.error(f"Last fetch error: {status['last_error']}")
+            else:
+                st.success(
+                    f"🟢 {status['lines_parsed']} log lines parsed · "
+                    f"{len(status['open_interfaces'])} interface(s) currently down"
+                )
+            if status["open_interfaces"]:
+                st.warning("Down now: " + ", ".join(status["open_interfaces"]))
+
+            st.markdown("**Recent log events** (newest first)")
+            events = gh_engine.recent_events[:15]
+            if events:
+                import pandas as _pd
+                df = _pd.DataFrame([
+                    {
+                        "Time": e["ts"],
+                        "Device": e["device"],
+                        "Event": e["mnemonic"],
+                        "Interface": e["interface"] or "—",
+                        "State": e["state"] or "—",
+                        "Action?": "⚠️ fixable" if e["actionable"] else "",
+                    }
+                    for e in events
+                ])
+                st.dataframe(df, use_container_width=True, hide_index=True)
+            else:
+                st.caption("No events parsed yet — click Poll Now.")
+
+        st.markdown("**Add to Streamlit secrets:**")
+        st.code(f'GNS3_LOG_GITHUB_URL = "{default_gh_url}"\n'
+                f'GNS3_LOG_DEFAULT_DEVICE = "R1"\n'
+                '# GNS3_LOG_GITHUB_TOKEN = "ghp_..."  # only for a PRIVATE log repo',
+                language="toml")
+
+    # ── Credentials tab ───────────────────────────────────────────────────────
+    with tab_creds:
+        st.markdown("### Device SSH Credentials")
+        st.warning("⚠️ Credentials entered here are stored in session memory only. Use Streamlit Secrets for production.")
+
+        with st.form("cred_form"):
+            new_user = st.text_input("SSH Username", value=os.environ.get("GNS3_SSH_USER","admin"))
+            new_pass = st.text_input("SSH Password", value=os.environ.get("GNS3_SSH_PASS","admin"), type="password")
+            new_secret = st.text_input("Enable Secret (optional)", value="", type="password")
+            if st.form_submit_button("Save Credentials", type="primary"):
+                os.environ["GNS3_SSH_USER"] = new_user
+                os.environ["GNS3_SSH_PASS"] = new_pass
+                if new_secret:
+                    os.environ["GNS3_SSH_SECRET"] = new_secret
+                # Update the fixer
+                fixer.default_username = new_user
+                fixer.default_password = new_pass
+                st.success("Credentials updated.")
+
+        st.divider()
+        st.markdown("### OpenRouter AI Key")
+        with st.form("ai_form"):
+            new_ai_key = st.text_input("OPENROUTER_API_KEY", value=os.environ.get("OPENROUTER_API_KEY",""),
+                                       type="password")
+            if st.form_submit_button("Save AI Key"):
+                os.environ["OPENROUTER_API_KEY"] = new_ai_key
+                st.success("AI key updated. Restart the app if the AI client was already cached.")
+
+        st.caption(f"Current model: `{MODEL_NAME}`  ·  set `OPENROUTER_MODEL` in Secrets to change it.")
+        if st.button("🔌 Test AI Connection"):
+            with st.spinner("Calling OpenRouter..."):
+                diag = diagnose_ai()
+            if diag["ok"]:
+                st.success(f"✅ AI is working. {diag['detail']}")
+                st.caption(f"Model: `{diag.get('model')}` · Key: `{diag.get('key')}`")
+            else:
+                st.error(f"❌ AI failed at stage: {diag['stage']}")
+                st.code(diag["detail"], language="text")
+                if diag["stage"] == "request":
+                    st.caption("Common causes: invalid/expired key, rate-limited, or the model "
+                               f"isn't available. Current model: `{MODEL_NAME}`. Free options: "
+                               "`deepseek/deepseek-chat-v3-0324:free`, `openrouter/free`.")
+
+    # ── Thresholds tab ────────────────────────────────────────────────────────
+    with tab_thresh:
+        st.markdown("### Anomaly Detection Thresholds")
+        st.info("These thresholds determine when the autonomous monitor triggers a workflow.")
+        col1, col2 = st.columns(2)
+        with col1:
+            cpu_warn  = st.slider("CPU Warning %",    50, 95, 80)
+            cpu_crit  = st.slider("CPU Critical %",   60, 99, 90)
+            mem_warn  = st.slider("Memory Warning %", 50, 95, 80)
+            mem_crit  = st.slider("Memory Critical %",60, 99, 90)
+        with col2:
+            lat_warn  = st.slider("Latency Warning ms",  20, 200, 80)
+            lat_crit  = st.slider("Latency Critical ms", 50, 500, 100)
+            loss_warn = st.slider("Packet Loss Warning %", 1, 10, 3)
+            loss_crit = st.slider("Packet Loss Critical %",2, 20, 5)
+
+        if st.button("Apply Thresholds", type="primary"):
+            try:
+                te = orchestrator.telemetry
+                te.thresholds = {
+                    "cpu_warning": cpu_warn, "cpu_critical": cpu_crit,
+                    "memory_warning": mem_warn, "memory_critical": mem_crit,
+                    "latency_warning": lat_warn, "latency_critical": lat_crit,
+                    "packet_loss_warning": loss_warn, "packet_loss_critical": loss_crit,
+                }
+                st.success("Thresholds updated.")
+            except Exception as e:
+                st.warning(f"Could not update thresholds: {e}")
+
+        st.divider()
+        st.markdown("### Autonomous Mode")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            auto_fix = st.toggle("Auto-fix without approval", value=False,
+                                 help="If ON: fixes execute immediately without waiting for approval")
+        with col_b:
+            poll_int = st.number_input("Poll interval (seconds)", 3, 60, POLL_INTERVAL)
+
+        if st.button("Save Mode Settings"):
+            if auto_fix:
+                st.session_state["auto_fix_mode"] = True
+                st.warning("Auto-fix mode enabled. Fixes will execute without approval.")
+            else:
+                st.session_state["auto_fix_mode"] = False
+                st.success("Approval-required mode enabled.")
+
+    # ── System Actions tab ────────────────────────────────────────────────────
+    with tab_actions:
+        st.markdown("### System Actions")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🗑️ Clear All Incidents", use_container_width=True):
+                orchestrator.state.incidents.clear()
+                st.success("All incidents cleared.")
+            if st.button("🔄 Reset Monitor", use_container_width=True):
+                monitor._active_signatures.clear()
+                monitor.pending_approvals.clear()
+                monitor.approved_run_ids.clear()
+                monitor.rejected_run_ids.clear()
+                monitor.cycle_count = 0
+                st.success("Monitor reset.")
+            if st.button("📋 Clear Workflow History", use_container_width=True):
+                tracker.runs.clear()
+                st.success("Workflow history cleared.")
+
+        with col2:
+            if st.button("🔌 Test Router SSH Connection", use_container_width=True):
+                host = os.environ.get("GNS3_ROUTER_HOST","")
+                port = os.environ.get("GNS3_ROUTER_PORT","22")
+                if not host:
+                    st.error("Set GNS3_ROUTER_HOST in Connection tab first.")
+                else:
+                    with st.spinner(f"Connecting to {host}:{port}..."):
+                        try:
+                            import paramiko
+                            paramiko.Transport._preferred_kex = (
+                                "diffie-hellman-group14-sha1",
+                                "diffie-hellman-group-exchange-sha1",
+                                "diffie-hellman-group1-sha1",
+                            )
+                            paramiko.Transport._preferred_ciphers = (
+                                "aes128-cbc","aes192-cbc","aes256-cbc",
+                            )
+                            from netmiko import ConnectHandler
+                            _dtype = os.environ.get("GNS3_DEVICE_TYPE", "cisco_ios").strip() or "cisco_ios"
+                            _cfg = dict(
+                                device_type=_dtype,
+                                host=host, port=int(port),
+                                password=fixer.default_password,
+                                timeout=20, auth_timeout=20, fast_cli=False,
+                            )
+                            if not _dtype.endswith("_telnet"):
+                                _cfg["username"] = fixer.default_username
+                            conn = ConnectHandler(**_cfg)
+                            out = conn.send_command("show ip interface brief")
+                            conn.disconnect()
+                            st.success("Connection successful!")
+                            st.code(out, language="text")
+                        except Exception as e:
+                            st.error(f"Connection failed: {e}")
+
+            if st.button("📊 Show Current Anomalies", use_container_width=True):
+                anomalies = orchestrator.telemetry.detect_anomalies()
+                if anomalies:
+                    for a in anomalies:
+                        sev_icon = {"critical":"🔴","high":"🟠","medium":"🟡"}.get(a.get("severity",""),"⚪")
+                        st.markdown(f"{sev_icon} **{a.get('type','?')}** on `{a.get('device','?')}` — {a.get('severity','?').upper()}")
+                else:
+                    st.success("No anomalies currently detected.")
+
+        st.divider()
+        st.markdown("### About")
+        g = getattr(orchestrator, "gns3", None)
+        info = {
+            "Platform": "NetBrain AI — Autonomous NOC",
+            "GNS3 Connected": str(g.available if g else False),
+            "GNS3 Version": g.version if (g and g.available) else "N/A",
+            "GNS3 Nodes": str(len(g.nodes)) if (g and g.available) else "0",
+            "Telemetry Mode": "LIVE" if orchestrator.telemetry.live_mode else "SIMULATION",
+            "Monitor Cycles": str(monitor.cycle_count),
+            "Active Signatures": str(len(monitor._active_signatures)),
+        }
+        for k, v in info.items():
+            st.markdown(f"**{k}:** {v}")
+
+    # ── AI Config tab (natural-language → router config, preview + approve) ────
+    with tab_aicfg:
+        st.markdown("### 🧠 Natural-Language Configuration")
+        st.caption(
+            "Describe what you want in plain English. The AI proposes Cisco IOS "
+            "commands, a safety filter blocks anything that could lock out or damage "
+            "the device, you preview the exact commands, then approve to apply to the router."
+        )
+        st.warning(
+            "Advanced feature. Commands run on the **live router** only after you click "
+            "Apply. Lockout/destructive commands (VTY ACLs, removing IPs, reload, "
+            "credential changes, etc.) are always blocked — no exceptions."
+        )
+
+        target_dev = st.text_input(
+            "Target device", value="R2",
+            help="Hostname as seen in logs. Connection uses the same tunnel settings as remediation.",
+        )
+        nl_request = st.text_area(
+            "What do you want to configure?",
+            placeholder="e.g. 'add description Uplink-to-core on GigabitEthernet1/0' or "
+                        "'enable OSPF process 1 and advertise 10.0.0.0/24 in area 0'",
+            height=80,
+        )
+
+        if st.button("🔍 Generate & Preview (no changes yet)", type="primary"):
+            if not nl_request.strip():
+                st.error("Please describe what you want to configure.")
+            else:
+                with st.spinner("Generating configuration and running safety checks..."):
+                    try:
+                        from core.ai_config import generate_config
+                        facts = ""
+                        try:
+                            facts = monitor._device_facts(target_dev.strip())
+                        except Exception:
+                            pass
+                        res = generate_config(nl_request.strip(), target_dev.strip(),
+                                              call_ai, facts)
+                    except Exception as e:
+                        res = {"status": "unavailable", "reasons": [str(e)],
+                               "commands": [], "summary": "", "blocked": []}
+                st.session_state["aicfg_result"] = res
+                st.session_state["aicfg_device"] = target_dev.strip()
+
+        res = st.session_state.get("aicfg_result")
+        if res:
+            status = res.get("status")
+            if status == "ok":
+                mode = res.get("mode", "config")
+                risk = res.get("risk", "unknown")
+                risk_icon = {"low": "🟢", "medium": "🟡", "high": "🟠"}.get(risk, "⚪")
+
+                if mode == "diagnostic":
+                    st.info(f"🔍 Diagnostic query — read-only. {res.get('summary','')}")
+                    st.markdown("**Commands:**")
+                    st.code("\n".join(res.get("commands", [])), language="text")
+                    if st.button("▶ Run diagnostic on router", type="primary", key="aicfg_diag"):
+                        with st.spinner(f"Querying {st.session_state.get('aicfg_device')}..."):
+                            try:
+                                cmds = [c for c in res.get("commands", [])
+                                        if c.lower() not in ("configure terminal", "conf t", "end", "exit")]
+                                override = {"diagnostic": cmds, "fix": [], "verify": []}
+                                anomaly = {"device": st.session_state.get("aicfg_device"),
+                                           "type": "manual_diagnostic", "interface": ""}
+                                device_cfg = monitor._get_device_config(st.session_state.get("aicfg_device"))
+                                logs = []
+                                fr = fixer.fix(anomaly, device_config=device_cfg,
+                                               step_logger=lambda m: logs.append(m),
+                                               command_override=override)
+                            except Exception as e:
+                                fr, logs = None, [f"Error: {e}"]
+                            # Detect simulation FIRST — don't show fake output as real.
+                            if fr and getattr(fr, "simulated", False):
+                                st.warning(
+                                    "⚠️ No live router connection — the tunnel is down "
+                                    "(sidebar shows 'waiting GNS3'). The output below would "
+                                    "be simulated/fake, so it's not shown. Start your Pinggy "
+                                    "tunnel and make sure GNS3_ROUTER_HOST/PORT in Secrets "
+                                    "match it, then try again."
+                                )
+                            elif fr and getattr(fr, "outputs", None):
+                                # Collect the REAL router output.
+                                pairs = list(zip(getattr(fr, "commands_executed", []), fr.outputs))
+                                raw_block = "\n\n".join(
+                                    f"$ {c}\n{o}" for c, o in pairs if o)
+
+                                # AI interpretation — explain what the output means.
+                                st.markdown("### 🤖 AI Analysis")
+                                with st.spinner("Analyzing the router output..."):
+                                    interp_prompt = (
+                                        "You are a senior Cisco network engineer. The operator "
+                                        f"asked: \"{nl_request.strip()}\".\n\n"
+                                        "Here is the ACTUAL output from the router:\n\n"
+                                        f"{raw_block}\n\n"
+                                        "Answer the operator's question directly and concisely in "
+                                        "plain English. State clearly whether things are OK or not, "
+                                        "what the key findings are, and any concern or next step. "
+                                        "Do not just repeat the raw output — interpret it."
+                                    )
+                                    try:
+                                        answer = call_ai(interp_prompt)
+                                    except Exception:
+                                        answer = ""
+                                if answer:
+                                    st.markdown(answer)
+                                else:
+                                    st.info("AI interpretation unavailable — showing raw output below.")
+
+                                with st.expander("📄 Raw router output"):
+                                    for c, o in pairs:
+                                        st.markdown(f"`{c}`")
+                                        st.code(o or "(no output)", language="text")
+                            else:
+                                st.error("No output returned. Check tunnel/console.")
+                                st.code("\n".join(logs), language="text")
+                            st.session_state.pop("aicfg_result", None)
+                else:
+                    st.success(f"✅ Safe configuration generated. Risk: {risk_icon} {risk}")
+                    st.markdown(f"**What this does:** {res.get('summary','(no summary)')}")
+                    st.markdown("**Commands to be applied (preview):**")
+                    st.code("\n".join(res.get("commands", [])), language="text")
+                    st.info("Review carefully. Click Apply only if this is exactly what you intend.")
+                    if st.button("⚡ Apply to Router", type="primary", key="aicfg_apply"):
+                        with st.spinner(f"Applying configuration to {st.session_state.get('aicfg_device')}..."):
+                            try:
+                                cmds = res.get("commands", [])
+                                inner = [c for c in cmds if c.lower() not in
+                                         ("configure terminal", "conf t", "end", "exit")]
+                                override = {"diagnostic": [], "fix": inner + ["end"], "verify": []}
+                                anomaly = {"device": st.session_state.get("aicfg_device"),
+                                           "type": "manual_config", "interface": ""}
+                                device_cfg = monitor._get_device_config(st.session_state.get("aicfg_device"))
+                                logs = []
+                                fr = fixer.fix(anomaly, device_config=device_cfg,
+                                               step_logger=lambda m: logs.append(m),
+                                               command_override=override)
+                            except Exception as e:
+                                fr = None
+                                logs = [f"Error: {e}"]
+                            if fr and getattr(fr, "success", False) and not getattr(fr, "simulated", True):
+                                st.success(f"✅ Applied LIVE to {st.session_state.get('aicfg_device')}.")
+                                st.code("\n".join(logs), language="text")
+                            elif fr and getattr(fr, "simulated", False):
+                                st.warning("⚠️ Ran in SIMULATION (no live tunnel). Router not changed. "
+                                           "Set GNS3_ROUTER_HOST/PORT/DEVICE_TYPE in Secrets.")
+                            else:
+                                st.error("❌ Apply failed.")
+                                st.code("\n".join(logs), language="text")
+                            st.session_state.pop("aicfg_result", None)
+            elif status == "unsafe":
+                st.error("❌ Blocked for safety — this request would run lockout/destructive commands.")
+                st.markdown("**Blocked commands:**")
+                st.code("\n".join(res.get("blocked", [])), language="text")
+                st.caption("Per policy, these are never applied. Rephrase to avoid changing "
+                           "management access, credentials, routing processes, or device state.")
+            elif status == "empty":
+                st.warning("The AI did not produce safe commands for this request.")
+                for r in res.get("reasons", []):
+                    st.caption(f"• {r}")
+            else:
+                st.error("AI unavailable. " + "; ".join(res.get("reasons", [])))
+                st.caption("Check that OPENROUTER_API_KEY is set in Secrets.")
+
+
 
 else:
-    # Default operations view
-    st.header("🚀 Operations Center")
-    st.info("Select a workspace from the sidebar to get started")
+    st.header("🧠 NetBrain AI — Autonomous Network Operations")
+    st.info("Select a workspace from the sidebar.")
+    c1, c2, c3 = st.columns(3)
+    c1.markdown("**🖥 Dashboard**\nLive NOC with device health cards and event feed")
+    c2.markdown("**🔄 Workflows**\nApprove/reject fixes, watch 7-step pipeline")
+    c3.markdown("**⚙️ Admin**\nConfigure tunnel, credentials, thresholds")
