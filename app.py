@@ -1351,13 +1351,14 @@ OPENROUTER_API_KEY = "your-key-here"
                     gh_engine.default_device = new_gh_dev.strip() or "R1"
                 st.success("Log source applied for this session.")
 
-        if gh_engine:
+        if gh_engine and callable(getattr(gh_engine, "status", None)):
             colp, colr = st.columns([1, 4])
             with colp:
                 if st.button("🔄 Poll Now"):
                     # Run a FULL monitoring cycle (not just a feed refresh) so any
                     # down interface is analyzed and turned into an approval card.
-                    gh_engine.poll()
+                    if callable(getattr(gh_engine, "poll", None)):
+                        gh_engine.poll()
                     try:
                         run_monitor_cycle()
                     except Exception as _e:
@@ -1381,23 +1382,25 @@ OPENROUTER_API_KEY = "your-key-here"
                 st.warning("Down now: " + ", ".join(status["open_interfaces"]))
 
             st.markdown("**Recent log events** (newest first)")
-            events = gh_engine.recent_events[:15]
+            events = getattr(gh_engine, "recent_events", [])[:15]
             if events:
                 import pandas as _pd
                 df = _pd.DataFrame([
                     {
-                        "Time": e["ts"],
-                        "Device": e["device"],
-                        "Event": e["mnemonic"],
-                        "Interface": e["interface"] or "—",
-                        "State": e["state"] or "—",
-                        "Action?": "⚠️ fixable" if e["actionable"] else "",
+                        "Time": e.get("ts", ""),
+                        "Device": e.get("device", ""),
+                        "Event": e.get("mnemonic", ""),
+                        "Interface": e.get("interface") or "—",
+                        "State": e.get("state") or "—",
+                        "Action?": "⚠️ fixable" if e.get("actionable") else "",
                     }
                     for e in events
                 ])
                 st.dataframe(df, use_container_width=True, hide_index=True)
             else:
                 st.caption("No events parsed yet — click Poll Now.")
+        else:
+            st.warning("GitHub log engine is unavailable or incomplete. Check app logs for init errors.")
 
         st.markdown("**Add to Streamlit secrets:**")
         st.code(f'GNS3_LOG_GITHUB_URL = "{default_gh_url}"\n'
