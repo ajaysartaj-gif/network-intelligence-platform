@@ -17,6 +17,10 @@ st.set_page_config(
 
 # ── IMPORTS ───────────────────────────────────────────────────────────────────
 import os
+from core.ai_engine import ask_ai, get_api_key
+from core.orchestration_engine import OperationsOrchestrator
+from core.github_log_engine import GitHubLogEngine
+from config.netmiko_devices import load_device_catalog
 import time
 import logging
 import random
@@ -93,7 +97,17 @@ if DATABASE_AVAILABLE:
     try:
         seed_database()
     except Exception as e:
-        logger.warning(f"DB seed failed: {e}")
+        logger.warning(f"Database seed failed: {e}")
+
+orchestrator = OperationsOrchestrator()
+
+# GitHub logs engine and device catalog
+gh_log_engine = GitHubLogEngine()
+device_catalog = load_device_catalog()
+
+# =========================================================
+# AI CONFIG
+# =========================================================
 
 # ── AI CONFIG (must come before _get_monitor) ─────────────────────────────────
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
@@ -900,7 +914,66 @@ elif workspace == "Workflows":
                 "Duration": f"{run.elapsed_seconds:.1f}s",
                 "Summary":  (run.summary or "—")[:55],
             })
+
         st.dataframe(pd.DataFrame(wf_rows), use_container_width=True)
+
+    st.divider()
+    st.markdown("### GitHub Router Logs (gns3-router-logs)")
+    col_sync, col_file = st.columns([1, 3])
+    with col_sync:
+        if st.button("Sync logs from GitHub", key="sync_github_logs"):
+            sync_result = gh_log_engine.sync_repo()
+            st.success(f"Sync result: {sync_result}")
+            # refresh device catalog
+            device_catalog = load_device_catalog()
+            st.experimental_rerun()
+    with col_file:
+        logs = gh_log_engine.list_logs()
+        if not logs:
+            st.info("No logs found. Click 'Sync logs from GitHub' to fetch the repo.")
+        else:
+            selected = st.selectbox("Select log file", options=logs, index=0, key="selected_github_log")
+            if selected:
+                content = gh_log_engine.read_log(selected)
+                st.code(content[:20000])
+                if st.button("Analyze selected log", key="analyze_github_log"):
+                    with st.spinner("Analyzing log with AI..."):
+                        analysis = gh_log_engine.analyze_log(content)
+                        st.text_area("AI Analysis", value=analysis, height=240)
+                        suggested_cmds = gh_log_engine.propose_remediation_commands(analysis)
+                        st.subheader("Suggested Diagnostic / Remediation Commands")
+                        for cmd in suggested_cmds:
+                            st.code(cmd)
+
+                        # Remediation approval UI
+                        if device_catalog:
+                            device_names = [d.get('hostname') or d.get('host') for d in device_catalog]
+                            chosen = st.selectbox("Target device for remediation", options=device_names, key="gh_log_target_device")
+                            target_device = next((d for d in device_catalog if (d.get('hostname') or d.get('host')) == chosen), device_catalog[0])
+                            dry = st.checkbox("Dry run (do not execute commands)", value=True, key="gh_log_dry_run")
+                            if st.button("Approve & Execute Remediation", key="gh_log_execute"):
+                                with st.spinner("Executing remediation..."):
+                                    res = gh_log_engine.apply_remediation(target_device, suggested_cmds, dry_run=dry)
+                                    if res.get('error'):
+                                        st.error(f"Remediation failed: {res['error']}")
+                                    else:
+                                        st.success(f"Remediation executed: {res.get('executed')}")
+                                        st.text_area("Execution Output", value='\n\n'.join(res.get('output', []))[:20000], height=300)
+                        else:
+                            st.info("No device catalog configured. Set NETBRAIN_DEVICE_* env vars or NETBRAIN_DEVICE_CATALOG.")
+
+    st.divider()
+    st.markdown("### Incident & Recovery Timeline")
+    if active_incidents or recovery_feed:
+        timeline_rows = []
+        for event in st.session_state.get("incident_timeline", [])[:15]:
+            timeline_rows.append({
+                "time": event.get("timestamp", "")[-8:],
+                "event": event.get("event", "unknown"),
+                "severity": event.get("severity", "info").upper(),
+                "details": event.get("details", "")[:80],
+            })
+        st.dataframe(pd.DataFrame(timeline_rows), use_container_width=True)
 
     st.divider()
     wf_s = tracker.export_summary()
