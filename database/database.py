@@ -2,8 +2,9 @@ import os
 from contextlib import contextmanager
 from typing import Dict, Generator, List, Optional
 
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, select, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from database.models import (
@@ -40,12 +41,41 @@ def get_session() -> Generator[Session, None, None]:
 
 def create_db() -> None:
     Base.metadata.create_all(engine)
+    if DATABASE_URL.startswith("sqlite"):
+        with engine.connect() as conn:
+            for alter_sql in [
+                "ALTER TABLE devices ADD COLUMN username VARCHAR(64)",
+                "ALTER TABLE devices ADD COLUMN password_enc TEXT",
+                "ALTER TABLE devices ADD COLUMN port INTEGER DEFAULT 22",
+                "ALTER TABLE devices ADD COLUMN role VARCHAR(64)",
+                "ALTER TABLE devices ADD COLUMN site VARCHAR(64)",
+                "ALTER TABLE devices ADD COLUMN status VARCHAR(32) DEFAULT 'unknown'",
+                "ALTER TABLE devices ADD COLUMN cpu INTEGER DEFAULT 0",
+                "ALTER TABLE devices ADD COLUMN memory INTEGER DEFAULT 0",
+                "ALTER TABLE devices ADD COLUMN model VARCHAR(128)",
+                "ALTER TABLE devices ADD COLUMN os_version VARCHAR(128)",
+                "ALTER TABLE devices ADD COLUMN last_seen DATETIME",
+                "ALTER TABLE devices ADD COLUMN created_by VARCHAR(64)",
+                "ALTER TABLE incidents ADD COLUMN assigned_to VARCHAR(64)",
+                "ALTER TABLE incidents ADD COLUMN affected_service VARCHAR(128)",
+            ]:
+                try:
+                    conn.execute(text(alter_sql))
+                except Exception:
+                    pass
 
 
 def seed_database() -> bool:
     create_db()
     from database.seed import seed_database as run_seed
-    return run_seed()
+    try:
+        return run_seed()
+    except OperationalError as exc:
+        if DATABASE_URL.startswith("sqlite") and "no such column" in str(exc).lower():
+            Base.metadata.drop_all(engine)
+            Base.metadata.create_all(engine)
+            return run_seed()
+        raise
 
 
 def _serialize_device(device: Device) -> Dict[str, object]:

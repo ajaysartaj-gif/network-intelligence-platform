@@ -5,7 +5,7 @@ from sqlalchemy import (
     Column, Integer, String, Text, DateTime, Boolean,
     Float, ForeignKey, create_engine
 )
-from sqlalchemy.orm import DeclarativeBase, relationship
+from sqlalchemy.orm import DeclarativeBase, relationship, synonym
 
 
 class Base(DeclarativeBase):
@@ -16,8 +16,10 @@ class Device(Base):
     __tablename__ = "devices"
     id = Column(Integer, primary_key=True, autoincrement=True)
     hostname = Column(String(128), nullable=False, index=True)
-    ip = Column(String(45), nullable=False)
+    ip_address = Column(String(45), nullable=False)
+    ip = synonym("ip_address")
     vendor = Column(String(64), default="cisco_ios")
+    model = Column(String(128))
     username = Column(String(64))
     password_enc = Column(Text)
     port = Column(Integer, default=22)
@@ -46,6 +48,8 @@ class Incident(Base):
     status = Column(String(32), default="active", index=True)
     business_impact = Column(Text)
     affected_users = Column(Integer, default=0)
+    assigned_to = Column(String(64))
+    affected_service = Column(String(128))
     ai_confidence = Column(Integer, default=0)
     workspace = Column(String(64))
     created_by = Column(String(64))
@@ -63,6 +67,59 @@ class IncidentDevice(Base):
     device_id = Column(Integer, ForeignKey("devices.id"), nullable=False)
     incident = relationship("Incident", back_populates="devices")
     device = relationship("Device", back_populates="incidents")
+
+
+class AIQuery(Base):
+    __tablename__ = "ai_queries"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    query = Column(Text, nullable=False)
+    response = Column(Text, nullable=False)
+    source = Column(String(64), default="user")
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class ChangeRequest(Base):
+    __tablename__ = "change_requests"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    title = Column(String(256), nullable=False)
+    status = Column(String(32), default="pending", index=True)
+    risk = Column(String(32), default="low")
+    implementation_date = Column(String(64))
+    engineer = Column(String(64), default="netops")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ComplianceRule(Base):
+    __tablename__ = "compliance_rules"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(128), nullable=False)
+    description = Column(Text)
+    vendor = Column(String(64))
+    severity = Column(String(32), default="low")
+    enabled = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class NetworkLink(Base):
+    __tablename__ = "network_links"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source_device = Column(String(128), nullable=False)
+    destination_device = Column(String(128), nullable=False)
+    link_type = Column(String(64))
+    status = Column(String(32), default="unknown")
+    bandwidth_mbps = Column(Float, default=0.0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class Telemetry(Base):
+    __tablename__ = "telemetries"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    device_id = Column(Integer, nullable=False)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    metric_name = Column(String(64), nullable=False)
+    value = Column(Float)
+    unit = Column(String(32), default="")
+    tags = Column(String(128))
 
 
 class Change(Base):
