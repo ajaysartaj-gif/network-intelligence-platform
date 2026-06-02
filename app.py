@@ -1330,7 +1330,7 @@ OPENROUTER_API_KEY = "your-key-here"
         )
         gh_engine = getattr(monitor, "github_log", None)
         default_gh_url = (
-            gh_engine.raw_url if gh_engine else
+            getattr(gh_engine, "raw_url", "") if gh_engine else
             os.environ.get("GNS3_LOG_GITHUB_URL", "")
         )
         with st.form("gh_log_form"):
