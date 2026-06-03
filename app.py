@@ -962,7 +962,7 @@ elif workspace == "Workflows":
             st.success(f"Sync result: {sync_result}")
             # refresh device catalog
             device_catalog = load_device_catalog()
-            st.experimental_rerun()
+            st.rerun()
     with col_file:
         logs = gh_log_engine.list_logs()
         if not logs:
@@ -1000,6 +1000,11 @@ elif workspace == "Workflows":
 
     st.divider()
     st.markdown("### Incident & Recovery Timeline")
+    active_incidents = [
+        i for i in orchestrator.state.get_all_incidents().values()
+        if i["status"] in {"new", "investigating"}
+    ]
+    recovery_feed = st.session_state.get("incident_timeline", [])
     if active_incidents or recovery_feed:
         timeline_rows = []
         for event in st.session_state.get("incident_timeline", [])[:15]:
