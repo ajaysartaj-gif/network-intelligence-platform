@@ -841,9 +841,9 @@ if __name__ == "__main__":
         print(f"\nBulk complete: {ok}/{len(results)} succeeded\n")
         for r in results:
             icon = "✅" if r.success else "❌"
+            detail = repr(r.output[:60].strip()) if r.success else repr(r.error[:60])
             print(f"  {icon} {r.device_ip:18s} [{r.method:7s}] "
-                  f"{r.latency_ms:6.1f}ms  "
-                  f"{r.output[:60].strip()!r if r.success else r.error[:60]!r}")
+                  f"{r.latency_ms:6.1f}ms  {detail}")
 
     if args.scan:
         ips = _expand_subnet(args.scan)
