@@ -1,115 +1,98 @@
 #!/bin/bash
 # ════════════════════════════════════════════════════════════
-# NetBrain AI — macOS / Linux Startup Script
+# NetBrain AI — Universal Startup Script
+# Works on: macOS · Linux · GitHub Codespaces · Cursor
 # ════════════════════════════════════════════════════════════
 
-set -e
+CYAN='\033[0;36m'; GREEN='\033[0;32m'
+YELLOW='\033[1;33m'; RED='\033[0;31m'
+BOLD='\033[1m'; NC='\033[0m'
 
-CYAN='\033[0;36m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-BOLD='\033[1m'
-NC='\033[0m' # No Color
+PORT=8501
 
 echo ""
-echo -e "${CYAN}${BOLD}"
-echo "  ███╗   ██╗███████╗████████╗██████╗ ██████╗  █████╗ ██╗███╗   ██╗"
-echo "  ████╗  ██║██╔════╝╚══██╔══╝██╔══██╗██╔══██╗██╔══██╗██║████╗  ██║"
-echo "  ██╔██╗ ██║█████╗     ██║   ██████╔╝██████╔╝███████║██║██╔██╗ ██║"
-echo "  ██║╚██╗██║██╔══╝     ██║   ██╔══██╗██╔══██╗██╔══██║██║██║╚██╗██║"
-echo "  ██║ ╚████║███████╗   ██║   ██████╔╝██║  ██║██║  ██║██║██║ ╚████║"
-echo "  ╚═╝  ╚═══╝╚══════╝   ╚═╝   ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝╚═╝  ╚═══╝"
-echo -e "${NC}"
-echo -e "${BOLD}                    AI-Native Network OS${NC}"
-echo ""
-echo "════════════════════════════════════════════════════════════"
-echo "  Starting NetBrain AI locally..."
-echo "════════════════════════════════════════════════════════════"
+echo -e "${CYAN}${BOLD}  NetBrain AI — AI-Native Network OS${NC}"
+echo "  ════════════════════════════════════"
 echo ""
 
-# ── Step 1: Find the repo folder ─────────────────────────────────────────────
-# Script's own directory is assumed to be the repo root
+# ── Detect environment ────────────────────────────────────────────────────────
+IN_CODESPACE=false
+IN_CURSOR=false
+[ -n "$CODESPACE_NAME" ] && IN_CODESPACE=true
+[ -n "$CURSOR_TRACE_ID" ] || [ -n "$VSCODE_GIT_IPC_HANDLE" ] && IN_CURSOR=true
+
+if $IN_CODESPACE; then
+    echo -e "${CYAN}[ENV]${NC} GitHub Codespaces detected"
+elif $IN_CURSOR; then
+    echo -e "${CYAN}[ENV]${NC} Cursor / VS Code terminal detected"
+else
+    echo -e "${CYAN}[ENV]${NC} Local machine"
+fi
+
+# ── Find repo root ────────────────────────────────────────────────────────────
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 REPO_PATH="$SCRIPT_DIR"
 
-# Fallback: check common clone locations
 if [ ! -f "$REPO_PATH/app.py" ]; then
-    CANDIDATES=(
-        "$HOME/network-intelligence-platform"
-        "$HOME/Documents/network-intelligence-platform"
-        "$HOME/Desktop/network-intelligence-platform"
-    )
-    for dir in "${CANDIDATES[@]}"; do
+    for dir in \
+        "$HOME/network-intelligence-platform" \
+        "$HOME/Documents/network-intelligence-platform" \
+        "$HOME/Desktop/network-intelligence-platform" \
+        "/workspaces/network-intelligence-platform"; do
         if [ -f "$dir/app.py" ]; then
-            REPO_PATH="$dir"
-            break
+            REPO_PATH="$dir"; break
         fi
     done
 fi
 
 if [ ! -f "$REPO_PATH/app.py" ]; then
-    echo -e "${RED}[ERROR] Could not find app.py in:${NC}"
-    echo "  $REPO_PATH"
-    echo ""
-    echo "Please move this script into your cloned repo folder and try again."
-    echo "Expected folder: ~/network-intelligence-platform"
+    echo -e "${RED}[ERROR]${NC} Cannot find app.py. Put this script inside your repo folder."
     exit 1
 fi
 
 cd "$REPO_PATH"
-echo -e "${GREEN}[OK]${NC} Repo folder: $REPO_PATH"
+echo -e "${GREEN}[OK]${NC} Repo: $REPO_PATH"
 
-# ── Step 2: Check Python ──────────────────────────────────────────────────────
+# ── Find Python ───────────────────────────────────────────────────────────────
 PYTHON_CMD=""
 for cmd in python3 python python3.12 python3.11 python3.10; do
     if command -v "$cmd" &>/dev/null; then
-        VERSION=$("$cmd" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+')
-        MAJOR=$(echo "$VERSION" | cut -d. -f1)
-        MINOR=$(echo "$VERSION" | cut -d. -f2)
-        if [ "$MAJOR" -ge 3 ] && [ "$MINOR" -ge 10 ]; then
-            PYTHON_CMD="$cmd"
-            break
+        VER=$("$cmd" -c "import sys; print(sys.version_info >= (3,10))" 2>/dev/null)
+        if [ "$VER" = "True" ]; then
+            PYTHON_CMD="$cmd"; break
         fi
     fi
 done
 
 if [ -z "$PYTHON_CMD" ]; then
-    echo -e "${RED}[ERROR] Python 3.10+ not found.${NC}"
-    echo ""
-    echo "Install it:"
-    echo "  macOS  → brew install python  (or https://python.org/downloads)"
+    echo -e "${RED}[ERROR]${NC} Python 3.10+ not found."
+    echo "  macOS  → brew install python  OR  https://python.org/downloads"
     echo "  Linux  → sudo apt install python3.11"
     exit 1
 fi
-echo -e "${GREEN}[OK]${NC} Python: $($PYTHON_CMD --version)"
+echo -e "${GREEN}[OK]${NC} $($PYTHON_CMD --version)"
 
-# ── Step 3: Virtual environment ───────────────────────────────────────────────
-VENV_DIR="$REPO_PATH/.venv"
-if [ ! -d "$VENV_DIR" ]; then
-    echo ""
-    echo "[INFO] Creating virtual environment (.venv)..."
-    $PYTHON_CMD -m venv "$VENV_DIR"
-    echo -e "${GREEN}[OK]${NC} Virtual environment created."
+# ── Virtual environment (skip in Codespaces — already has global pip) ─────────
+if ! $IN_CODESPACE; then
+    VENV_DIR="$REPO_PATH/.venv"
+    if [ ! -d "$VENV_DIR" ]; then
+        echo "[INFO] Creating virtual environment..."
+        $PYTHON_CMD -m venv "$VENV_DIR"
+    fi
+    source "$VENV_DIR/bin/activate"
+    echo -e "${GREEN}[OK]${NC} Virtual environment active."
 fi
 
-# Activate venv
-source "$VENV_DIR/bin/activate"
-echo -e "${GREEN}[OK]${NC} Virtual environment active."
-
-# ── Step 4: Install/upgrade dependencies ─────────────────────────────────────
-echo ""
+# ── Install dependencies ──────────────────────────────────────────────────────
 echo "[INFO] Checking dependencies..."
-pip install --upgrade pip --quiet
+pip install --upgrade pip --quiet 2>/dev/null
 pip install -r requirements.txt --quiet
-echo -e "${GREEN}[OK]${NC} All dependencies ready."
+echo -e "${GREEN}[OK]${NC} Dependencies ready."
 
-# ── Step 5: Create .env if missing ───────────────────────────────────────────
+# ── Create .env if missing ────────────────────────────────────────────────────
 if [ ! -f "$REPO_PATH/.env" ]; then
-    echo ""
-    echo -e "${YELLOW}[INFO] No .env file found. Creating template...${NC}"
+    echo -e "${YELLOW}[INFO]${NC} Creating .env template..."
     cat > "$REPO_PATH/.env" << 'ENV'
-# NetBrain AI — Local Environment
 # Get your key from: https://openrouter.ai/keys
 OPENROUTER_API_KEY=your_openrouter_key_here
 
@@ -123,60 +106,56 @@ ROUTER_DEFAULT_USERNAME=admin
 ROUTER_DEFAULT_PASSWORD=
 ROUTER_ENABLE_SECRET=
 ENV
-
-    echo -e "${YELLOW}[ACTION NEEDED]${NC} .env file created at: $REPO_PATH/.env"
-    echo ""
-    echo "  Open it and add your OPENROUTER_API_KEY, then re-run this script."
-    echo "  Opening in your default editor..."
-    echo ""
-
-    # Try to open in a text editor
-    if command -v open &>/dev/null; then
-        open -t "$REPO_PATH/.env"   # macOS
-    elif command -v xdg-open &>/dev/null; then
-        xdg-open "$REPO_PATH/.env"  # Linux
-    else
-        echo "  → Edit manually: $REPO_PATH/.env"
-    fi
-
-    read -p "Press Enter after you have saved your API key..."
+    echo -e "${YELLOW}[ACTION NEEDED]${NC} Edit .env and add your OPENROUTER_API_KEY"
+    # Open in editor
+    command -v open &>/dev/null && open -t "$REPO_PATH/.env"   # macOS
+    command -v nano &>/dev/null && echo "  Run: nano $REPO_PATH/.env"
+    read -p "  Press Enter after saving your API key..."
 fi
 
-# ── Step 6: Get LAN IP ────────────────────────────────────────────────────────
-PORT=8501
+# ── Get LAN IP ────────────────────────────────────────────────────────────────
+LAN_IP=""
 if command -v ipconfig &>/dev/null; then
-    # macOS (ipconfig getifaddr)
-    LAN_IP=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || echo "")
+    LAN_IP=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null)
 fi
 if [ -z "$LAN_IP" ]; then
-    # Linux / fallback
     LAN_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 fi
-if [ -z "$LAN_IP" ]; then
-    LAN_IP="<your-local-ip>"
-fi
+[ -z "$LAN_IP" ] && LAN_IP="<your-local-ip>"
 
-# ── Step 7: Open browser after a short delay ─────────────────────────────────
-(sleep 3 && open "http://localhost:$PORT" 2>/dev/null || \
-           xdg-open "http://localhost:$PORT" 2>/dev/null) &
-
-# ── Step 8: Launch Streamlit ─────────────────────────────────────────────────
+# ── Build access URLs ─────────────────────────────────────────────────────────
 echo ""
 echo "════════════════════════════════════════════════════════════"
 echo -e "  ${BOLD}NetBrain AI is starting!${NC}"
 echo ""
-echo -e "  ${CYAN}Localhost  →  http://localhost:$PORT${NC}"
-echo -e "  ${CYAN}LAN URL    →  http://$LAN_IP:$PORT${NC}"
-echo "  (LAN URL works from any device on your Wi-Fi)"
+
+if $IN_CODESPACE; then
+    CODESPACE_URL="https://${CODESPACE_NAME}-${PORT}.app.github.dev"
+    echo -e "  ${CYAN}Codespaces URL → ${CODESPACE_URL}${NC}"
+    echo "  (Also check the PORTS tab in VS Code / Codespaces)"
+else
+    echo -e "  ${CYAN}Localhost  →  http://localhost:${PORT}${NC}"
+    echo -e "  ${CYAN}LAN URL    →  http://${LAN_IP}:${PORT}${NC}"
+    echo "  (LAN URL works from any device on your Wi-Fi)"
+    # Auto-open browser
+    (sleep 4 && {
+        command -v open &>/dev/null && open "http://localhost:$PORT"
+        command -v xdg-open &>/dev/null && xdg-open "http://localhost:$PORT"
+    }) &
+fi
+
 echo ""
 echo "  Press Ctrl+C to stop."
 echo "════════════════════════════════════════════════════════════"
 echo ""
 
+# ── Launch Streamlit ──────────────────────────────────────────────────────────
 streamlit run app.py \
-    --server.address 0.0.0.0 \
     --server.port "$PORT" \
-    --server.headless false \
+    --server.address "0.0.0.0" \
+    --server.headless true \
+    --server.enableCORS false \
+    --server.enableXsrfProtection false \
     --browser.gatherUsageStats false
 
 echo ""
