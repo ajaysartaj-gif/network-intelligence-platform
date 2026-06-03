@@ -29,6 +29,13 @@ from typing import List, Dict, Any, Optional
 
 import pandas as pd
 
+# ── LOGGING ───────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+logger = logging.getLogger(__name__)
+
 # ── LOCAL ROUTER ACCESS (primary access layer — Pinggy is fallback only) ──────
 try:
     from Local_Router_Access import get_manager as _get_lra_manager, render_local_access_ui, LocalLinkGenerator
@@ -36,13 +43,6 @@ try:
 except Exception as _lra_err:
     LRA_AVAILABLE = False
     logger.warning(f"Local_Router_Access not loaded: {_lra_err}")
-
-# ── LOGGING ───────────────────────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-)
-logger = logging.getLogger(__name__)
 
 # ── OPTIONAL IMPORTS ──────────────────────────────────────────────────────────
 OPENAI_AVAILABLE = False
