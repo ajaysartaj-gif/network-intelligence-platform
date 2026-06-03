@@ -29,6 +29,14 @@ from typing import List, Dict, Any, Optional
 
 import pandas as pd
 
+# ── LOCAL ROUTER ACCESS (primary access layer — Pinggy is fallback only) ──────
+try:
+    from Local_Router_Access import get_manager as _get_lra_manager, render_local_access_ui, LocalLinkGenerator
+    LRA_AVAILABLE = True
+except Exception as _lra_err:
+    LRA_AVAILABLE = False
+    logger.warning(f"Local_Router_Access not loaded: {_lra_err}")
+
 # ── LOGGING ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -651,7 +659,35 @@ with st.sidebar:
     else:
         st.info("🔵 Simulation mode\nSet GNS3_TUNNEL_URL to connect live")
 
-# ══════════════════════════════════════════════════════════════════════════════
+    # ── LOCAL ACCESS LINKS ────────────────────────────────────────────────────
+    st.divider()
+    st.markdown("**🔗 LOCAL ACCESS**")
+    if LRA_AVAILABLE:
+        try:
+            _links = LocalLinkGenerator.generate_links()
+            _lan   = _links.get("local_lan", "")
+            _local = _links.get("localhost", "")
+            if _lan:
+                st.markdown(
+                    f"<div style='background:#0c1a2e;border:1px solid #22d3ee;border-radius:6px;"
+                    f"padding:.45rem .7rem;font-size:.78rem;color:#22d3ee;font-family:monospace;"
+                    f"word-break:break-all;'>🌐 <a href='{_lan}' target='_blank' "
+                    f"style='color:#22d3ee;text-decoration:none;'>{_lan}</a></div>",
+                    unsafe_allow_html=True,
+                )
+            if _local:
+                st.caption(f"🖥️ [localhost]({_local})  ·  [Open Local Router Access](?workspace=local_router)")
+            pinggy_url = _links.get("pinggy_fallback", "")
+            if pinggy_url:
+                st.caption(f"☁️ Pinggy fallback: [link]({pinggy_url})")
+            else:
+                st.caption("☁️ Pinggy: _not configured_ (secondary)")
+        except Exception:
+            st.caption("Local links unavailable")
+    else:
+        st.caption("Local_Router_Access module not found")
+
+
 # WORKSPACE CONTENT
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1742,8 +1778,35 @@ OPENROUTER_API_KEY = "your-key-here"
                 st.caption("Check that OPENROUTER_API_KEY is set in Secrets.")
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# WORKSPACE: LOCAL ROUTER ACCESS
+# ══════════════════════════════════════════════════════════════════════════════
+elif workspace == "local_router":
+    if LRA_AVAILABLE:
+        render_local_access_ui(_get_lra_manager())
+    else:
+        st.error("❌ Local_Router_Access module could not be loaded.")
+        st.markdown("""
+        **To fix this:**
+        1. Make sure `Local_Router_Access.py` is in the **root** of your repository (same folder as `app.py`)
+        2. Install dependencies: `pip install paramiko requests`
+        3. Restart the Streamlit app
+        """)
+        with st.expander("📋 Quick manual access (fallback)"):
+            st.markdown("Use these links to access your app on the local network:")
+            import socket
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as _s:
+                    _s.connect(("8.8.8.8", 80))
+                    _local_ip = _s.getsockname()[0]
+            except Exception:
+                _local_ip = "127.0.0.1"
+            _port = int(os.environ.get("STREAMLIT_PORT", 8501))
+            st.code(f"http://localhost:{_port}", language="text")
+            st.code(f"http://{_local_ip}:{_port}", language="text")
 
-else:
+
+
     st.header("🧠 NetBrain AI — Autonomous Network Operations")
     st.info("Select a workspace from the sidebar.")
     c1, c2, c3 = st.columns(3)
