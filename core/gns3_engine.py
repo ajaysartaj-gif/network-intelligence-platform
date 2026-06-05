@@ -63,7 +63,7 @@ class GNS3Engine:
                 logger.info(f"GNS3 connected — version {self.version}")
                 self.load_project()
             else:
-                logger.info(f"GNS3 returned HTTP {r.status_code}")
+                logger.debug(f"GNS3 returned HTTP {r.status_code} — not connected")
         except Exception as e:
             logger.info(f"GNS3 not reachable ({e}); running in simulation mode")
 
