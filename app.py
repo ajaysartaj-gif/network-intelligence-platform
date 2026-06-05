@@ -115,11 +115,17 @@ if DATABASE_AVAILABLE:
     except Exception as e:
         logger.warning(f"Database seed failed: {e}")
 
-orchestrator = OperationsOrchestrator()
+# GitHub logs engine and device catalog — cached to avoid re-init on every rerun
+@st.cache_resource
+def _get_gh_log_engine():
+    return GitHubLogEngine()
 
-# GitHub logs engine and device catalog
-gh_log_engine = GitHubLogEngine()
-device_catalog = load_device_catalog()
+@st.cache_resource
+def _get_device_catalog():
+    return load_device_catalog()
+
+gh_log_engine  = _get_gh_log_engine()
+device_catalog = _get_device_catalog()
 
 # =========================================================
 # AI CONFIG
@@ -2062,6 +2068,7 @@ OPENROUTER_API_KEY = "your-key-here"
                             }
                             st.session_state[f"login_mode_{dev.ip}"] = True
                             st.session_state[f"ts_expanded_{dev.ip}"] = True
+                            st.session_state.pop(f"poll_count_{dev.ip}", None)
                             disc.start_login_session(dev.ip, _creds)
                             st.rerun()
 
@@ -2082,6 +2089,7 @@ OPENROUTER_API_KEY = "your-key-here"
                             }
                             st.session_state[f"login_mode_{dev.ip}"] = False
                             st.session_state[f"ts_expanded_{dev.ip}"] = True
+                            st.session_state.pop(f"poll_count_{dev.ip}", None)
                             disc.start_ai_troubleshoot(dev.ip, call_ai, _creds, approved=False)
                             st.rerun()
 
@@ -2098,11 +2106,22 @@ OPENROUTER_API_KEY = "your-key-here"
                     # ── Live Progress + Details Panel ─────────────────────────
                     if st.session_state.get(f"ts_expanded_{dev.ip}") and session:
 
-                        # Auto-rerun while session is still running to stream steps live
+                        # Live polling: use st.empty + rerun only when running,
+                        # capped at max 30 polls to prevent infinite loop
+                        _poll_key = f"poll_count_{dev.ip}"
                         if sess_status == "running":
-                            import time as _time
-                            _time.sleep(0.8)
-                            st.rerun()
+                            _polls = st.session_state.get(_poll_key, 0)
+                            if _polls < 30:
+                                st.session_state[_poll_key] = _polls + 1
+                                import time as _time
+                                _time.sleep(1.2)
+                                st.rerun()
+                            else:
+                                # Safety: stop polling after 30 cycles (~36 sec)
+                                st.warning("⏳ Session taking longer than expected — click Refresh to check progress.")
+                        else:
+                            # Reset poll counter when session completes
+                            st.session_state.pop(_poll_key, None)
 
                         with st.container():
                             st.markdown("""
