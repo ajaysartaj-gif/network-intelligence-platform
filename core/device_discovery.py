@@ -688,6 +688,25 @@ class DeviceDiscoveryEngine:
     def get_session(self, ip: str) -> Optional[TroubleshootSession]:
         return self._sessions.get(ip)
 
+    def get_pending(self) -> List[DiscoveredDevice]:
+        """Return all devices awaiting approval."""
+        with self._lock:
+            return list(self._pending.values())
+
+    def get_approved(self) -> List[DiscoveredDevice]:
+        """Return all approved devices."""
+        with self._lock:
+            return list(self._approved.values())
+
+    def get_all(self) -> List[DiscoveredDevice]:
+        """Return every known device (pending + approved + rejected)."""
+        with self._lock:
+            return list(self._known.values())
+
+    def get_device(self, ip: str) -> Optional[DiscoveredDevice]:
+        """Return a single device by IP, or None."""
+        return self._known.get(ip)
+
     def approve_and_apply_fixes(self, ip: str, call_ai_fn,
                                  credentials: Dict[str, str]) -> TroubleshootSession:
         """Re-run troubleshoot with apply_fixes=True after user approves."""
