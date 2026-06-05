@@ -367,21 +367,41 @@ class DeviceDiscoveryEngine:
             if not NETMIKO_OK:
                 step("Login", False, "netmiko not installed"); session.status = "failed"; return
 
+            # Override telnet device_type if SSH port is open (router config has ip ssh version 2)
+            if ssh_port == 22 and "telnet" in dtype:
+                dtype = "cisco_ios"
+                step("Device Type", True, "Auto-corrected to cisco_ios (SSH port 22 is open)")
+
+            # Read credentials: explicit > env > default
+            _user   = (credentials.get("username") or "").strip() or os.environ.get("GNS3_SSH_USER", "admin")
+            _pass   = (credentials.get("password") or "").strip() or os.environ.get("GNS3_SSH_PASS", "admin")
+            _secret = (credentials.get("enable_secret") or "").strip() or os.environ.get("GNS3_SSH_SECRET", "")
+
             conn = None
             try:
                 from netmiko import ConnectHandler
                 cfg = dict(
-                    device_type=dtype, host=ip, port=ssh_port,
-                    username=credentials.get("username", "admin"),
-                    password=credentials.get("password", ""),
-                    timeout=20, auth_timeout=20, fast_cli=False,
+                    device_type=dtype,
+                    host=ip,
+                    port=ssh_port,
+                    username=_user,
+                    password=_pass,
+                    timeout=30,
+                    auth_timeout=30,
+                    conn_timeout=15,
+                    fast_cli=False,
+                    global_delay_factor=2,
                 )
-                if credentials.get("enable_secret"):
-                    cfg["secret"] = credentials["enable_secret"]
+                if _secret:
+                    cfg["secret"] = _secret
+                step("Connecting", True, f"Trying {dtype} — {_user}@{ip}:{ssh_port}")
                 conn = ConnectHandler(**cfg)
-                step("Login", True, f"Logged in as {cfg['username']}")
+                step("Login", True, f"Logged in as {_user}")
             except Exception as e:
-                step("Login", False, str(e)); session.status = "failed"; return
+                full_err = str(e).replace("\n", " ").strip()
+                step("Login", False, f"{full_err}")
+                session.status = "failed"
+                return
 
             try:
                 # 5. Hostname from show version
@@ -514,25 +534,36 @@ class DeviceDiscoveryEngine:
         except Exception:
             pass
 
+        # Override telnet device_type if SSH port is open
+        if ssh_port == 22 and "telnet" in dtype:
+            dtype = "cisco_ios"
+
+        # Read credentials: explicit > env > default
+        _user   = (creds.get("username") or "").strip() or os.environ.get("GNS3_SSH_USER", "admin")
+        _pass   = (creds.get("password") or "").strip() or os.environ.get("GNS3_SSH_PASS", "admin")
+        _secret = (creds.get("enable_secret") or "").strip() or os.environ.get("GNS3_SSH_SECRET", "")
+
         conn = None
         try:
             cfg: Dict[str, Any] = dict(
                 device_type=dtype,
                 host=ip,
                 port=ssh_port,
-                username=creds.get("username", "admin"),
-                password=creds.get("password", "admin"),
-                timeout=20,
-                auth_timeout=20,
-                conn_timeout=10,
+                username=_user,
+                password=_pass,
+                timeout=30,
+                auth_timeout=30,
+                conn_timeout=15,
                 fast_cli=False,
+                global_delay_factor=2,
             )
-            if creds.get("enable_secret"):
-                cfg["secret"] = creds["enable_secret"]
+            if _secret:
+                cfg["secret"] = _secret
             conn = ConnectHandler(**cfg)
-            step("SSH Login", True, f"Logged in as {cfg['username']}")
+            step("SSH Login", True, f"Logged in as {_user}")
         except Exception as e:
-            step("SSH Login", False, str(e))
+            full_err = str(e).replace("\n", " ").strip()
+            step("SSH Login", False, full_err)
             session.status = "failed"
             return
 
