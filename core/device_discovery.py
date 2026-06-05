@@ -257,6 +257,19 @@ class DeviceDiscoveryEngine:
                 logger.info(f"Device {ip} approved and registered in LocalRouterAccessManager.")
             except Exception as e:
                 logger.warning(f"Could not register {ip} in LRA: {e}")
+
+            # Persist to disk immediately
+            _save_device_state(self)
+
+            # Seed the log store with an approval entry
+            try:
+                get_log_store().add_log(ip, {
+                    "type": "approval",
+                    "summary": f"Device approved by {approved_by}. Type: {dev.device_type}. "
+                               f"Open ports: {dev.open_ports}. Source: {dev.source}.",
+                })
+            except Exception:
+                pass
             return True
 
     def reject_device(self, ip: str) -> bool:
@@ -266,6 +279,7 @@ class DeviceDiscoveryEngine:
                 return False
             dev.status = "rejected"
             self._pending.pop(ip, None)
+            _save_device_state(self)
             return True
 
     # - Getters -
@@ -437,12 +451,32 @@ class DeviceDiscoveryEngine:
             )
             session.output = full_diag
 
+            # Save raw diagnostic output to log store immediately
+            try:
+                get_log_store().add_log(ip, {
+                    "type": "ssh_diagnostics",
+                    "summary": f"Collected {len(raw_outputs)} commands via SSH",
+                    "commands": list(raw_outputs.keys()),
+                    "output_chars": len(full_diag),
+                })
+            except Exception:
+                pass
+
             # - Step 5: AI diagnosis -
             step("AI Analysis", True, "Sending diagnostics to AI...")
+
+            # Include previous device history as context for better AI suggestions
+            prior_context = ""
+            try:
+                prior_context = get_log_store().get_context_for_ai(ip)
+            except Exception:
+                pass
+
             diagnosis_prompt = (
                 "You are a senior Cisco network engineer performing remote diagnostics.\n"
                 f"Device IP: {ip}  Hostname: {session.device_hostname}\n\n"
-                "Below is the full diagnostic output from the device:\n\n"
+                + (f"PRIOR HISTORY FOR THIS DEVICE:\n{prior_context}\n\n" if prior_context else "")
+                + "CURRENT DIAGNOSTIC OUTPUT FROM THE DEVICE:\n\n"
                 f"{full_diag[:6000]}\n\n"
                 "Tasks:\n"
                 "1. Identify ALL problems, anomalies, or misconfigurations visible in this output.\n"
@@ -471,7 +505,6 @@ class DeviceDiscoveryEngine:
             if apply_fixes and fix_plan:
                 step("Apply Fixes", True, f"Applying {len(fix_plan)} command(s)...")
                 try:
-                    # Separate exec vs config commands
                     config_cmds = [c.replace("[CONFIG]", "").strip()
                                    for c in fix_plan if "[CONFIG]" in c]
                     exec_cmds   = [c.replace("[EXEC]", "").strip()
@@ -489,11 +522,31 @@ class DeviceDiscoveryEngine:
                          "Fixes applied",
                          output="\n\n".join(fix_output))
                     session.fix_applied = True
+                    # Log applied fixes
+                    try:
+                        get_log_store().add_log(ip, {
+                            "type": "fix_applied",
+                            "summary": f"Applied {len(fix_plan)} fix command(s)",
+                            "commands": fix_plan,
+                        })
+                    except Exception:
+                        pass
                 except Exception as e:
                     step("Apply Fixes", False, str(e))
             elif fix_plan:
                 step("Fixes Ready", True,
                      f"{len(fix_plan)} fix command(s) ready — awaiting approval")
+
+            # Always save AI result to log store
+            try:
+                get_log_store().add_ai_result(
+                    ip,
+                    diagnosis=session.ai_diagnosis,
+                    fix_plan=session.ai_fix_plan,
+                    applied=session.fix_applied,
+                )
+            except Exception:
+                pass
 
         finally:
             try:
@@ -576,16 +629,184 @@ def _extract_fix_commands(ai_text: str) -> List[str]:
     return cmds
 
 
-# - Singleton -
+# ══════════════════════════════════════════════════════════════════════════════
+# Device Log Store — persists SSH output + AI suggestions to disk
+# ══════════════════════════════════════════════════════════════════════════════
 
-_engine_instance: Optional[DeviceDiscoveryEngine] = None
+class DeviceLogStore:
+    """
+    Stores per-device logs (raw SSH output, AI diagnosis, fix history) in a
+    local JSON file so AI always has context even across restarts.
+    """
+
+    def __init__(self, path: str = ".netbrain_device_logs.json"):
+        self._path = path
+        self._lock = threading.Lock()
+        self._data: Dict[str, Any] = self._load()
+
+    def _load(self) -> Dict[str, Any]:
+        try:
+            if os.path.exists(self._path):
+                with open(self._path) as f:
+                    return json.load(f)
+        except Exception:
+            pass
+        return {}
+
+    def _save(self):
+        try:
+            with open(self._path, "w") as f:
+                json.dump(self._data, f, indent=2, default=str)
+        except Exception as e:
+            logger.warning(f"DeviceLogStore save failed: {e}")
+
+    def add_log(self, ip: str, entry: Dict[str, Any]):
+        """Append a log entry for a device."""
+        with self._lock:
+            if ip not in self._data:
+                self._data[ip] = {"logs": [], "ai_history": [], "last_health": "unknown"}
+            self._data[ip]["logs"].append({
+                **entry,
+                "ts": datetime.now().isoformat(),
+            })
+            # Keep last 50 entries per device
+            self._data[ip]["logs"] = self._data[ip]["logs"][-50:]
+            self._save()
+
+    def add_ai_result(self, ip: str, diagnosis: str, fix_plan: str, applied: bool):
+        """Store an AI diagnosis + fix result."""
+        with self._lock:
+            if ip not in self._data:
+                self._data[ip] = {"logs": [], "ai_history": [], "last_health": "unknown"}
+            self._data[ip]["ai_history"].append({
+                "ts": datetime.now().isoformat(),
+                "diagnosis": diagnosis[:3000],
+                "fix_plan": fix_plan[:1000],
+                "applied": applied,
+            })
+            # Extract health from diagnosis
+            for line in diagnosis.splitlines():
+                if line.startswith("HEALTH:"):
+                    self._data[ip]["last_health"] = line.replace("HEALTH:", "").strip()
+            self._data[ip]["ai_history"] = self._data[ip]["ai_history"][-20:]
+            self._save()
+
+    def get_context_for_ai(self, ip: str, max_chars: int = 4000) -> str:
+        """Return a formatted context string for the AI prompt."""
+        with self._lock:
+            d = self._data.get(ip, {})
+        if not d:
+            return ""
+        parts = []
+        # Last health status
+        health = d.get("last_health", "unknown")
+        parts.append(f"Last known health: {health}")
+        # Recent raw logs (last 5)
+        logs = d.get("logs", [])[-5:]
+        if logs:
+            parts.append("\nRecent device logs:")
+            for log in logs:
+                parts.append(f"  [{log.get('ts','')}] {log.get('type','')} — {str(log.get('summary',''))[:200]}")
+        # Last AI diagnosis
+        ai_hist = d.get("ai_history", [])
+        if ai_hist:
+            last = ai_hist[-1]
+            parts.append(f"\nPrevious AI diagnosis ({last.get('ts','')}):")
+            parts.append(last.get("diagnosis", "")[:1500])
+            if last.get("applied"):
+                parts.append(f"\nPrevious fix applied: {last.get('fix_plan','')[:500]}")
+        result = "\n".join(parts)
+        return result[:max_chars]
+
+    def get_all_logs(self, ip: str) -> Dict[str, Any]:
+        with self._lock:
+            return dict(self._data.get(ip, {}))
+
+    def get_all_devices(self) -> Dict[str, Any]:
+        with self._lock:
+            return dict(self._data)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Persistent device state — survives Streamlit reruns and restarts
+# ══════════════════════════════════════════════════════════════════════════════
+
+import json
+
+_STATE_FILE = ".netbrain_devices.json"
+
+
+def _save_device_state(engine: "DeviceDiscoveryEngine"):
+    """Write approved + pending devices to JSON so they survive restarts."""
+    try:
+        state = {
+            "approved": {ip: d.to_dict() for ip, d in engine._approved.items()},
+            "pending":  {ip: d.to_dict() for ip, d in engine._pending.items()},
+            "known":    {ip: d.to_dict() for ip, d in engine._known.items()},
+        }
+        with open(_STATE_FILE, "w") as f:
+            json.dump(state, f, indent=2, default=str)
+    except Exception as e:
+        logger.warning(f"Could not save device state: {e}")
+
+
+def _load_device_state(engine: "DeviceDiscoveryEngine"):
+    """Restore devices from JSON on startup."""
+    if not os.path.exists(_STATE_FILE):
+        return
+    try:
+        with open(_STATE_FILE) as f:
+            state = json.load(f)
+        for ip, d in state.get("known", {}).items():
+            dev = DiscoveredDevice(**{k: v for k, v in d.items()
+                                      if k in DiscoveredDevice.__dataclass_fields__})
+            engine._known[ip] = dev
+        for ip, d in state.get("approved", {}).items():
+            dev = engine._known.get(ip)
+            if dev:
+                dev.status = "approved"
+                engine._approved[ip] = dev
+        for ip, d in state.get("pending", {}).items():
+            dev = engine._known.get(ip)
+            if dev and dev.status == "pending":
+                engine._pending[ip] = dev
+        logger.info(f"Restored {len(engine._approved)} approved, "
+                    f"{len(engine._pending)} pending devices from state file.")
+    except Exception as e:
+        logger.warning(f"Could not load device state: {e}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Singleton — anchored to module level AND patchable from session_state
+# ══════════════════════════════════════════════════════════════════════════════
+
+_engine_instance: Optional["DeviceDiscoveryEngine"] = None
+_log_store_instance: Optional[DeviceLogStore] = None
 _engine_lock = threading.Lock()
 
-def get_discovery_engine() -> DeviceDiscoveryEngine:
+
+def get_discovery_engine() -> "DeviceDiscoveryEngine":
+    """
+    Returns the singleton DeviceDiscoveryEngine.
+    Module-level singleton survives Streamlit reruns within the same process.
+    JSON state file ensures devices persist across full restarts.
+    """
     global _engine_instance
     if _engine_instance is None:
         with _engine_lock:
             if _engine_instance is None:
-                _engine_instance = DeviceDiscoveryEngine()
-                _engine_instance.start()
+                eng = DeviceDiscoveryEngine()
+                _load_device_state(eng)   # restore from disk
+                eng.start()
+                _engine_instance = eng
     return _engine_instance
+
+
+def get_log_store() -> DeviceLogStore:
+    """Returns the singleton DeviceLogStore."""
+    global _log_store_instance
+    if _log_store_instance is None:
+        with _engine_lock:
+            if _log_store_instance is None:
+                _log_store_instance = DeviceLogStore()
+    return _log_store_instance
