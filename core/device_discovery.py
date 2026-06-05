@@ -333,36 +333,6 @@ class DeviceDiscoveryEngine:
                 step("SSH Port", False, f"Port {ssh_port} closed"); session.status = "failed"; return
             step("SSH Port", True, f"Port {ssh_port} open")
 
-            # 3. Patch paramiko — mirrors working ~/.ssh/config:
-            #    KexAlgorithms  diffie-hellman-group1-sha1,...
-            #    HostKeyAlgorithms ssh-rsa
-            #    Ciphers aes128-cbc,3des-cbc,...  MACs hmac-sha1
-            try:
-                import paramiko
-                paramiko.Transport._preferred_kex = (
-                    "diffie-hellman-group1-sha1",
-                    "diffie-hellman-group14-sha1",
-                    "diffie-hellman-group-exchange-sha1",
-                    "diffie-hellman-group14-sha256",
-                    "diffie-hellman-group-exchange-sha256",
-                )
-                paramiko.Transport._preferred_keys = (
-                    "ssh-rsa",
-                    "ecdsa-sha2-nistp256",
-                    "ssh-ed25519",
-                )
-                paramiko.Transport._preferred_ciphers = (
-                    "aes128-cbc", "3des-cbc", "aes192-cbc", "aes256-cbc",
-                    "aes128-ctr", "aes192-ctr", "aes256-ctr",
-                )
-                paramiko.Transport._preferred_macs = (
-                    "hmac-sha1", "hmac-md5",
-                    "hmac-sha2-256", "hmac-sha2-512",
-                )
-                step("Cipher Patch", True, "ssh-rsa + group1 + aes-cbc applied")
-            except Exception as _pe:
-                step("Cipher Patch", False, str(_pe))
-
             # 4. Login
             if not NETMIKO_OK:
                 step("Login", False, "netmiko not installed"); session.status = "failed"; return
@@ -502,37 +472,6 @@ class DeviceDiscoveryEngine:
             step("SSH Login", False, "netmiko not installed")
             session.status = "failed"
             return
-
-        # Patch paramiko — match working ~/.ssh/config for GNS3 routers
-        try:
-            import paramiko
-            # Match the working ~/.ssh/config for GNS3 / Cisco IOS:
-            # KexAlgorithms diffie-hellman-group1-sha1,...
-            # Ciphers aes128-cbc,3des-cbc,...
-            # HostKeyAlgorithms ssh-rsa
-            # MACs hmac-sha1
-            paramiko.Transport._preferred_kex = (
-                "diffie-hellman-group1-sha1",
-                "diffie-hellman-group14-sha1",
-                "diffie-hellman-group-exchange-sha1",
-                "diffie-hellman-group14-sha256",
-                "diffie-hellman-group-exchange-sha256",
-            )
-            paramiko.Transport._preferred_keys = (
-                "ssh-rsa",
-                "ecdsa-sha2-nistp256",
-                "ssh-ed25519",
-            )
-            paramiko.Transport._preferred_ciphers = (
-                "aes128-cbc", "3des-cbc", "aes192-cbc", "aes256-cbc",
-                "aes128-ctr", "aes192-ctr", "aes256-ctr",
-            )
-            paramiko.Transport._preferred_macs = (
-                "hmac-sha1", "hmac-md5",
-                "hmac-sha2-256", "hmac-sha2-512",
-            )
-        except Exception:
-            pass
 
         # Override telnet device_type if SSH port is open
         if ssh_port == 22 and "telnet" in dtype:
