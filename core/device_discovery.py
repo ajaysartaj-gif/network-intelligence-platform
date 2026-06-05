@@ -305,11 +305,7 @@ class DeviceDiscoveryEngine:
 
     def start_login_session(self, ip: str,
                              credentials: Dict[str, str]) -> "TroubleshootSession":
-        """
-        Open an SSH/Telnet login session to the device.
-        Runs quick show commands to confirm login and capture banner + prompt.
-        Stores result in the log store for AI context.
-        """
+        """SSH into device: ping → port → cipher-patch → login → show version → interfaces."""
         dev = self._known.get(ip)
         hostname = dev.hostname if dev else ip
         session = TroubleshootSession(device_ip=ip, device_hostname=hostname)
@@ -323,60 +319,53 @@ class DeviceDiscoveryEngine:
                     "ts": datetime.now().strftime("%H:%M:%S"),
                 })
 
-            dtype = (dev.device_type if dev else "cisco_ios") or "cisco_ios"
+            dtype    = (dev.device_type if dev else "cisco_ios") or "cisco_ios"
             ssh_port = int(dev.ssh_port if dev else 22)
 
-            # Step 1: Ping
+            # 1. Ping
             rtt = self._icmp_ping(ip)
             if rtt is None:
-                step("Ping", False, f"{ip} unreachable")
-                session.status = "failed"
-                return
+                step("Ping", False, f"{ip} unreachable"); session.status = "failed"; return
             step("Ping", True, f"RTT {rtt:.1f} ms")
 
-            # Step 2: Port
+            # 2. Port
             if not self._tcp_check(ip, ssh_port):
-                step("SSH Port", False, f"Port {ssh_port} closed")
-                session.status = "failed"
-                return
+                step("SSH Port", False, f"Port {ssh_port} closed"); session.status = "failed"; return
             step("SSH Port", True, f"Port {ssh_port} open")
 
-            # Step 3: Patch paramiko — match working ~/.ssh/config for GNS3 routers
-        try:
-            import paramiko
-            # Match the working ~/.ssh/config for GNS3 / Cisco IOS:
-            # KexAlgorithms diffie-hellman-group1-sha1,...
-            # Ciphers aes128-cbc,3des-cbc,...
-            # HostKeyAlgorithms ssh-rsa
-            # MACs hmac-sha1
-            paramiko.Transport._preferred_kex = (
-                "diffie-hellman-group1-sha1",
-                "diffie-hellman-group14-sha1",
-                "diffie-hellman-group-exchange-sha1",
-                "diffie-hellman-group14-sha256",
-                "diffie-hellman-group-exchange-sha256",
-            )
-            paramiko.Transport._preferred_keys = (
-                "ssh-rsa",
-                "ecdsa-sha2-nistp256",
-                "ssh-ed25519",
-            )
-            paramiko.Transport._preferred_ciphers = (
-                "aes128-cbc", "3des-cbc", "aes192-cbc", "aes256-cbc",
-                "aes128-ctr", "aes192-ctr", "aes256-ctr",
-            )
-            paramiko.Transport._preferred_macs = (
-                "hmac-sha1", "hmac-md5",
-                "hmac-sha2-256", "hmac-sha2-512",
-            )
-        except Exception:
-            pass
+            # 3. Patch paramiko — mirrors working ~/.ssh/config:
+            #    KexAlgorithms  diffie-hellman-group1-sha1,...
+            #    HostKeyAlgorithms ssh-rsa
+            #    Ciphers aes128-cbc,3des-cbc,...  MACs hmac-sha1
+            try:
+                import paramiko
+                paramiko.Transport._preferred_kex = (
+                    "diffie-hellman-group1-sha1",
+                    "diffie-hellman-group14-sha1",
+                    "diffie-hellman-group-exchange-sha1",
+                    "diffie-hellman-group14-sha256",
+                    "diffie-hellman-group-exchange-sha256",
+                )
+                paramiko.Transport._preferred_keys = (
+                    "ssh-rsa",
+                    "ecdsa-sha2-nistp256",
+                    "ssh-ed25519",
+                )
+                paramiko.Transport._preferred_ciphers = (
+                    "aes128-cbc", "3des-cbc", "aes192-cbc", "aes256-cbc",
+                    "aes128-ctr", "aes192-ctr", "aes256-ctr",
+                )
+                paramiko.Transport._preferred_macs = (
+                    "hmac-sha1", "hmac-md5",
+                    "hmac-sha2-256", "hmac-sha2-512",
+                )
+                step("Cipher Patch", True, "ssh-rsa + group1 + aes-cbc applied")
+            except Exception as _pe:
+                step("Cipher Patch", False, str(_pe))
 
-            # Step 4: Login
+            # 4. Login
             if not NETMIKO_OK:
-                step("Login", False, "netmiko not installed")
-                session.status = "failed"
-                return
+                step("Login", False, "netmiko not installed"); session.status = "failed"; return
 
             conn = None
             try:
@@ -384,7 +373,7 @@ class DeviceDiscoveryEngine:
                 cfg = dict(
                     device_type=dtype, host=ip, port=ssh_port,
                     username=credentials.get("username", "admin"),
-                    password=credentials.get("password", "admin"),
+                    password=credentials.get("password", ""),
                     timeout=20, auth_timeout=20, fast_cli=False,
                 )
                 if credentials.get("enable_secret"):
@@ -392,75 +381,46 @@ class DeviceDiscoveryEngine:
                 conn = ConnectHandler(**cfg)
                 step("Login", True, f"Logged in as {cfg['username']}")
             except Exception as e:
-                step("Login", False, str(e))
-                session.status = "failed"
-                return
+                step("Login", False, str(e)); session.status = "failed"; return
 
             try:
-                # Step 5: Grab hostname from show version
+                # 5. Hostname from show version
+                ver = ""
                 try:
-                    ver = conn.send_command("show version", read_timeout=10)
+                    ver = conn.send_command("show version", read_timeout=15)
                     m = re.search(r'^(\S+)\s+uptime', ver, re.MULTILINE | re.I)
                     if m:
                         session.device_hostname = m.group(1)
-                        if dev:
-                            dev.hostname = m.group(1)
+                        if dev: dev.hostname = m.group(1)
                         step("Hostname", True, f"Router: {session.device_hostname}")
                 except Exception:
-                    ver = ""
+                    pass
 
-                # Step 6: Capture prompt / banner
+                # 6. Prompt
                 prompt = conn.find_prompt()
-                step("Prompt", True, f"CLI prompt: {prompt}")
+                step("Prompt", True, f"CLI: {prompt}")
 
-                # Step 7: Quick interface status
-                brief = conn.send_command("show ip interface brief", read_timeout=10)
-                step("Interfaces", True,
-                     f"{brief.count('up')} up / {brief.count('down')} down",
-                     output=brief)
+                # 7. Interface brief
+                brief = conn.send_command("show ip interface brief", read_timeout=15)
+                up   = brief.count(" up ")
+                down = brief.count(" down ")
+                step("Interfaces", True, f"{up} up / {down} down", output=brief)
 
                 session.output = f"=== show version ===\n{ver}\n\n=== show ip interface brief ===\n{brief}"
                 session.ai_diagnosis = f"Login successful. Prompt: {prompt}"
-
                 try:
-                    get_log_store().add_log(ip, {
-                        "type": "manual_login",
-                        "summary": f"Login OK. Prompt: {prompt}. "
-                                   f"Interfaces: {brief.count('up')} up / {brief.count('down')} down",
-                    })
+                    get_log_store().add_log(ip, {"type": "manual_login",
+                        "summary": f"Login OK as {cfg['username']}. Prompt: {prompt}. {up} up/{down} down."})
                 except Exception:
                     pass
-
             finally:
-                try:
-                    conn.disconnect()
-                except Exception:
-                    pass
+                try: conn.disconnect()
+                except Exception: pass
                 session.status = "complete"
                 session.completed_at = datetime.now().isoformat()
 
-        t = threading.Thread(target=_run, daemon=True)
-        t.start()
+        threading.Thread(target=_run, daemon=True).start()
         return session
-
-    # - Getters -
-
-    def get_pending(self) -> List[DiscoveredDevice]:
-        with self._lock:
-            return list(self._pending.values())
-
-    def get_approved(self) -> List[DiscoveredDevice]:
-        with self._lock:
-            return list(self._approved.values())
-
-    def get_all(self) -> List[DiscoveredDevice]:
-        with self._lock:
-            return list(self._known.values())
-
-    def get_device(self, ip: str) -> Optional[DiscoveredDevice]:
-        return self._known.get(ip)
-
-    # - AI Troubleshooting -
 
     def start_ai_troubleshoot(self, ip: str, call_ai_fn,
                                credentials: Dict[str, str],
