@@ -282,6 +282,156 @@ class DeviceDiscoveryEngine:
             _save_device_state(self)
             return True
 
+    def disapprove_device(self, ip: str) -> bool:
+        """Move an approved device back to the pending queue."""
+        with self._lock:
+            dev = self._approved.get(ip)
+            if not dev:
+                return False
+            dev.status = "pending"
+            dev.approved_by = ""
+            self._approved.pop(ip, None)
+            self._pending[ip] = dev
+            _save_device_state(self)
+            try:
+                get_log_store().add_log(ip, {
+                    "type": "disapproval",
+                    "summary": "Device moved back to pending by admin.",
+                })
+            except Exception:
+                pass
+            logger.info(f"Device {ip} disapproved — moved to pending.")
+            return True
+
+    def start_login_session(self, ip: str,
+                             credentials: Dict[str, str]) -> "TroubleshootSession":
+        """
+        Open an SSH/Telnet login session to the device.
+        Runs quick show commands to confirm login and capture banner + prompt.
+        Stores result in the log store for AI context.
+        """
+        dev = self._known.get(ip)
+        hostname = dev.hostname if dev else ip
+        session = TroubleshootSession(device_ip=ip, device_hostname=hostname)
+        self._sessions[ip] = session
+
+        def _run():
+            def step(name, ok, detail="", output=""):
+                session.steps.append({
+                    "name": name, "ok": ok,
+                    "detail": detail, "output": output,
+                    "ts": datetime.now().strftime("%H:%M:%S"),
+                })
+
+            dtype = (dev.device_type if dev else "cisco_ios") or "cisco_ios"
+            ssh_port = int(dev.ssh_port if dev else 22)
+
+            # Step 1: Ping
+            rtt = self._icmp_ping(ip)
+            if rtt is None:
+                step("Ping", False, f"{ip} unreachable")
+                session.status = "failed"
+                return
+            step("Ping", True, f"RTT {rtt:.1f} ms")
+
+            # Step 2: Port
+            if not self._tcp_check(ip, ssh_port):
+                step("SSH Port", False, f"Port {ssh_port} closed")
+                session.status = "failed"
+                return
+            step("SSH Port", True, f"Port {ssh_port} open")
+
+            # Step 3: Patch paramiko legacy KEX
+            try:
+                import paramiko
+                paramiko.Transport._preferred_kex = (
+                    "diffie-hellman-group14-sha256",
+                    "diffie-hellman-group14-sha1",
+                    "diffie-hellman-group-exchange-sha256",
+                    "diffie-hellman-group-exchange-sha1",
+                    "diffie-hellman-group1-sha1",
+                )
+                paramiko.Transport._preferred_ciphers = (
+                    "aes128-ctr","aes192-ctr","aes256-ctr",
+                    "aes128-cbc","aes192-cbc","aes256-cbc","3des-cbc",
+                )
+                paramiko.Transport._preferred_macs = (
+                    "hmac-sha2-256","hmac-sha2-512","hmac-sha1","hmac-md5",
+                )
+            except Exception:
+                pass
+
+            # Step 4: Login
+            if not NETMIKO_OK:
+                step("Login", False, "netmiko not installed")
+                session.status = "failed"
+                return
+
+            conn = None
+            try:
+                from netmiko import ConnectHandler
+                cfg = dict(
+                    device_type=dtype, host=ip, port=ssh_port,
+                    username=credentials.get("username", "admin"),
+                    password=credentials.get("password", "admin"),
+                    timeout=20, auth_timeout=20, fast_cli=False,
+                )
+                if credentials.get("enable_secret"):
+                    cfg["secret"] = credentials["enable_secret"]
+                conn = ConnectHandler(**cfg)
+                step("Login", True, f"Logged in as {cfg['username']}")
+            except Exception as e:
+                step("Login", False, str(e))
+                session.status = "failed"
+                return
+
+            try:
+                # Step 5: Grab hostname from show version
+                try:
+                    ver = conn.send_command("show version", read_timeout=10)
+                    m = re.search(r'^(\S+)\s+uptime', ver, re.MULTILINE | re.I)
+                    if m:
+                        session.device_hostname = m.group(1)
+                        if dev:
+                            dev.hostname = m.group(1)
+                        step("Hostname", True, f"Router: {session.device_hostname}")
+                except Exception:
+                    ver = ""
+
+                # Step 6: Capture prompt / banner
+                prompt = conn.find_prompt()
+                step("Prompt", True, f"CLI prompt: {prompt}")
+
+                # Step 7: Quick interface status
+                brief = conn.send_command("show ip interface brief", read_timeout=10)
+                step("Interfaces", True,
+                     f"{brief.count('up')} up / {brief.count('down')} down",
+                     output=brief)
+
+                session.output = f"=== show version ===\n{ver}\n\n=== show ip interface brief ===\n{brief}"
+                session.ai_diagnosis = f"Login successful. Prompt: {prompt}"
+
+                try:
+                    get_log_store().add_log(ip, {
+                        "type": "manual_login",
+                        "summary": f"Login OK. Prompt: {prompt}. "
+                                   f"Interfaces: {brief.count('up')} up / {brief.count('down')} down",
+                    })
+                except Exception:
+                    pass
+
+            finally:
+                try:
+                    conn.disconnect()
+                except Exception:
+                    pass
+                session.status = "complete"
+                session.completed_at = datetime.now().isoformat()
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        return session
+
     # - Getters -
 
     def get_pending(self) -> List[DiscoveredDevice]:
