@@ -14,22 +14,6 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
-# ── Paramiko legacy cipher patch (required for old Cisco IOS) ─────────────────
-try:
-    import paramiko
-    paramiko.Transport._preferred_kex = (
-        "diffie-hellman-group14-sha1",
-        "diffie-hellman-group-exchange-sha1",
-        "diffie-hellman-group1-sha1",
-    )
-    paramiko.Transport._preferred_ciphers = (
-        "aes128-cbc",
-        "aes192-cbc",
-        "aes256-cbc",
-    )
-except Exception:
-    pass
-
 try:
     from netmiko import ConnectHandler, NetmikoTimeoutException, NetmikoAuthenticationException
     NETMIKO_AVAILABLE = True
