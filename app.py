@@ -1874,6 +1874,109 @@ OPENROUTER_API_KEY = "your-key-here"
                 "and become available for AI troubleshooting."
             )
 
+            # ── AI ASSISTANT — search-style input box ─────────────────────────
+            st.markdown("""
+            <style>
+            .ai-assistant-container {
+                position: relative;
+                margin: 0.8rem 0 1.2rem 0;
+            }
+            .ai-assistant-label {
+                display: flex; align-items: center; gap: .5rem;
+                color: #475569; font-size: .78rem; font-weight: 500;
+                margin-bottom: .3rem; letter-spacing: .04em;
+                text-transform: uppercase;
+            }
+            /* Override Streamlit text_input to look like a search bar */
+            div[data-testid="stTextInput"][id^="ai_assistant"] > div > div > input {
+                background: #0a1628 !important;
+                border: 1px solid #1e3a52 !important;
+                border-radius: 30px !important;
+                padding: .7rem 1.2rem .7rem 3rem !important;
+                color: #94a3b8 !important;
+                font-size: .95rem !important;
+                box-shadow: 0 4px 24px rgba(0,0,0,.4), 0 0 0 1px rgba(34,211,238,.06) !important;
+                transition: all .2s ease;
+            }
+            div[data-testid="stTextInput"][id^="ai_assistant"] > div > div > input:focus {
+                border-color: #22d3ee !important;
+                box-shadow: 0 4px 32px rgba(0,0,0,.5), 0 0 0 2px rgba(34,211,238,.2) !important;
+                color: #e2e8f0 !important;
+            }
+            .ai-response-box {
+                background: linear-gradient(135deg, #0a1628 0%, #0f2132 100%);
+                border: 1px solid #1e3a52;
+                border-left: 3px solid #22d3ee;
+                border-radius: 10px;
+                padding: 1rem 1.2rem;
+                margin: .5rem 0 1rem 0;
+                color: #cbd5e1;
+                font-size: .92rem;
+                line-height: 1.6;
+                box-shadow: 0 4px 20px rgba(0,0,0,.3);
+            }
+            .ai-response-header {
+                color: #22d3ee; font-size: .78rem; font-weight: 600;
+                text-transform: uppercase; letter-spacing: .05em;
+                margin-bottom: .5rem; display: flex; align-items: center; gap: .4rem;
+            }
+            </style>
+            """, unsafe_allow_html=True)
+
+            # Robot icon overlay using a label trick
+            _aic1, _aic2 = st.columns([20, 1])
+            with _aic1:
+                st.markdown(
+                    "<div class='ai-assistant-label'>🤖 &nbsp;AI Assistant</div>",
+                    unsafe_allow_html=True
+                )
+                _ai_q = st.text_input(
+                    label="ai_assistant_input",
+                    label_visibility="collapsed",
+                    placeholder="✦ AI Assistant  —  ask about your network, devices, or configs...",
+                    key="devices_ai_input",
+                )
+
+            # Handle submission — Enter key submits automatically via Streamlit
+            if _ai_q and _ai_q != st.session_state.get("devices_ai_last_q"):
+                st.session_state["devices_ai_last_q"] = _ai_q
+                # Build context from approved devices
+                try:
+                    _d_ctx = ""
+                    if DISC_OK:
+                        _devs = disc.get_approved()
+                        if _devs:
+                            _d_ctx = "Approved devices: " + ", ".join(
+                                f"{d.hostname or d.ip} ({d.ip}, {d.device_type})"
+                                for d in _devs
+                            ) + "\n\n"
+                except Exception:
+                    _d_ctx = ""
+                with st.spinner(""):
+                    _ai_ans = call_ai(
+                        "You are NetBrain AI — a senior network engineer. "
+                        "Be concise, technical, and use bullet points for lists.\n\n"
+                        + _d_ctx
+                        + f"Question: {_ai_q}"
+                    ) or "AI unavailable — check OPENROUTER_API_KEY."
+                st.session_state["devices_ai_last_ans"] = _ai_ans
+
+            # Show answer
+            if st.session_state.get("devices_ai_last_ans") and st.session_state.get("devices_ai_last_q"):
+                _q_display = st.session_state["devices_ai_last_q"]
+                _a_display = st.session_state["devices_ai_last_ans"]
+                st.markdown(
+                    f"<div class='ai-response-box'>"
+                    f"<div class='ai-response-header'>🤖 AI Assistant &nbsp;·&nbsp; "
+                    f"<span style='color:#475569;font-weight:400;text-transform:none;font-size:.82rem'>"
+                    f"{_q_display}</span></div>"
+                    f"{_a_display}"
+                    f"</div>",
+                    unsafe_allow_html=True
+                )
+
+            st.divider()
+
             # ── Top action bar ────────────────────────────────────────────────
             col_scan, col_ping, col_refresh = st.columns([2, 2, 1])
             with col_scan:
