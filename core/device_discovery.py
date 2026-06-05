@@ -18,14 +18,14 @@ from typing import Dict, List, Optional, Any
 
 logger = logging.getLogger("NetBrain.DeviceDiscovery")
 
-# ── Scapy (optional — used for real passive ICMP sniff) ───────────────────────
+# - Scapy (optional — used for real passive ICMP sniff) -
 try:
     from scapy.all import sniff, IP, ICMP          # type: ignore
     SCAPY_OK = True
 except Exception:
     SCAPY_OK = False
 
-# ── Netmiko (for AI-assisted SSH troubleshooting) ────────────────────────────
+# - Netmiko (for AI-assisted SSH troubleshooting) -
 try:
     from netmiko import ConnectHandler             # type: ignore
     NETMIKO_OK = True
@@ -33,9 +33,9 @@ except Exception:
     NETMIKO_OK = False
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# -
 # Data classes
-# ══════════════════════════════════════════════════════════════════════════════
+# -
 
 @dataclass
 class DiscoveredDevice:
@@ -75,9 +75,9 @@ class TroubleshootSession:
     completed_at: str = ""
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# -
 # Discovery Engine
-# ══════════════════════════════════════════════════════════════════════════════
+# -
 
 class DeviceDiscoveryEngine:
     """
@@ -102,7 +102,7 @@ class DeviceDiscoveryEngine:
         self.poll_interval_sec = 10
         self._seen_ips_this_cycle: set = set()
 
-    # ── Start / Stop ──────────────────────────────────────────────────────────
+    # - Start / Stop -
 
     def start(self):
         if self._running:
@@ -122,7 +122,7 @@ class DeviceDiscoveryEngine:
     def stop(self):
         self._running = False
 
-    # ── Scapy passive sniffer ─────────────────────────────────────────────────
+    # - Scapy passive sniffer -
 
     def _scapy_sniff_loop(self):
         """Sniff ICMP echo-reply packets — picks up any device that replies to ping."""
@@ -140,7 +140,7 @@ class DeviceDiscoveryEngine:
                 logger.debug(f"Scapy sniff error: {e}")
                 time.sleep(5)
 
-    # ── ARP / probe fallback loop ─────────────────────────────────────────────
+    # - ARP / probe fallback loop -
 
     def _arp_probe_loop(self):
         """Parse ARP table + probe common ports to find live hosts."""
@@ -163,7 +163,7 @@ class DeviceDiscoveryEngine:
                 pass
             time.sleep(self.poll_interval_sec)
 
-    # ── Register a discovered IP ──────────────────────────────────────────────
+    # - Register a discovered IP -
 
     def _register_ip(self, ip: str, mac: str = "", source: str = "ping"):
         """Classify and queue a newly discovered IP for approval."""
@@ -192,7 +192,7 @@ class DeviceDiscoveryEngine:
             self._known[ip] = dev
             self._pending[ip] = dev
 
-    # ── Manual ping trigger (called from UI) ─────────────────────────────────
+    # - Manual ping trigger (called from UI) -
 
     def ping_and_discover(self, ip: str) -> Optional[DiscoveredDevice]:
         """Actively ping an IP and register if reachable."""
@@ -218,7 +218,7 @@ class DeviceDiscoveryEngine:
         t = threading.Thread(target=_scan, daemon=True)
         t.start()
 
-    # ── Approval workflow ─────────────────────────────────────────────────────
+    # - Approval workflow -
 
     def approve_device(self, ip: str, approved_by: str = "admin") -> bool:
         with self._lock:
@@ -254,7 +254,7 @@ class DeviceDiscoveryEngine:
             self._pending.pop(ip, None)
             return True
 
-    # ── Getters ───────────────────────────────────────────────────────────────
+    # - Getters -
 
     def get_pending(self) -> List[DiscoveredDevice]:
         with self._lock:
@@ -271,7 +271,7 @@ class DeviceDiscoveryEngine:
     def get_device(self, ip: str) -> Optional[DiscoveredDevice]:
         return self._known.get(ip)
 
-    # ── AI Troubleshooting ───────────────────────────────────────────────────
+    # - AI Troubleshooting -
 
     def start_ai_troubleshoot(self, ip: str, call_ai_fn,
                                credentials: Dict[str, str],
@@ -308,7 +308,7 @@ class DeviceDiscoveryEngine:
         dtype   = (dev.device_type if dev else "cisco_ios") or "cisco_ios"
         ssh_port = int(dev.ssh_port if dev else 22)
 
-        # ── Step 1: Ping ──────────────────────────────────────────────────────
+        # - Step 1: Ping -
         rtt = self._icmp_ping(ip)
         if rtt is None:
             step("Ping", False, f"{ip} not reachable")
@@ -316,7 +316,7 @@ class DeviceDiscoveryEngine:
             return
         step("Ping", True, f"RTT {rtt:.1f} ms")
 
-        # ── Step 2: Port check ────────────────────────────────────────────────
+        # - Step 2: Port check -
         ssh_ok = self._tcp_check(ip, ssh_port)
         step("SSH Port", ssh_ok, f"Port {ssh_port} {'open' if ssh_ok else 'closed'}")
         if not ssh_ok:
@@ -328,11 +328,34 @@ class DeviceDiscoveryEngine:
             dtype = dtype.replace("cisco_ios", "cisco_ios_telnet") \
                          .replace("cisco_iosxe", "cisco_ios_telnet")
 
-        # ── Step 3: SSH login ─────────────────────────────────────────────────
+        # - Step 3: SSH login -
         if not NETMIKO_OK:
             step("SSH Login", False, "netmiko not installed")
             session.status = "failed"
             return
+
+        # Patch paramiko to support legacy GNS3/Cisco IOS SSH
+        # (old IOS uses diffie-hellman-group1-sha1 which modern paramiko drops)
+        try:
+            import paramiko
+            paramiko.Transport._preferred_kex = (
+                "diffie-hellman-group14-sha256",
+                "diffie-hellman-group14-sha1",
+                "diffie-hellman-group-exchange-sha256",
+                "diffie-hellman-group-exchange-sha1",
+                "diffie-hellman-group1-sha1",
+            )
+            paramiko.Transport._preferred_ciphers = (
+                "aes128-ctr", "aes192-ctr", "aes256-ctr",
+                "aes128-cbc", "aes192-cbc", "aes256-cbc",
+                "3des-cbc",
+            )
+            paramiko.Transport._preferred_macs = (
+                "hmac-sha2-256", "hmac-sha2-512",
+                "hmac-sha1", "hmac-md5",
+            )
+        except Exception:
+            pass
 
         conn = None
         try:
@@ -343,6 +366,8 @@ class DeviceDiscoveryEngine:
                 username=creds.get("username", "admin"),
                 password=creds.get("password", "admin"),
                 timeout=20,
+                auth_timeout=20,
+                conn_timeout=10,
                 fast_cli=False,
             )
             if creds.get("enable_secret"):
@@ -355,7 +380,22 @@ class DeviceDiscoveryEngine:
             return
 
         try:
-            # ── Step 4: Gather diagnostics ────────────────────────────────────
+            # - Step 4: Gather diagnostics -
+            # First run show version alone to grab the real hostname
+            try:
+                ver_out = conn.send_command("show version", read_timeout=15)
+                # Parse "hostname uptime is ..." from show version
+                m = re.search(r'^(\S+)\s+uptime\s+is', ver_out, re.MULTILINE | re.IGNORECASE)
+                if m:
+                    real_hostname = m.group(1).strip()
+                    session.device_hostname = real_hostname
+                    # Update the device record so UI shows the real name
+                    if dev:
+                        dev.hostname = real_hostname
+                    step("Hostname", True, f"Router name: {real_hostname}")
+            except Exception:
+                ver_out = ""
+
             diag_cmds = [
                 "show version",
                 "show interfaces",
@@ -364,8 +404,11 @@ class DeviceDiscoveryEngine:
                 "show logging | last 30",
                 "show processes cpu sorted | head 10",
             ]
-            raw_outputs: Dict[str, str] = {}
+            raw_outputs: Dict[str, str] = {"show version": ver_out} if ver_out else {}
             for cmd in diag_cmds:
+                if cmd == "show version" and ver_out:
+                    session.commands_run.append(cmd)
+                    continue   # already captured above
                 try:
                     out = conn.send_command(cmd, read_timeout=15)
                     raw_outputs[cmd] = out
@@ -380,7 +423,7 @@ class DeviceDiscoveryEngine:
             )
             session.output = full_diag
 
-            # ── Step 5: AI diagnosis ──────────────────────────────────────────
+            # - Step 5: AI diagnosis -
             step("AI Analysis", True, "Sending diagnostics to AI...")
             diagnosis_prompt = (
                 "You are a senior Cisco network engineer performing remote diagnostics.\n"
@@ -407,7 +450,7 @@ class DeviceDiscoveryEngine:
                 session.ai_diagnosis = f"AI unavailable: {e}"
                 step("AI Analysis", False, str(e))
 
-            # ── Step 6: Extract and apply fixes (only if approved) ────────────
+            # - Step 6: Extract and apply fixes (only if approved) -
             fix_plan = _extract_fix_commands(session.ai_diagnosis)
             session.ai_fix_plan = "\n".join(fix_plan)
 
@@ -454,7 +497,7 @@ class DeviceDiscoveryEngine:
         """Re-run troubleshoot with apply_fixes=True after user approves."""
         return self.start_ai_troubleshoot(ip, call_ai_fn, credentials, approved=True)
 
-    # ── Utilities ─────────────────────────────────────────────────────────────
+    # - Utilities -
 
     def _icmp_ping(self, ip: str, timeout: float = 1.0) -> Optional[float]:
         """Returns RTT in ms or None if unreachable."""
@@ -505,7 +548,7 @@ class DeviceDiscoveryEngine:
         return "linux", "Unknown"
 
 
-# ── Fix command extractor ─────────────────────────────────────────────────────
+# - Fix command extractor -
 
 def _extract_fix_commands(ai_text: str) -> List[str]:
     """Parse AI response and extract [EXEC] and [CONFIG] tagged commands."""
@@ -519,7 +562,7 @@ def _extract_fix_commands(ai_text: str) -> List[str]:
     return cmds
 
 
-# ── Singleton ─────────────────────────────────────────────────────────────────
+# - Singleton -
 
 _engine_instance: Optional[DeviceDiscoveryEngine] = None
 _engine_lock = threading.Lock()
