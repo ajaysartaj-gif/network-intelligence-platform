@@ -1895,10 +1895,10 @@ OPENROUTER_API_KEY = "your-key-here"
             pending = disc.get_pending()
             pending_count = len(pending)
 
+            _pulse_html = "<span class='dd-pulse'></span>" if pending_count else ""
             st.markdown(
                 f"<div class='dd-section-title'>"
-                f"⚠️ Pending Approval "
-                f"{'<span class=\"dd-pulse\"></span>' if pending_count else ''} "
+                f"⚠️ Pending Approval {_pulse_html}"
                 f"&nbsp;({pending_count})</div>",
                 unsafe_allow_html=True
             )
