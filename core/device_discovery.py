@@ -167,6 +167,20 @@ class DeviceDiscoveryEngine:
 
     def _register_ip(self, ip: str, mac: str = "", source: str = "ping"):
         """Classify and queue a newly discovered IP for approval."""
+        # Filter non-device IPs before doing any work
+        try:
+            import ipaddress
+            addr = ipaddress.ip_address(ip)
+            if (addr.is_multicast          # 224.x.x.x – 239.x.x.x
+                    or addr.is_loopback     # 127.x.x.x
+                    or addr.is_link_local   # 169.254.x.x
+                    or addr.is_unspecified  # 0.0.0.0
+                    or str(addr).endswith(".0")
+                    or str(addr).endswith(".255")):
+                return
+        except ValueError:
+            return
+
         with self._lock:
             if ip in self._known:
                 self._known[ip].last_seen = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
