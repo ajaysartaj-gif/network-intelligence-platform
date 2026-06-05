@@ -2130,11 +2130,58 @@ OPENROUTER_API_KEY = "your-key-here"
                     </div>
                     """, unsafe_allow_html=True)
 
-                    # ── 4-button action bar ───────────────────────────────────
-                    # ── 4-button action bar — tight, no gaps ─────────────────
-                    _b1, _b2, _b3, _b4 = st.columns(4, gap="small")
+                    # ── Action bar: 4 small buttons + AI Assistant NLP bar ────
+                    st.markdown("""
+                    <style>
+                    /* Shrink all buttons inside .dev-action-row to be compact */
+                    .dev-action-row div[data-testid="stButton"] > button {
+                        padding: 4px 8px !important;
+                        font-size: 10.5px !important;
+                        min-height: 0 !important;
+                        height: 34px !important;
+                        white-space: nowrap !important;
+                        border-radius: 6px !important;
+                    }
+                    /* AI Assistant bar styling */
+                    .dev-action-row div[data-testid="stTextInput"] > div > div > input {
+                        background: #1a2030 !important;
+                        border: 1px solid #1D9E7566 !important;
+                        border-radius: 8px !important;
+                        color: #e0e6f0 !important;
+                        font-size: 12.5px !important;
+                        height: 34px !important;
+                        padding: 4px 12px 4px 12px !important;
+                    }
+                    .dev-action-row div[data-testid="stTextInput"] > div > div > input:focus {
+                        border-color: #1D9E75 !important;
+                        box-shadow: 0 0 0 2px #1D9E7522 !important;
+                    }
+                    .dev-action-row div[data-testid="stTextInput"] > div > div > input::placeholder {
+                        color: #4a5570 !important;
+                    }
+                    /* Remove default Streamlit label margin above input */
+                    .dev-action-row div[data-testid="stTextInput"] > label {
+                        display: none !important;
+                    }
+                    </style>
+                    <div class="dev-action-row">
+                    """, unsafe_allow_html=True)
 
-                    # Button 1: Disapprove (red)
+                    _login_running = (
+                        sess_status == "running"
+                        and st.session_state.get(f"login_mode_{dev.ip}")
+                    )
+                    _ts_running = (
+                        sess_status == "running"
+                        and not st.session_state.get(f"login_mode_{dev.ip}")
+                    )
+                    _panel_open = st.session_state.get(f"ts_expanded_{dev.ip}", False)
+                    _steps_n    = len(session.steps) if session else 0
+
+                    # 4 small buttons + AI bar in a single row (ratio: 1:1:1:1:4)
+                    _b1, _b2, _b3, _b4, _bai = st.columns([1, 1, 1, 1.4, 4], gap="small")
+
+                    # Button 1 — Disapprove
                     with _b1:
                         if st.button("🔴 Disapprove", key=f"dis_{dev.ip}",
                                      use_container_width=True,
@@ -2144,22 +2191,18 @@ OPENROUTER_API_KEY = "your-key-here"
                             st.session_state.pop(f"login_expanded_{dev.ip}", None)
                             st.rerun()
 
-                    # Button 2: Login
+                    # Button 2 — Login
                     with _b2:
-                        _login_running = (
-                            sess_status == "running"
-                            and st.session_state.get(f"login_mode_{dev.ip}")
-                        )
                         if st.button(
-                            "⏳ Connecting…" if _login_running else "🔐 Login",
+                            "⏳ Login…" if _login_running else "🔐 Login",
                             key=f"login_{dev.ip}",
                             disabled=_login_running,
                             use_container_width=True,
-                            help="SSH into device"
+                            help="SSH into device",
                         ):
                             _creds = {
-                                "username": os.environ.get("GNS3_SSH_USER", "admin"),
-                                "password": os.environ.get("GNS3_SSH_PASS", "admin"),
+                                "username":      os.environ.get("GNS3_SSH_USER", "admin"),
+                                "password":      os.environ.get("GNS3_SSH_PASS", "admin"),
                                 "enable_secret": os.environ.get("GNS3_SSH_SECRET", ""),
                             }
                             st.session_state[f"login_mode_{dev.ip}"] = True
@@ -2168,20 +2211,19 @@ OPENROUTER_API_KEY = "your-key-here"
                             disc.start_login_session(dev.ip, _creds)
                             st.rerun()
 
-                    # Button 3: AI Diagnose
+                    # Button 3 — AI Diagnose
                     with _b3:
-                        _ts_running = sess_status == "running" and not st.session_state.get(f"login_mode_{dev.ip}")
                         if st.button(
                             "⏳ Running…" if _ts_running else "🤖 AI Diagnose",
                             key=f"ai_ts_{dev.ip}",
                             disabled=_ts_running,
                             type="primary",
                             use_container_width=True,
-                            help="Full diagnostics + AI fix plan"
+                            help="Full diagnostics + AI fix plan",
                         ):
                             _creds = {
-                                "username": os.environ.get("GNS3_SSH_USER", "admin"),
-                                "password": os.environ.get("GNS3_SSH_PASS", "admin"),
+                                "username":      os.environ.get("GNS3_SSH_USER", "admin"),
+                                "password":      os.environ.get("GNS3_SSH_PASS", "admin"),
                                 "enable_secret": os.environ.get("GNS3_SSH_SECRET", ""),
                             }
                             st.session_state[f"login_mode_{dev.ip}"] = False
@@ -2190,15 +2232,128 @@ OPENROUTER_API_KEY = "your-key-here"
                             disc.start_ai_troubleshoot(dev.ip, call_ai, _creds, approved=False)
                             st.rerun()
 
-                    # Button 4: Show/Hide Progress
+                    # Button 4 — Show / Hide Progress
                     with _b4:
-                        _panel_open = st.session_state.get(f"ts_expanded_{dev.ip}", False)
-                        _steps_n = len(session.steps) if session else 0
-                        _panel_lbl = f"{'🔼 Hide' if _panel_open else '🔽 Show'} Progress ({_steps_n} steps)"
+                        _panel_lbl = f"{'🔼 Hide' if _panel_open else '🔽 Show'} ({_steps_n})"
                         if st.button(_panel_lbl, key=f"toggle_{dev.ip}",
                                      use_container_width=True):
                             st.session_state[f"ts_expanded_{dev.ip}"] = not _panel_open
                             st.rerun()
+
+                    # AI Assistant NLP bar — 5th option (wider)
+                    with _bai:
+                        _ai_nlp_q = st.text_input(
+                            label=f"ai_nlp_{dev.ip}",
+                            label_visibility="collapsed",
+                            placeholder="🤖  AI Assistant — ask about config, logs, BGP, traps, debug...",
+                            key=f"ai_nlp_input_{dev.ip}",
+                        )
+
+                    st.markdown("</div>", unsafe_allow_html=True)
+
+                    # ── Handle AI Assistant NLP submission ────────────────────
+                    _nlp_last_key = f"ai_nlp_last_{dev.ip}"
+                    if _ai_nlp_q and _ai_nlp_q != st.session_state.get(_nlp_last_key):
+                        st.session_state[_nlp_last_key] = _ai_nlp_q
+
+                        # Build device-specific context
+                        _dev_ctx = (
+                            f"Device: {dev.ip}  hostname={dev.hostname or dev.ip}  "
+                            f"type={dev.device_type}  ports={dev.open_ports}\n"
+                        )
+                        if session and session.output:
+                            _dev_ctx += f"\nLatest device output (truncated):\n{session.output[:2000]}"
+                        if session and session.ai_diagnosis:
+                            _dev_ctx += f"\n\nPrevious AI diagnosis:\n{session.ai_diagnosis[:1000]}"
+
+                        _nlp_sys = (
+                            "You are an AI Assistant embedded in NetBrain AI. "
+                            f"You are managing the following network device:\n{_dev_ctx}\n\n"
+                            "Help the operator with router configuration, interface status, "
+                            "syslog/logs, SNMP traps, debug commands, BGP, OSPF, routing tables, "
+                            "ACLs, and all Cisco IOS operational tasks. "
+                            "Be concise and practical. When showing CLI output or commands, "
+                            "use proper Cisco IOS format."
+                        )
+
+                        with st.spinner(f"🤖 AI Assistant thinking about {dev.ip}…"):
+                            try:
+                                _nlp_reply = call_ai(_nlp_sys + f"\n\nOperator: {_ai_nlp_q}\nAI Assistant:")
+                            except Exception as _nlp_err:
+                                _nlp_reply = f"AI unavailable: {_nlp_err}"
+
+                        if not _nlp_reply:
+                            _nlp_reply = "AI is unavailable. Please check your OPENROUTER_API_KEY in Secrets."
+
+                        # Store reply in session state to persist across reruns
+                        if f"ai_nlp_history_{dev.ip}" not in st.session_state:
+                            st.session_state[f"ai_nlp_history_{dev.ip}"] = []
+                        st.session_state[f"ai_nlp_history_{dev.ip}"].append({
+                            "q": _ai_nlp_q,
+                            "a": _nlp_reply,
+                        })
+
+                    # ── Render NLP chat history for this device ───────────────
+                    _nlp_history = st.session_state.get(f"ai_nlp_history_{dev.ip}", [])
+                    if _nlp_history:
+                        st.markdown("""
+                        <style>
+                        .nlp-chat-wrap {
+                            background: #0d1320;
+                            border: 1px solid #1e3a52;
+                            border-radius: 10px;
+                            padding: .75rem 1rem;
+                            margin: .4rem 0 .6rem 0;
+                        }
+                        .nlp-msg-user {
+                            background: #1e3a5f;
+                            border-left: 3px solid #378ADD;
+                            border-radius: 6px;
+                            padding: .45rem .8rem;
+                            margin: .35rem 0;
+                            color: #cbd5e1;
+                            font-size: .85rem;
+                        }
+                        .nlp-msg-ai {
+                            background: #0f2132;
+                            border-left: 3px solid #1D9E75;
+                            border-radius: 6px;
+                            padding: .45rem .8rem;
+                            margin: .35rem 0;
+                            color: #cbd5e1;
+                            font-size: .85rem;
+                            white-space: pre-wrap;
+                        }
+                        .nlp-label { font-size: .72rem; font-weight: 600;
+                                     margin-bottom: .2rem; }
+                        .nlp-label-user { color: #60a5fa; }
+                        .nlp-label-ai   { color: #1D9E75; }
+                        </style>
+                        """, unsafe_allow_html=True)
+
+                        import html as _html
+                        with st.expander(
+                            f"🤖 AI Assistant — {len(_nlp_history)} message(s) for {dev.ip}",
+                            expanded=True
+                        ):
+                            st.markdown("<div class='nlp-chat-wrap'>", unsafe_allow_html=True)
+                            for _entry in _nlp_history[-6:]:   # show last 6 turns
+                                _q_safe = _html.escape(_entry["q"])
+                                _a_safe = _html.escape(_entry["a"])
+                                st.markdown(
+                                    f"<div class='nlp-msg-user'>"
+                                    f"<div class='nlp-label nlp-label-user'>👤 You</div>{_q_safe}"
+                                    f"</div>"
+                                    f"<div class='nlp-msg-ai'>"
+                                    f"<div class='nlp-label nlp-label-ai'>🤖 AI Assistant</div>{_a_safe}"
+                                    f"</div>",
+                                    unsafe_allow_html=True
+                                )
+                            st.markdown("</div>", unsafe_allow_html=True)
+                            if st.button("🗑 Clear chat", key=f"nlp_clear_{dev.ip}"):
+                                st.session_state.pop(f"ai_nlp_history_{dev.ip}", None)
+                                st.session_state.pop(_nlp_last_key, None)
+                                st.rerun()
 
                     # ── Live Progress + Details Panel ─────────────────────────
                     if st.session_state.get(f"ts_expanded_{dev.ip}") and session:
