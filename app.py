@@ -510,7 +510,7 @@ def _render_approval_card(run_id: str, data: dict) -> None:
 
     col_approve, col_reject, col_skip = st.columns([1, 1, 3])
     with col_approve:
-        if st.button(f"✅ APPROVE FIX", key=f"approve_{run_id}", type="primary", use_container_width=True):
+        if st.button(f"✅ APPROVE FIX", key=f"approve_{run_id}", type="primary", width='stretch'):
             monitor.approved_run_ids.add(run_id)
             # Run a cycle immediately so the fix executes now, not on next refresh.
             try:
@@ -536,7 +536,7 @@ def _render_approval_card(run_id: str, data: dict) -> None:
                 st.error(f"❌ Fix attempt failed: {last_fix.get('error','unknown error')}")
             st.rerun()
     with col_reject:
-        if st.button(f"❌ REJECT", key=f"reject_{run_id}", use_container_width=True):
+        if st.button(f"❌ REJECT", key=f"reject_{run_id}", width='stretch'):
             monitor.rejected_run_ids.add(run_id)
             st.warning("Fix rejected.")
             st.rerun()
@@ -1544,22 +1544,22 @@ OPENROUTER_API_KEY = "your-key-here"
 
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("🗑️ Clear All Incidents", use_container_width=True):
+            if st.button("🗑️ Clear All Incidents", width='stretch'):
                 orchestrator.state.incidents.clear()
                 st.success("All incidents cleared.")
-            if st.button("🔄 Reset Monitor", use_container_width=True):
+            if st.button("🔄 Reset Monitor", width='stretch'):
                 monitor._active_signatures.clear()
                 monitor.pending_approvals.clear()
                 monitor.approved_run_ids.clear()
                 monitor.rejected_run_ids.clear()
                 monitor.cycle_count = 0
                 st.success("Monitor reset.")
-            if st.button("📋 Clear Workflow History", use_container_width=True):
+            if st.button("📋 Clear Workflow History", width='stretch'):
                 tracker.runs.clear()
                 st.success("Workflow history cleared.")
 
         with col2:
-            if st.button("🔌 Test Router SSH Connection", use_container_width=True):
+            if st.button("🔌 Test Router SSH Connection", width='stretch'):
                 host = os.environ.get("GNS3_ROUTER_HOST","")
                 port = os.environ.get("GNS3_ROUTER_PORT","22")
                 if not host:
@@ -1594,7 +1594,7 @@ OPENROUTER_API_KEY = "your-key-here"
                         except Exception as e:
                             st.error(f"Connection failed: {e}")
 
-            if st.button("📊 Show Current Anomalies", use_container_width=True):
+            if st.button("📊 Show Current Anomalies", width='stretch'):
                 anomalies = orchestrator.telemetry.detect_anomalies()
                 if anomalies:
                     for a in anomalies:
@@ -1871,7 +1871,7 @@ OPENROUTER_API_KEY = "your-key-here"
                     value="192.168.0", key="dd_subnet",
                     placeholder="192.168.1",
                 )
-                if st.button("🔍 Scan Subnet", use_container_width=True, key="dd_scan"):
+                if st.button("🔍 Scan Subnet", width='stretch', key="dd_scan"):
                     disc.scan_subnet(subnet_prefix)
                     st.toast(f"Scanning {subnet_prefix}.1–254 in background… check back in ~30s")
 
@@ -1880,7 +1880,7 @@ OPENROUTER_API_KEY = "your-key-here"
                     "Or ping a specific IP",
                     key="dd_manual_ip", placeholder="10.0.0.1"
                 )
-                if st.button("📡 Ping & Discover", use_container_width=True, key="dd_ping"):
+                if st.button("📡 Ping & Discover", width='stretch', key="dd_ping"):
                     if manual_ip:
                         with st.spinner(f"Pinging {manual_ip}…"):
                             result = disc.ping_and_discover(manual_ip.strip())
@@ -1893,7 +1893,7 @@ OPENROUTER_API_KEY = "your-key-here"
 
             with col_refresh:
                 st.markdown("<br>", unsafe_allow_html=True)
-                if st.button("🔄 Refresh", use_container_width=True, key="dd_refresh"):
+                if st.button("🔄 Refresh", width='stretch', key="dd_refresh"):
                     st.rerun()
 
             st.divider()
@@ -2152,6 +2152,77 @@ OPENROUTER_API_KEY = "your-key-here"
                     st.caption("No devices discovered yet.")
 
             # ── How it works callout ──────────────────────────────────────────
+            # ── SSH Credentials for Troubleshooting ──────────────────────────
+            with st.expander("🔑 SSH Credentials for AI Troubleshooting", expanded=False):
+                st.caption(
+                    "These credentials are used when **AI Network Troubleshooting** SSHs "
+                    "into your approved devices. They must match the login configured on "
+                    "your GNS3 router (set via `username admin privilege 15 secret <pass>`)."
+                )
+                col_u, col_p, col_s = st.columns(3)
+                _ts_user   = col_u.text_input("SSH Username",    value=os.environ.get("GNS3_SSH_USER", "admin"),    key="dd_ts_user")
+                _ts_pass   = col_p.text_input("SSH Password",    value=os.environ.get("GNS3_SSH_PASS", "admin"),    key="dd_ts_pass", type="password")
+                _ts_secret = col_s.text_input("Enable Secret",   value=os.environ.get("GNS3_SSH_SECRET", ""),       key="dd_ts_secret", type="password")
+                if st.button("💾 Save Credentials", key="dd_save_creds"):
+                    os.environ["GNS3_SSH_USER"]   = _ts_user.strip()
+                    os.environ["GNS3_SSH_PASS"]   = _ts_pass.strip()
+                    if _ts_secret.strip():
+                        os.environ["GNS3_SSH_SECRET"] = _ts_secret.strip()
+                    st.success("✅ Credentials saved for this session.")
+                    st.caption("Add to `.env` file to persist: `ROUTER_DEFAULT_USERNAME=admin`")
+
+                st.divider()
+                st.markdown("**Quick credential test** — tries SSH login without running any commands:")
+                _test_ip = st.text_input("Device IP to test", key="dd_cred_test_ip",
+                                          placeholder="192.168.96.128")
+                if st.button("🔌 Test SSH Login", key="dd_test_ssh"):
+                    if _test_ip:
+                        with st.spinner(f"Testing SSH to {_test_ip}..."):
+                            try:
+                                import paramiko
+                                paramiko.Transport._preferred_kex = (
+                                    "diffie-hellman-group14-sha256",
+                                    "diffie-hellman-group14-sha1",
+                                    "diffie-hellman-group-exchange-sha1",
+                                    "diffie-hellman-group1-sha1",
+                                )
+                                paramiko.Transport._preferred_ciphers = (
+                                    "aes128-ctr","aes192-ctr","aes256-ctr",
+                                    "aes128-cbc","aes192-cbc","aes256-cbc","3des-cbc",
+                                )
+                                paramiko.Transport._preferred_macs = (
+                                    "hmac-sha2-256","hmac-sha1","hmac-md5",
+                                )
+                                from netmiko import ConnectHandler
+                                _conn = ConnectHandler(
+                                    device_type=os.environ.get("GNS3_DEVICE_TYPE","cisco_ios"),
+                                    host=_test_ip.strip(),
+                                    port=22,
+                                    username=os.environ.get("GNS3_SSH_USER","admin"),
+                                    password=os.environ.get("GNS3_SSH_PASS","admin"),
+                                    timeout=15, auth_timeout=15, fast_cli=False,
+                                )
+                                _out = _conn.send_command("show version | include uptime")
+                                _conn.disconnect()
+                                st.success(f"✅ Login successful!\n```\n{_out[:200]}\n```")
+                            except Exception as _e:
+                                st.error(f"❌ Login failed: {_e}")
+                                st.markdown("""
+                                **Common fixes:**
+                                - Verify username/password above match your GNS3 router config
+                                - On your GNS3 router run:
+                                  ```
+                                  username admin privilege 15 secret cisco
+                                  line vty 0 4
+                                   login local
+                                   transport input ssh
+                                  crypto key generate rsa modulus 1024
+                                  ```
+                                - Make sure the device IP is reachable (`ping` it first)
+                                """)
+                    else:
+                        st.warning("Enter a device IP to test.")
+
             with st.expander("ℹ️ How Auto-Discovery Works"):
                 st.markdown("""
                 **Mac/Linux Terminal → Auto-Discovery Pipeline:**
@@ -2169,6 +2240,8 @@ OPENROUTER_API_KEY = "your-key-here"
                 **Subnet Scan:** Use the scanner above to discover all live devices on a /24 subnet at once.
 
                 **Manual Add:** Enter any IP in the "Ping & Discover" box to check reachability and add it directly.
+
+                **Auth failed?** Open the **SSH Credentials** section above and click **Test SSH Login**.
                 """)
 
 
