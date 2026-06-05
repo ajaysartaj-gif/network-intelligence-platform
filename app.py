@@ -1987,147 +1987,205 @@ OPENROUTER_API_KEY = "your-key-here"
                 st.caption("No devices approved yet. Approve devices from the Pending section above.")
             else:
                 for dev in approved:
-                    # Check for an active session
                     session = disc.get_session(dev.ip)
                     sess_status = session.status if session else None
-                    card_cls = "dd-card-trouble" if sess_status == "running" \
-                               else "dd-card-approved"
-                    # Use session hostname if troubleshoot resolved a real name
                     _live_name = (session.device_hostname
                                   if session and session.device_hostname != dev.ip
                                   else dev.hostname) or dev.ip
 
+                    # ── Health badge ──────────────────────────────────────────
+                    _health = "—"
+                    _health_cls = "health-healthy"
+                    _health_icon = "⚪"
+                    if session and session.ai_diagnosis:
+                        for _ln in session.ai_diagnosis.splitlines():
+                            if _ln.startswith("HEALTH:"):
+                                _health = _ln.replace("HEALTH:", "").strip()
+                        _health_icon = {"CRITICAL":"🔴","DEGRADED":"🟠","HEALTHY":"🟢"}.get(_health.upper(),"⚪")
+                        _health_cls  = {"CRITICAL":"health-critical","DEGRADED":"health-degraded","HEALTHY":"health-healthy"}.get(_health.upper(),"health-healthy")
+
+                    _card_cls = "dd-card-trouble" if sess_status == "running" else "dd-card-approved"
+
                     st.markdown(f"""
-                    <div class='dd-card {card_cls}'>
+                    <div class='dd-card {_card_cls}'>
                       <span class='dd-hostname'>{_live_name}</span>
                       &nbsp;&nbsp;<span class='dd-ip'>{dev.ip}</span>
                       &nbsp;&nbsp;<span class='dd-badge dd-badge-approved'>✅ APPROVED</span>
+                      &nbsp;&nbsp;<span class='dd-meta'>{_health_icon} Health: <span class='{_health_cls}'>{_health}</span>
+                      &nbsp;·&nbsp; Status: {sess_status or "idle"}
+                      &nbsp;·&nbsp; Steps: {len(session.steps) if session else 0}</span>
                       <br><span class='dd-meta'>
                         Type: {dev.device_type} &nbsp;·&nbsp;
                         Ports: {", ".join(str(p) for p in dev.open_ports) or "—"} &nbsp;·&nbsp;
-                        Approved by: {dev.approved_by} &nbsp;·&nbsp;
                         Added: {dev.first_seen}
                       </span>
                     </div>
                     """, unsafe_allow_html=True)
 
-                    # ── AI NETWORK TROUBLESHOOTING BUTTON ─────────────────────
-                    ai_col, status_col = st.columns([2, 3])
-                    with ai_col:
-                        btn_label = (
-                            "⏳ Troubleshooting…" if sess_status == "running"
-                            else "🤖 AI Network Troubleshooting"
+                    # ── 4-button action bar ───────────────────────────────────
+                    _b1, _b2, _b3, _b4 = st.columns([1.2, 1, 1, 1.8])
+
+                    # Button 1: Disapprove (red) — move back to pending
+                    with _b1:
+                        if st.button("🔴 Disapprove", key=f"dis_{dev.ip}",
+                                     help="Move device back to Pending Approval"):
+                            disc.disapprove_device(dev.ip)
+                            # Clear any active session display
+                            st.session_state.pop(f"ts_expanded_{dev.ip}", None)
+                            st.session_state.pop(f"login_expanded_{dev.ip}", None)
+                            st.rerun()
+
+                    # Button 2: Login — quick SSH connect + interface status
+                    with _b2:
+                        _login_running = (
+                            sess_status == "running"
+                            and st.session_state.get(f"login_mode_{dev.ip}")
                         )
-                        ai_btn = st.button(
-                            btn_label,
-                            key=f"ai_ts_{dev.ip}",
-                            use_container_width=True,
-                            type="primary",
-                            disabled=(sess_status == "running"),
-                        )
-                        if ai_btn:
-                            creds_dict = {
+                        if st.button(
+                            "⏳ Connecting…" if _login_running else "🔐 Login",
+                            key=f"login_{dev.ip}",
+                            disabled=_login_running,
+                            help="SSH into device and show interface status"
+                        ):
+                            _creds = {
                                 "username": os.environ.get("GNS3_SSH_USER", "admin"),
                                 "password": os.environ.get("GNS3_SSH_PASS", "admin"),
                                 "enable_secret": os.environ.get("GNS3_SSH_SECRET", ""),
                             }
-                            disc.start_ai_troubleshoot(
-                                dev.ip, call_ai, creds_dict, approved=False
-                            )
+                            st.session_state[f"login_mode_{dev.ip}"] = True
                             st.session_state[f"ts_expanded_{dev.ip}"] = True
+                            disc.start_login_session(dev.ip, _creds)
                             st.rerun()
 
-                    with status_col:
+                    # Button 3: AI Troubleshooting
+                    with _b3:
+                        _ts_running = sess_status == "running" and not st.session_state.get(f"login_mode_{dev.ip}")
+                        if st.button(
+                            "⏳ Running…" if _ts_running else "🤖 AI Diagnose",
+                            key=f"ai_ts_{dev.ip}",
+                            disabled=_ts_running,
+                            type="primary",
+                            help="SSH in, collect full diagnostics, get AI fix plan"
+                        ):
+                            _creds = {
+                                "username": os.environ.get("GNS3_SSH_USER", "admin"),
+                                "password": os.environ.get("GNS3_SSH_PASS", "admin"),
+                                "enable_secret": os.environ.get("GNS3_SSH_SECRET", ""),
+                            }
+                            st.session_state[f"login_mode_{dev.ip}"] = False
+                            st.session_state[f"ts_expanded_{dev.ip}"] = True
+                            disc.start_ai_troubleshoot(dev.ip, call_ai, _creds, approved=False)
+                            st.rerun()
+
+                    # Button 4: Toggle progress panel
+                    with _b4:
+                        _panel_open = st.session_state.get(f"ts_expanded_{dev.ip}", False)
+                        _panel_lbl = "🔼 Hide Details" if _panel_open else "🔽 Show Progress"
                         if session:
-                            health = "—"
-                            for line in session.ai_diagnosis.splitlines():
-                                if line.startswith("HEALTH:"):
-                                    health = line.replace("HEALTH:", "").strip()
-                            cls = {
-                                "CRITICAL": "health-critical",
-                                "DEGRADED": "health-degraded",
-                                "HEALTHY": "health-healthy",
-                            }.get(health.upper(), "health-healthy")
+                            _panel_lbl += f"  ({len(session.steps)} steps)"
+                        if st.button(_panel_lbl, key=f"toggle_{dev.ip}"):
+                            st.session_state[f"ts_expanded_{dev.ip}"] = not _panel_open
+                            st.rerun()
+
+                    # ── Live Progress + Details Panel ─────────────────────────
+                    if st.session_state.get(f"ts_expanded_{dev.ip}") and session:
+
+                        # Auto-rerun while session is still running to stream steps live
+                        if sess_status == "running":
+                            import time as _time
+                            _time.sleep(0.8)
+                            st.rerun()
+
+                        with st.container():
+                            st.markdown("""
+                            <div style='background:#080f1a;border:1px solid #1e3a52;
+                                        border-radius:10px;padding:1rem 1.2rem;margin:.5rem 0'>
+                            """, unsafe_allow_html=True)
+
+                            # ── Live progress steps ───────────────────────────
+                            _mode_label = "🔐 Login" if st.session_state.get(f"login_mode_{dev.ip}") else "🤖 AI Troubleshooting"
+                            _status_badge = {
+                                "running":  "<span style='color:#f59e0b'>⏳ Running…</span>",
+                                "complete": "<span style='color:#22c55e'>✅ Complete</span>",
+                                "failed":   "<span style='color:#ef4444'>❌ Failed</span>",
+                            }.get(session.status, "")
                             st.markdown(
-                                f"Health: <span class='{cls}'>{health}</span> &nbsp;·&nbsp; "
-                                f"Status: {session.status} &nbsp;·&nbsp; "
-                                f"Steps: {len(session.steps)}",
+                                f"**📋 Progress — {_mode_label}** &nbsp; {_status_badge}",
                                 unsafe_allow_html=True
                             )
 
-                    # ── Session details expander ───────────────────────────────
-                    if session and st.session_state.get(f"ts_expanded_{dev.ip}"):
-                        with st.expander(
-                            f"🔬 Troubleshoot Details — {dev.hostname or dev.ip}",
-                            expanded=True
-                        ):
-                            # Steps
-                            st.markdown("**📋 Progress Steps**")
-                            for s in session.steps:
-                                icon = "✅" if s["ok"] else "❌"
+                            # Historical sessions count from log store
+                            _prior = log_store.get_all_logs(dev.ip)
+                            _hist_count = len(_prior.get("ai_history", []))
+                            if _hist_count:
+                                st.caption(f"📚 {_hist_count} historical session(s) stored — AI uses these for context")
+
+                            # Steps — live streaming
+                            for _s in session.steps:
+                                _icon = "✅" if _s["ok"] else "❌"
+                                _step_col, _detail_col = st.columns([2, 5])
+                                with _step_col:
+                                    st.markdown(
+                                        f"{_icon} `{_s['ts']}` **{_s['name']}**"
+                                    )
+                                with _detail_col:
+                                    st.markdown(f"<span style='color:#94a3b8'>{_s['detail']}</span>",
+                                                unsafe_allow_html=True)
+                                if _s.get("output"):
+                                    with st.expander(f"📄 Output: {_s['name']}"):
+                                        st.code(_s["output"][:3000], language="text")
+
+                            # Spinner if still running
+                            if sess_status == "running":
                                 st.markdown(
-                                    f"{icon} `{s['ts']}` **{s['name']}** — {s['detail']}"
+                                    "<span style='color:#f59e0b'>⏳ Working — page refreshes automatically…</span>",
+                                    unsafe_allow_html=True
                                 )
-                                if s.get("output"):
-                                    with st.expander(f"Output: {s['name']}"):
-                                        st.code(s["output"], language="text")
 
-                            # AI diagnosis
-                            if session.ai_diagnosis:
-                                st.markdown("**🤖 AI Diagnosis**")
-                                # Parse and colour health badge
-                                diag_display = session.ai_diagnosis
-                                if "HEALTH: CRITICAL" in diag_display:
+                            st.markdown("</div>", unsafe_allow_html=True)
+
+                        # ── AI Diagnosis (only for AI troubleshoot mode) ───────
+                        if session.ai_diagnosis and not st.session_state.get(f"login_mode_{dev.ip}"):
+                            with st.expander("🤖 AI Diagnosis", expanded=True):
+                                if "HEALTH: CRITICAL" in session.ai_diagnosis:
                                     st.error("🔴 HEALTH: CRITICAL")
-                                elif "HEALTH: DEGRADED" in diag_display:
+                                elif "HEALTH: DEGRADED" in session.ai_diagnosis:
                                     st.warning("🟠 HEALTH: DEGRADED")
-                                elif "HEALTH: HEALTHY" in diag_display:
+                                elif "HEALTH: HEALTHY" in session.ai_diagnosis:
                                     st.success("🟢 HEALTH: HEALTHY")
-                                st.markdown(diag_display)
+                                st.markdown(session.ai_diagnosis)
 
-                            # Raw output
-                            if session.output:
-                                with st.expander("📄 Raw Diagnostic Output"):
-                                    st.code(session.output[:8000], language="text")
+                        # ── Raw output ────────────────────────────────────────
+                        if session.output:
+                            with st.expander("📄 Raw Device Output"):
+                                st.code(session.output[:8000], language="text")
 
-                            # Fix plan + approve
-                            if session.ai_fix_plan and not session.fix_applied:
-                                st.markdown("**🔧 Proposed Fix Commands**")
-                                st.code(session.ai_fix_plan, language="text")
-                                st.warning(
-                                    "⚠️ Review the commands above carefully before approving. "
-                                    "They will be executed directly on the live device."
-                                )
-                                fix_col1, fix_col2 = st.columns(2)
-                                with fix_col1:
-                                    if st.button(
-                                        "✅ APPROVE & APPLY FIXES",
-                                        key=f"apply_fix_{dev.ip}",
-                                        type="primary",
-                                        use_container_width=True,
-                                    ):
-                                        creds_dict = {
-                                            "username": os.environ.get("GNS3_SSH_USER", "admin"),
-                                            "password": os.environ.get("GNS3_SSH_PASS", "admin"),
-                                            "enable_secret": os.environ.get("GNS3_SSH_SECRET", ""),
-                                        }
-                                        disc.approve_and_apply_fixes(dev.ip, call_ai, creds_dict)
-                                        st.success("Fix session started — refresh to see results")
-                                        st.rerun()
-                                with fix_col2:
-                                    if st.button(
-                                        "🚫 Dismiss",
-                                        key=f"dismiss_fix_{dev.ip}",
-                                        use_container_width=True,
-                                    ):
-                                        st.session_state[f"ts_expanded_{dev.ip}"] = False
-                                        st.rerun()
+                        # ── Fix plan + approve/dismiss ────────────────────────
+                        if session.ai_fix_plan and not session.fix_applied and session.status == "complete":
+                            st.markdown("**🔧 Proposed Fix Commands**")
+                            st.code(session.ai_fix_plan, language="text")
+                            st.warning(
+                                "⚠️ Review carefully — these will execute on the live device."
+                            )
+                            _fc1, _fc2 = st.columns(2)
+                            with _fc1:
+                                if st.button("✅ APPROVE & APPLY FIXES",
+                                             key=f"apply_fix_{dev.ip}", type="primary"):
+                                    _creds = {
+                                        "username": os.environ.get("GNS3_SSH_USER", "admin"),
+                                        "password": os.environ.get("GNS3_SSH_PASS", "admin"),
+                                        "enable_secret": os.environ.get("GNS3_SSH_SECRET", ""),
+                                    }
+                                    disc.approve_and_apply_fixes(dev.ip, call_ai, _creds)
+                                    st.session_state[f"ts_expanded_{dev.ip}"] = True
+                                    st.rerun()
+                            with _fc2:
+                                if st.button("🚫 Dismiss", key=f"dismiss_fix_{dev.ip}"):
+                                    st.session_state[f"ts_expanded_{dev.ip}"] = False
+                                    st.rerun()
 
-                            elif session.fix_applied:
-                                st.success(
-                                    "✅ Fixes were applied. Run AI Troubleshooting again "
-                                    "to verify the device is healthy."
-                                )
+                        elif session.fix_applied:
+                            st.success("✅ Fixes applied. Run AI Diagnose again to verify health.")
 
                     st.markdown("---")
 
