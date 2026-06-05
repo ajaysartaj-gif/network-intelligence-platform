@@ -8,6 +8,14 @@ The full remediation pipeline is visible step-by-step in real time.
 # ── MUST BE FIRST ────────────────────────────────────────────────────────────
 import streamlit as st
 
+# Load .env file BEFORE anything reads os.environ
+# .env file lives in the repo root (same folder as app.py)
+try:
+    from dotenv import load_dotenv
+    load_dotenv(override=False)   # override=False: Streamlit Secrets take priority
+except ImportError:
+    pass  # python-dotenv not installed; rely on os.environ / Streamlit Secrets
+
 st.set_page_config(
     page_title="NetBrain AI — Autonomous NOC",
     page_icon="🧠",
@@ -2318,18 +2326,26 @@ OPENROUTER_API_KEY = "your-key-here"
                         with st.spinner(f"Testing SSH to {_test_ip}..."):
                             try:
                                 import paramiko
+                                # Match working ~/.ssh/config for GNS3 / Cisco IOS
                                 paramiko.Transport._preferred_kex = (
-                                    "diffie-hellman-group14-sha256",
+                                    "diffie-hellman-group1-sha1",
                                     "diffie-hellman-group14-sha1",
                                     "diffie-hellman-group-exchange-sha1",
-                                    "diffie-hellman-group1-sha1",
+                                    "diffie-hellman-group14-sha256",
+                                    "diffie-hellman-group-exchange-sha256",
+                                )
+                                paramiko.Transport._preferred_keys = (
+                                    "ssh-rsa",
+                                    "ecdsa-sha2-nistp256",
+                                    "ssh-ed25519",
                                 )
                                 paramiko.Transport._preferred_ciphers = (
-                                    "aes128-ctr","aes192-ctr","aes256-ctr",
-                                    "aes128-cbc","aes192-cbc","aes256-cbc","3des-cbc",
+                                    "aes128-cbc", "3des-cbc", "aes192-cbc", "aes256-cbc",
+                                    "aes128-ctr", "aes192-ctr", "aes256-ctr",
                                 )
                                 paramiko.Transport._preferred_macs = (
-                                    "hmac-sha2-256","hmac-sha1","hmac-md5",
+                                    "hmac-sha1", "hmac-md5",
+                                    "hmac-sha2-256", "hmac-sha2-512",
                                 )
                                 from netmiko import ConnectHandler
                                 _conn = ConnectHandler(
