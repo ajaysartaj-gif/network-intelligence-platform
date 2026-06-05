@@ -2028,19 +2028,20 @@ OPENROUTER_API_KEY = "your-key-here"
                     """, unsafe_allow_html=True)
 
                     # ── 4-button action bar ───────────────────────────────────
-                    _b1, _b2, _b3, _b4 = st.columns([1.2, 1, 1, 1.8])
+                    # ── 4-button action bar — tight, no gaps ─────────────────
+                    _b1, _b2, _b3, _b4 = st.columns(4, gap="small")
 
-                    # Button 1: Disapprove (red) — move back to pending
+                    # Button 1: Disapprove (red)
                     with _b1:
                         if st.button("🔴 Disapprove", key=f"dis_{dev.ip}",
-                                     help="Move device back to Pending Approval"):
+                                     use_container_width=True,
+                                     help="Move back to Pending"):
                             disc.disapprove_device(dev.ip)
-                            # Clear any active session display
                             st.session_state.pop(f"ts_expanded_{dev.ip}", None)
                             st.session_state.pop(f"login_expanded_{dev.ip}", None)
                             st.rerun()
 
-                    # Button 2: Login — quick SSH connect + interface status
+                    # Button 2: Login
                     with _b2:
                         _login_running = (
                             sess_status == "running"
@@ -2050,7 +2051,8 @@ OPENROUTER_API_KEY = "your-key-here"
                             "⏳ Connecting…" if _login_running else "🔐 Login",
                             key=f"login_{dev.ip}",
                             disabled=_login_running,
-                            help="SSH into device and show interface status"
+                            use_container_width=True,
+                            help="SSH into device"
                         ):
                             _creds = {
                                 "username": os.environ.get("GNS3_SSH_USER", "admin"),
@@ -2063,7 +2065,7 @@ OPENROUTER_API_KEY = "your-key-here"
                             disc.start_login_session(dev.ip, _creds)
                             st.rerun()
 
-                    # Button 3: AI Troubleshooting
+                    # Button 3: AI Diagnose
                     with _b3:
                         _ts_running = sess_status == "running" and not st.session_state.get(f"login_mode_{dev.ip}")
                         if st.button(
@@ -2071,7 +2073,8 @@ OPENROUTER_API_KEY = "your-key-here"
                             key=f"ai_ts_{dev.ip}",
                             disabled=_ts_running,
                             type="primary",
-                            help="SSH in, collect full diagnostics, get AI fix plan"
+                            use_container_width=True,
+                            help="Full diagnostics + AI fix plan"
                         ):
                             _creds = {
                                 "username": os.environ.get("GNS3_SSH_USER", "admin"),
@@ -2084,13 +2087,13 @@ OPENROUTER_API_KEY = "your-key-here"
                             disc.start_ai_troubleshoot(dev.ip, call_ai, _creds, approved=False)
                             st.rerun()
 
-                    # Button 4: Toggle progress panel
+                    # Button 4: Show/Hide Progress
                     with _b4:
                         _panel_open = st.session_state.get(f"ts_expanded_{dev.ip}", False)
-                        _panel_lbl = "🔼 Hide Details" if _panel_open else "🔽 Show Progress"
-                        if session:
-                            _panel_lbl += f"  ({len(session.steps)} steps)"
-                        if st.button(_panel_lbl, key=f"toggle_{dev.ip}"):
+                        _steps_n = len(session.steps) if session else 0
+                        _panel_lbl = f"{'🔼 Hide' if _panel_open else '🔽 Show'} Progress ({_steps_n} steps)"
+                        if st.button(_panel_lbl, key=f"toggle_{dev.ip}",
+                                     use_container_width=True):
                             st.session_state[f"ts_expanded_{dev.ip}"] = not _panel_open
                             st.rerun()
 
@@ -2413,6 +2416,174 @@ elif workspace == "local_router":
             _port = int(os.environ.get("STREAMLIT_PORT", 8501))
             st.code(f"http://localhost:{_port}", language="text")
             st.code(f"http://{_local_ip}:{_port}", language="text")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# WORKSPACE: NLP — AI ASSISTANT
+# ══════════════════════════════════════════════════════════════════════════════
+elif workspace == "nlp":
+    st.markdown("""
+    <style>
+    .ai-assistant-wrap {
+        max-width: 860px; margin: 0 auto;
+    }
+    .ai-msg-user {
+        background: #1e3a5f;
+        border-left: 3px solid #3b82f6;
+        border-radius: 8px;
+        padding: .7rem 1rem;
+        margin: .5rem 0;
+        color: #e2e8f0;
+    }
+    .ai-msg-bot {
+        background: #0f2132;
+        border-left: 3px solid #22d3ee;
+        border-radius: 8px;
+        padding: .7rem 1rem;
+        margin: .5rem 0;
+        color: #e2e8f0;
+    }
+    .ai-msg-label-user { color: #93c5fd; font-size:.75rem; margin-bottom:.3rem; font-weight:600; }
+    .ai-msg-label-bot  { color: #22d3ee; font-size:.75rem; margin-bottom:.3rem; font-weight:600; }
+    .ai-shadow-hint {
+        color: #334155; font-size: 1.1rem; text-align: center;
+        padding: 2rem 0 1rem 0; font-style: italic;
+    }
+    .ai-typing {
+        color: #22d3ee; font-size:.85rem; padding:.4rem 1rem;
+        animation: blink 1s step-start infinite;
+    }
+    @keyframes blink { 50% { opacity: 0; } }
+    </style>
+    """, unsafe_allow_html=True)
+
+    st.markdown("<div class='ai-assistant-wrap'>", unsafe_allow_html=True)
+
+    # ── Header ────────────────────────────────────────────────────────────────
+    st.markdown("""
+    <div style='text-align:center; padding: 1.5rem 0 .5rem 0;'>
+        <div style='font-size:2.5rem'>🤖</div>
+        <div style='font-size:1.4rem; font-weight:700; color:#f1f5f9;'>AI Assistant</div>
+        <div style='font-size:.85rem; color:#64748b; margin-top:.3rem;'>
+            Ask anything about your network · Diagnose issues · Generate configs
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── Init chat history ─────────────────────────────────────────────────────
+    if "nlp_messages" not in st.session_state:
+        st.session_state["nlp_messages"] = []
+    if "nlp_devices_ctx" not in st.session_state:
+        st.session_state["nlp_devices_ctx"] = ""
+
+    # ── Build device context for AI ───────────────────────────────────────────
+    try:
+        from core.device_discovery import get_discovery_engine
+        _disc = get_discovery_engine()
+        _approved_devs = _disc.get_approved()
+        if _approved_devs:
+            _dev_lines = "\n".join(
+                f"- {d.hostname or d.ip} ({d.ip}) type={d.device_type} ports={d.open_ports}"
+                for d in _approved_devs
+            )
+            st.session_state["nlp_devices_ctx"] = f"Approved network devices:\n{_dev_lines}"
+    except Exception:
+        pass
+
+    # ── Suggested prompts ─────────────────────────────────────────────────────
+    if not st.session_state["nlp_messages"]:
+        st.markdown(
+            "<div class='ai-shadow-hint'>✨ AI Assistant — ask me anything about your network</div>",
+            unsafe_allow_html=True
+        )
+        st.markdown("**Quick actions:**")
+        _suggestions = [
+            "Show me the health of all approved devices",
+            "What is BGP and when should I use it?",
+            "Generate OSPF config for R1 on 192.168.1.0/24",
+            "What does 'show ip interface brief' output tell me?",
+            "How do I configure SSH on a Cisco router?",
+            "Explain the difference between EIGRP and OSPF",
+        ]
+        _sg_cols = st.columns(3)
+        for idx, sg in enumerate(_suggestions):
+            with _sg_cols[idx % 3]:
+                if st.button(sg, key=f"nlp_sg_{idx}", use_container_width=True):
+                    st.session_state["nlp_messages"].append({"role": "user", "content": sg})
+                    st.rerun()
+
+    # ── Chat history ──────────────────────────────────────────────────────────
+    for msg in st.session_state["nlp_messages"]:
+        if msg["role"] == "user":
+            st.markdown(
+                f"<div class='ai-msg-user'>"
+                f"<div class='ai-msg-label-user'>👤 You</div>{msg['content']}"
+                f"</div>", unsafe_allow_html=True
+            )
+        else:
+            st.markdown(
+                f"<div class='ai-msg-bot'>"
+                f"<div class='ai-msg-label-bot'>🤖 AI Assistant</div>{msg['content']}"
+                f"</div>", unsafe_allow_html=True
+            )
+
+    # ── Generate AI reply for latest user message ─────────────────────────────
+    msgs = st.session_state["nlp_messages"]
+    if msgs and msgs[-1]["role"] == "user" and (
+        len(msgs) < 2 or msgs[-2]["role"] != "user"
+    ):
+        _last_q = msgs[-1]["content"]
+        with st.spinner("🤖 AI Assistant is thinking…"):
+            try:
+                _dev_ctx = st.session_state.get("nlp_devices_ctx", "")
+                _history = "\n".join(
+                    f"{'User' if m['role']=='user' else 'Assistant'}: {m['content']}"
+                    for m in msgs[-10:-1]
+                )
+                _sys_prompt = (
+                    "You are NetBrain AI Assistant — an expert network engineer and Cisco IOS specialist. "
+                    "You help with network troubleshooting, configuration, diagnostics, and best practices. "
+                    "Be concise, technical, and actionable. Use bullet points for lists. "
+                    "When generating IOS configs, use proper formatting with indentation.\n\n"
+                    + (f"{_dev_ctx}\n\n" if _dev_ctx else "")
+                    + (f"Conversation so far:\n{_history}\n\n" if _history else "")
+                )
+                _full_prompt = _sys_prompt + f"User question: {_last_q}"
+                _reply = call_ai(_full_prompt) or "I'm unable to respond right now. Check your OPENROUTER_API_KEY."
+            except Exception as _e:
+                _reply = f"Error: {_e}"
+        st.session_state["nlp_messages"].append({"role": "assistant", "content": _reply})
+        st.rerun()
+
+    # ── Input box ─────────────────────────────────────────────────────────────
+    st.markdown("<br>", unsafe_allow_html=True)
+    with st.container():
+        _in_col, _btn_col, _clr_col = st.columns([7, 1, 1])
+        with _in_col:
+            _user_input = st.text_input(
+                label="message",
+                label_visibility="collapsed",
+                placeholder="💬 Ask AI Assistant — e.g. 'Why is my interface down?' or 'Generate OSPF config'",
+                key="nlp_input",
+            )
+        with _btn_col:
+            _send = st.button("Send ➤", key="nlp_send", type="primary",
+                              use_container_width=True)
+        with _clr_col:
+            if st.button("🗑 Clear", key="nlp_clear", use_container_width=True):
+                st.session_state["nlp_messages"] = []
+                st.rerun()
+
+        if _send and _user_input.strip():
+            st.session_state["nlp_messages"].append(
+                {"role": "user", "content": _user_input.strip()}
+            )
+            st.rerun()
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+
 
 
 
