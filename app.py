@@ -1671,7 +1671,16 @@ OPENROUTER_API_KEY = "your-key-here"
                 risk = res.get("risk", "unknown")
                 risk_icon = {"low": "🟢", "medium": "🟡", "high": "🟠"}.get(risk, "⚪")
 
-                if mode == "diagnostic":
+                # Plain prose answer (AI answered a question rather than returning commands)
+                if res.get("plain_answer"):
+                    st.info("💬 AI answered your question:")
+                    st.markdown(res["plain_answer"])
+                    st.caption(
+                        "Tip: For router commands use requests like "
+                        "'show ip interface brief' or 'add description Uplink to Gi1/0'"
+                    )
+
+                elif mode == "diagnostic":
                     st.info(f"🔍 Diagnostic query — read-only. {res.get('summary','')}")
                     st.markdown("**Commands:**")
                     st.code("\n".join(res.get("commands", [])), language="text")
@@ -1912,11 +1921,13 @@ OPENROUTER_API_KEY = "your-key-here"
                 )
             else:
                 for dev in pending:
-                    ports_str  = ", ".join(str(p) for p in dev.open_ports) or "none detected"
+                    ports_str = ", ".join(str(p) for p in dev.open_ports) or "none detected"
+                    _display_name = dev.hostname if dev.hostname else "Resolving name..."
+                    _name_style = "color:#f1f5f9" if dev.hostname else "color:#94a3b8;font-style:italic"
                     with st.container():
                         st.markdown(f"""
                         <div class='dd-card dd-card-pending'>
-                          <span class='dd-hostname'>{dev.hostname or 'Unknown'}</span>
+                          <span class='dd-hostname' style='{_name_style}'>{_display_name}</span>
                           &nbsp;&nbsp;<span class='dd-ip'>{dev.ip}</span>
                           &nbsp;&nbsp;<span class='dd-badge dd-badge-pending'>⏳ PENDING</span>
                           <br><span class='dd-meta'>
@@ -1975,10 +1986,14 @@ OPENROUTER_API_KEY = "your-key-here"
                     sess_status = session.status if session else None
                     card_cls = "dd-card-trouble" if sess_status == "running" \
                                else "dd-card-approved"
+                    # Use session hostname if troubleshoot resolved a real name
+                    _live_name = (session.device_hostname
+                                  if session and session.device_hostname != dev.ip
+                                  else dev.hostname) or dev.ip
 
                     st.markdown(f"""
                     <div class='dd-card {card_cls}'>
-                      <span class='dd-hostname'>{dev.hostname or dev.ip}</span>
+                      <span class='dd-hostname'>{_live_name}</span>
                       &nbsp;&nbsp;<span class='dd-ip'>{dev.ip}</span>
                       &nbsp;&nbsp;<span class='dd-badge dd-badge-approved'>✅ APPROVED</span>
                       <br><span class='dd-meta'>
