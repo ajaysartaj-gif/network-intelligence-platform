@@ -1848,8 +1848,14 @@ OPENROUTER_API_KEY = "your-key-here"
 
         # ── Init discovery engine ─────────────────────────────────────────────
         try:
-            from core.device_discovery import get_discovery_engine
-            disc = get_discovery_engine()
+            from core.device_discovery import get_discovery_engine, get_log_store
+            # Anchor engine in session_state so it survives Streamlit reruns
+            # within the same browser session. Module-level singleton + JSON
+            # file handle full-process restarts.
+            if "disc_engine" not in st.session_state:
+                st.session_state["disc_engine"] = get_discovery_engine()
+            disc = st.session_state["disc_engine"]
+            log_store = get_log_store()
             DISC_OK = True
         except Exception as _de:
             DISC_OK = False
@@ -2150,6 +2156,80 @@ OPENROUTER_API_KEY = "your-key-here"
                     st.dataframe(_pd.DataFrame(rows), use_container_width=True, hide_index=True)
                 else:
                     st.caption("No devices discovered yet.")
+
+            st.divider()
+
+            # ════════════════════════════════════════════════════════════════
+            # SECTION 4 — DEVICE LOG STORE (AI memory for each device)
+            # ════════════════════════════════════════════════════════════════
+            st.markdown(
+                "<div class='dd-section-title'>🧠 Device Log Store — AI Memory</div>",
+                unsafe_allow_html=True
+            )
+            st.caption(
+                "All SSH outputs, AI diagnoses and applied fixes are stored here. "
+                "The AI uses this history as context for smarter future suggestions."
+            )
+
+            all_log_devices = log_store.get_all_devices()
+            if not all_log_devices:
+                st.info("No logs stored yet. Approve a device and run AI Troubleshooting to populate.")
+            else:
+                for _lip, _ldata in all_log_devices.items():
+                    _ldev = disc.get_device(_lip)
+                    _lname = (_ldev.hostname if _ldev and _ldev.hostname else _lip)
+                    _lhealth = _ldata.get("last_health", "unknown")
+                    _health_icon = {"CRITICAL": "🔴", "DEGRADED": "🟠",
+                                    "HEALTHY": "🟢"}.get(_lhealth.upper(), "⚪")
+                    _logs = _ldata.get("logs", [])
+                    _ai_hist = _ldata.get("ai_history", [])
+
+                    with st.expander(
+                        f"{_health_icon} {_lname} ({_lip})  "
+                        f"· {len(_logs)} log entries · {len(_ai_hist)} AI sessions",
+                        expanded=False
+                    ):
+                        # Tabs within expander
+                        _lt1, _lt2, _lt3 = st.tabs(["📋 Logs", "🤖 AI History", "🔍 Full Context"])
+
+                        with _lt1:
+                            if _logs:
+                                import pandas as _pd2
+                                st.dataframe(
+                                    _pd2.DataFrame([{
+                                        "Time": l.get("ts","")[:19],
+                                        "Type": l.get("type",""),
+                                        "Summary": str(l.get("summary",""))[:120],
+                                    } for l in reversed(_logs)]),
+                                    use_container_width=True, hide_index=True
+                                )
+                            else:
+                                st.caption("No logs yet.")
+
+                        with _lt2:
+                            if _ai_hist:
+                                for _ah in reversed(_ai_hist):
+                                    _applied = "✅ Applied" if _ah.get("applied") else "📋 Plan only"
+                                    with st.expander(
+                                        f"{_ah.get('ts','')[:19]}  · {_applied}"
+                                    ):
+                                        st.markdown("**AI Diagnosis:**")
+                                        st.markdown(_ah.get("diagnosis",""))
+                                        if _ah.get("fix_plan"):
+                                            st.markdown("**Fix Plan:**")
+                                            st.code(_ah.get("fix_plan",""), language="text")
+                            else:
+                                st.caption("No AI sessions yet. Run AI Troubleshooting on the device.")
+
+                        with _lt3:
+                            ctx = log_store.get_context_for_ai(_lip)
+                            if ctx:
+                                st.code(ctx, language="text")
+                                st.caption("This is the exact context passed to AI on the next troubleshoot run.")
+                            else:
+                                st.caption("No context available yet.")
+
+            st.divider()
 
             # ── How it works callout ──────────────────────────────────────────
             # ── SSH Credentials for Troubleshooting ──────────────────────────
