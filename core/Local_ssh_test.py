@@ -80,37 +80,8 @@ except Exception as e:
     print(f"  ❌ Port {args.port} CLOSED — {e}")
     sys.exit(1)
 
-# ── Step 3: Paramiko cipher patch ────────────────────────────────────────────
-print("STEP 3: Patching paramiko for legacy Cisco IOS...")
-try:
-    import paramiko
-    paramiko.Transport._preferred_kex = (
-        "diffie-hellman-group1-sha1",
-        "diffie-hellman-group14-sha1",
-        "diffie-hellman-group-exchange-sha1",
-        "diffie-hellman-group14-sha256",
-        "diffie-hellman-group-exchange-sha256",
-    )
-    paramiko.Transport._preferred_keys = (
-        "ssh-rsa",
-        "ecdsa-sha2-nistp256",
-        "ssh-ed25519",
-    )
-    paramiko.Transport._preferred_ciphers = (
-        "aes128-cbc", "3des-cbc", "aes192-cbc", "aes256-cbc",
-        "aes128-ctr", "aes192-ctr", "aes256-ctr",
-    )
-    paramiko.Transport._preferred_macs = (
-        "hmac-sha1", "hmac-md5",
-        "hmac-sha2-256", "hmac-sha2-512",
-    )
-    print(f"  ✅ Paramiko {paramiko.__version__} patched — ssh-rsa + group1 + aes-cbc")
-except ImportError:
-    print("  ❌ paramiko not installed — run: pip install paramiko")
-    sys.exit(1)
-
-# ── Step 4: Netmiko login ────────────────────────────────────────────────────
-print(f"STEP 4: SSH login as '{args.user}'...")
+# ── Step 3: Netmiko login ────────────────────────────────────────────────────
+print(f"STEP 3: SSH login as '{args.user}'...")
 try:
     from netmiko import ConnectHandler
     print(f"  → Connecting to {args.type} at {args.ip}:{args.port}...")
