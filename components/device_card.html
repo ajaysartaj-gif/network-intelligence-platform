@@ -1,0 +1,771 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NetBrain AI — Device Card</title>
+
+  <!-- Tabler Icons -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@2.44.0/tabler-icons.min.css" />
+
+  <style>
+    /* ============================================================
+       THEME TOKENS — edit these to restyle everything at once
+    ============================================================ */
+    :root {
+      --bg-page:          #0d1117;
+      --bg-card:          #161b27;
+      --bg-input:         #1a2030;
+      --bg-msg-ai:        #1e2840;
+      --bg-btn:           #1e2535;
+
+      --border-default:   #2a3147;
+      --border-strong:    #3a4a65;
+      --border-ai:        #1D9E7566;
+
+      --text-primary:     #e0e6f0;
+      --text-secondary:   #8a9ab5;
+      --text-muted:       #4a5570;
+
+      --accent-green:     #1D9E75;
+      --accent-green-dk:  #0f6e56;
+      --accent-blue:      #378ADD;
+      --accent-red:       #E24B4A;
+
+      --radius-card:      10px;
+      --radius-btn:       6px;
+      --radius-bar:       8px;
+    }
+
+    /* ============================================================
+       RESET & BASE
+    ============================================================ */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: var(--bg-page);
+      color: var(--text-primary);
+      padding: 24px;
+      min-height: 100vh;
+    }
+
+    /* ============================================================
+       SECTION TITLE
+    ============================================================ */
+    .section-title {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-primary);
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .section-title i { color: var(--accent-green); font-size: 15px; }
+
+    /* ============================================================
+       DEVICE CARD
+    ============================================================ */
+    .device-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-card);
+      padding: 12px 16px 0 16px;
+    }
+
+    .device-top {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 6px;
+      padding-bottom: 10px;
+    }
+
+    .device-ips {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .device-ip-primary {
+      font-size: 13.5px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .device-ip-link {
+      font-size: 13.5px;
+      color: var(--accent-blue);
+      cursor: pointer;
+      text-decoration: none;
+    }
+    .device-ip-link:hover { text-decoration: underline; }
+
+    .badge-approved {
+      background: var(--accent-green);
+      color: #fff;
+      font-size: 10px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 4px;
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+    }
+
+    .device-meta {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
+
+    .device-status {
+      font-size: 11.5px;
+      color: var(--text-secondary);
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      margin-top: 3px;
+      flex-shrink: 0;
+    }
+
+    .dot-idle {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--border-strong);
+      display: inline-block;
+    }
+
+    .divider {
+      border: none;
+      border-top: 1px solid var(--border-default);
+      margin: 0 -16px;
+    }
+
+    /* ============================================================
+       BUTTON ROW
+    ============================================================ */
+    .btn-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 9px 0;
+      flex-wrap: wrap;
+    }
+
+    /* Small action buttons */
+    .btn-sm {
+      padding: 5px 10px;
+      font-size: 10.5px;
+      font-weight: 500;
+      border-radius: var(--radius-btn);
+      border: 1px solid var(--border-default);
+      background: var(--bg-btn);
+      color: var(--text-secondary);
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      white-space: nowrap;
+      transition: background 0.15s, border-color 0.15s, color 0.15s;
+      flex-shrink: 0;
+    }
+    .btn-sm:hover {
+      background: var(--border-default);
+      color: var(--text-primary);
+      border-color: var(--border-strong);
+    }
+    .btn-sm i { font-size: 11px; }
+
+    /* Danger variant — Disapprove */
+    .btn-sm.danger {
+      color: var(--accent-red);
+      border-color: #E24B4A44;
+    }
+    .btn-sm.danger:hover {
+      background: #E24B4A18;
+      border-color: var(--accent-red);
+    }
+
+    /* Blue variant — AI Diagnose */
+    .btn-sm.blue {
+      color: var(--accent-blue);
+      border-color: #378ADD44;
+    }
+    .btn-sm.blue:hover {
+      background: #378ADD18;
+      border-color: var(--accent-blue);
+    }
+
+    /* ============================================================
+       AI ASSISTANT INPUT BAR  (5th option — larger)
+    ============================================================ */
+    .ai-bar-wrap {
+      flex: 1;
+      min-width: 180px;
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      background: var(--bg-input);
+      border: 1px solid var(--border-ai);
+      border-radius: var(--radius-bar);
+      padding: 7px 13px;
+      cursor: text;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    .ai-bar-wrap:focus-within {
+      border-color: var(--accent-green);
+      box-shadow: 0 0 0 2px #1D9E7522;
+    }
+
+    .ai-bar-icon { color: var(--accent-green); font-size: 15px; flex-shrink: 0; }
+
+    .ai-bar-input {
+      flex: 1;
+      background: transparent;
+      border: none;
+      outline: none;
+      font-size: 12.5px;
+      color: var(--text-primary);
+      font-family: inherit;
+      caret-color: var(--accent-green);
+    }
+    .ai-bar-input::placeholder { color: var(--text-muted); }
+
+    .pulse-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--accent-green);
+      flex-shrink: 0;
+      animation: pulse 2s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50%       { opacity: 0.3; transform: scale(0.6); }
+    }
+
+    /* ============================================================
+       CHAT PANEL
+    ============================================================ */
+    .chat-panel {
+      margin-top: 8px;
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-card);
+      background: var(--bg-card);
+      overflow: hidden;
+      display: none;
+      flex-direction: column;
+    }
+    .chat-panel.open { display: flex; }
+
+    /* Chat header */
+    .chat-header {
+      background: var(--accent-green-dk);
+      color: #fff;
+      padding: 8px 14px;
+      font-size: 12.5px;
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+    }
+    .chat-header-title {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .chat-close {
+      background: none;
+      border: none;
+      color: #ffffffaa;
+      cursor: pointer;
+      font-size: 18px;
+      line-height: 1;
+      padding: 0;
+      transition: color 0.15s;
+    }
+    .chat-close:hover { color: #fff; }
+
+    /* Messages area */
+    .chat-messages {
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      min-height: 200px;
+      max-height: 320px;
+      overflow-y: auto;
+    }
+    /* Custom scrollbar */
+    .chat-messages::-webkit-scrollbar { width: 4px; }
+    .chat-messages::-webkit-scrollbar-track { background: transparent; }
+    .chat-messages::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 2px; }
+
+    .msg {
+      max-width: 88%;
+      font-size: 12px;
+      line-height: 1.6;
+      padding: 7px 11px;
+      border-radius: 10px;
+      word-break: break-word;
+    }
+    .msg-ai {
+      background: var(--bg-msg-ai);
+      color: var(--text-primary);
+      border: 1px solid var(--border-default);
+      align-self: flex-start;
+      border-bottom-left-radius: 3px;
+    }
+    .msg-user {
+      background: var(--accent-green);
+      color: #fff;
+      align-self: flex-end;
+      border-bottom-right-radius: 3px;
+    }
+    .msg-thinking {
+      color: var(--text-muted);
+      font-style: italic;
+      font-size: 11.5px;
+      align-self: flex-start;
+    }
+    /* CLI / monospace output */
+    .msg-cli {
+      white-space: pre-wrap;
+      font-family: 'Courier New', Courier, monospace;
+      font-size: 11px;
+      line-height: 1.5;
+    }
+
+    /* Chat input row */
+    .chat-input-row {
+      display: flex;
+      gap: 6px;
+      padding: 8px 10px;
+      border-top: 1px solid var(--border-default);
+    }
+    .chat-input {
+      flex: 1;
+      font-size: 12px;
+      padding: 7px 11px;
+      border-radius: var(--radius-btn);
+      border: 1px solid var(--border-default);
+      background: var(--bg-input);
+      color: var(--text-primary);
+      font-family: inherit;
+      outline: none;
+      caret-color: var(--accent-green);
+      transition: border-color 0.2s;
+    }
+    .chat-input::placeholder { color: var(--text-muted); }
+    .chat-input:focus { border-color: var(--accent-green); }
+
+    .chat-send {
+      background: var(--accent-green);
+      color: #fff;
+      border: none;
+      border-radius: var(--radius-btn);
+      padding: 7px 14px;
+      cursor: pointer;
+      font-size: 13px;
+      display: flex;
+      align-items: center;
+      transition: background 0.15s;
+    }
+    .chat-send:hover { background: var(--accent-green-dk); }
+  </style>
+</head>
+<body>
+
+  <!-- ============================================================
+       SECTION TITLE
+  ============================================================ -->
+  <div class="section-title">
+    <i class="ti ti-checkbox"></i>
+    Approved Inventory (1)
+  </div>
+
+  <!-- ============================================================
+       DEVICE CARD
+  ============================================================ -->
+  <div class="device-card" id="deviceCard">
+
+    <div class="device-top">
+      <!-- Left: IP + badge + meta -->
+      <div>
+        <div class="device-ips">
+          <span class="device-ip-primary" id="deviceIpPrimary">192.168.96.130</span>
+          <a class="device-ip-link" id="deviceIpLink" href="#">192.168.96.130</a>
+          <span class="badge-approved">
+            <i class="ti ti-check" style="font-size:9px;"></i>APPROVED
+          </span>
+        </div>
+        <div class="device-meta" id="deviceMeta">
+          Type: cisco_ios &nbsp;·&nbsp; Ports: 22, 23 &nbsp;·&nbsp; Added: 2026-06-05 17:33:39
+        </div>
+      </div>
+
+      <!-- Right: health / status -->
+      <div class="device-status">
+        <span class="dot-idle"></span>
+        Health: — &nbsp;·&nbsp; Status: idle &nbsp;·&nbsp; Steps: 0
+      </div>
+    </div>
+
+    <hr class="divider" />
+
+    <!-- Button row -->
+    <div class="btn-row">
+
+      <!-- 1. Disapprove -->
+      <button class="btn-sm danger" id="btnDisapprove" onclick="handleDisapprove()">
+        <i class="ti ti-circle-x"></i> Disapprove
+      </button>
+
+      <!-- 2. Login -->
+      <button class="btn-sm" id="btnLogin" onclick="handleLogin()">
+        <i class="ti ti-lock"></i> Login
+      </button>
+
+      <!-- 3. AI Diagnose -->
+      <button class="btn-sm blue" id="btnDiagnose" onclick="handleDiagnose()">
+        <i class="ti ti-activity"></i> AI Diagnose
+      </button>
+
+      <!-- 4. Show Progress -->
+      <button class="btn-sm" id="btnProgress" onclick="handleProgress()">
+        <i class="ti ti-list"></i> Show Progress (0 steps)
+      </button>
+
+      <!-- 5. AI Assistant bar -->
+      <div class="ai-bar-wrap" onclick="document.getElementById('aiBarInput').focus()">
+        <i class="ti ti-message-chatbot ai-bar-icon"></i>
+        <input
+          id="aiBarInput"
+          class="ai-bar-input"
+          type="text"
+          placeholder="AI Assistant"
+          aria-label="AI Assistant"
+          onkeydown="handleBarKey(event)"
+        />
+        <div class="pulse-dot"></div>
+      </div>
+
+    </div>
+  </div><!-- /.device-card -->
+
+  <!-- ============================================================
+       CHAT PANEL
+  ============================================================ -->
+  <div class="chat-panel" id="chatPanel">
+
+    <div class="chat-header">
+      <div class="chat-header-title">
+        <i class="ti ti-message-chatbot"></i>
+        AI Assistant — <span id="chatDeviceLabel">192.168.96.130</span>
+      </div>
+      <button class="chat-close" onclick="closeChat()" aria-label="Close chat">×</button>
+    </div>
+
+    <div class="chat-messages" id="chatMessages">
+      <div class="msg msg-ai">
+        Hi! Ask me anything about this router — config, logs, traps, debug, interfaces, BGP, or any operational task.
+      </div>
+    </div>
+
+    <div class="chat-input-row">
+      <input
+        class="chat-input"
+        id="chatInput"
+        type="text"
+        placeholder="Type your question and press Enter..."
+        onkeydown="handleChatKey(event)"
+      />
+      <button class="chat-send" onclick="sendFromChat()" aria-label="Send message">
+        <i class="ti ti-send"></i>
+      </button>
+    </div>
+
+  </div><!-- /.chat-panel -->
+
+
+  <!-- ============================================================
+       JAVASCRIPT — ALL LOGIC
+  ============================================================ -->
+  <script>
+    /* ----------------------------------------------------------
+       CONFIG — change device details here
+    ---------------------------------------------------------- */
+    const DEVICE = {
+      ip:       '192.168.96.130',
+      type:     'cisco_ios',
+      ports:    [22, 23],
+      hostname: 'Router-96-130',
+    };
+
+    /* ----------------------------------------------------------
+       ANTHROPIC API
+       Replace API_KEY only if you move this outside Claude.ai.
+       Inside Claude artifacts the key is injected automatically.
+    ---------------------------------------------------------- */
+    const API_URL   = 'https://api.anthropic.com/v1/messages';
+    const API_MODEL = 'claude-sonnet-4-20250514';
+    const API_KEY   = '';   // leave empty inside Claude artifacts
+
+    const SYSTEM_PROMPT = `You are an AI Assistant embedded in NetBrain AI, an enterprise network operations platform.
+You are managing device ${DEVICE.ip} (hostname: ${DEVICE.hostname}, type: ${DEVICE.type}).
+Help the user with:
+- Router configuration (running-config, startup-config, interfaces, VLANs, ACLs)
+- Interface status and troubleshooting
+- Syslog / log analysis
+- SNMP trap configuration
+- Debug commands (IP routing, BGP, OSPF, spanning-tree, etc.)
+- BGP, OSPF, EIGRP, static routing
+- CPU/memory utilization
+- Any other Cisco IOS operational task
+
+Rules:
+1. Be concise and practical.
+2. When showing CLI output or commands, use realistic Cisco IOS format.
+3. If you generate CLI output, format it as plain text (no markdown fences).
+4. If the user asks to execute a command, confirm the action first.`;
+
+    /* ----------------------------------------------------------
+       LOCAL MOCK RESPONSES (instant, no API call needed)
+       Add more entries to extend offline coverage.
+    ---------------------------------------------------------- */
+    const MOCK = {
+      'running config': [
+        `hostname ${DEVICE.hostname}`,
+        `ip routing`,
+        `!`,
+        `interface GigabitEthernet0/0`,
+        ` ip address ${DEVICE.ip} 255.255.255.0`,
+        ` no shutdown`,
+        `!`,
+        `interface GigabitEthernet0/1`,
+        ` shutdown`,
+        `!`,
+        `ip route 0.0.0.0 0.0.0.0 192.168.96.1`,
+        `snmp-server community public RO`,
+        `snmp-server community private RW`,
+        `line vty 0 4`,
+        ` transport input ssh`,
+      ].join('\n'),
+
+      'interface': [
+        `Interface          IP-Address      Status    Protocol  Speed`,
+        `GigabitEthernet0/0 ${DEVICE.ip}  up        up        1Gbps`,
+        `GigabitEthernet0/1 unassigned      down      down      --`,
+        `Loopback0          10.0.0.1        up        up        --`,
+      ].join('\n'),
+
+      'syslog': [
+        `[17:31:12] %LINK-3-UPDOWN: Interface GigabitEthernet0/1, changed state to down`,
+        `[17:28:45] %BGP-5-ADJCHANGE: neighbor 192.168.1.1 Down BGP Notification sent`,
+        `[17:15:03] %SYS-5-CONFIG_I: Configured from console by admin on vty0`,
+        `[17:10:22] %OSPF-5-ADJCHG: Process 1, Nbr 10.0.0.2 on Gi0/0 from LOADING to FULL`,
+      ].join('\n'),
+
+      'snmp': [
+        `snmp-server community public RO`,
+        `snmp-server community private RW`,
+        `snmp-server host 10.0.0.5 version 2c public`,
+        `snmp-server enable traps bgp`,
+        `snmp-server enable traps interface`,
+        `snmp-server enable traps cpu threshold`,
+        `snmp-server enable traps envmon`,
+      ].join('\n'),
+
+      'routing table': [
+        `Codes: C-connected, S-static, B-BGP, O-OSPF`,
+        ``,
+        `C    192.168.96.0/24  is directly connected, GigabitEthernet0/0`,
+        `S*   0.0.0.0/0 [1/0] via 192.168.96.1`,
+        `C    10.0.0.1/32  is directly connected, Loopback0`,
+        `B    10.10.0.0/24 [20/0] via 10.10.0.1, 2d14h`,
+      ].join('\n'),
+
+      'bgp': [
+        `BGP router identifier ${DEVICE.ip}, local AS number 65000`,
+        ``,
+        `Neighbor        V  AS     MsgRcvd  MsgSent  Up/Down   State/PfxRcd`,
+        `192.168.1.1     4  65001  0        0        00:05:12  Idle`,
+        `10.10.0.1       4  65002  14823    14901    2d14h     128`,
+      ].join('\n'),
+
+      'cpu': [
+        `CPU utilization for five seconds: 8%/2%; one minute: 6%; five minutes: 5%`,
+        `PID  Runtime(ms)  Invoked   uSecs  5Sec  1Min  5Min  TTY  Process`,
+        `  1      1234      5678     217   0.47% 0.35% 0.31%   0  Chunk Manager`,
+        `  2       456      1234     369   0.23% 0.18% 0.15%   0  Load Meter`,
+      ].join('\n'),
+
+      'version': [
+        `Cisco IOS Software, Version 15.7(3)M6`,
+        `ROM: System Bootstrap, Version 15.7(3)M6`,
+        ``,
+        `${DEVICE.hostname} uptime is 2 weeks, 3 days, 14 hours`,
+        `System image file is "flash:c800-universalk9-mz.SPA.157-3.M6.bin"`,
+        ``,
+        `Cisco 891 (MPC8300) processor with 249856K/15360K bytes of memory.`,
+        `255K bytes of non-volatile configuration memory.`,
+        `250880K bytes of ATA System CompactFlash`,
+      ].join('\n'),
+    };
+
+    /* Keyword → mock key mapping */
+    function getMockResponse(text) {
+      const t = text.toLowerCase();
+      if (t.includes('running') || t.includes('config'))    return { text: MOCK['running config'], cli: true };
+      if (t.includes('interface') || t.includes('ip brief')) return { text: MOCK['interface'],      cli: true };
+      if (t.includes('syslog') || t.includes('log'))        return { text: MOCK['syslog'],          cli: true };
+      if (t.includes('trap') || t.includes('snmp'))         return { text: MOCK['snmp'],            cli: true };
+      if (t.includes('routing table') || t.includes('route')) return { text: MOCK['routing table'], cli: true };
+      if (t.includes('bgp'))                                return { text: MOCK['bgp'],              cli: true };
+      if (t.includes('cpu') || t.includes('memory'))        return { text: MOCK['cpu'],             cli: true };
+      if (t.includes('version') || t.includes('uptime'))    return { text: MOCK['version'],         cli: true };
+      return null;
+    }
+
+    /* ----------------------------------------------------------
+       BUTTON HANDLERS
+    ---------------------------------------------------------- */
+    function handleDisapprove() {
+      pushToChat(`⚠️ Disapprove action triggered for ${DEVICE.ip}.\nDevice will be moved to unapproved inventory and SSH sessions will be terminated.`);
+    }
+
+    function handleLogin() {
+      pushToChat(`🔐 Opening SSH session to ${DEVICE.ip} on port 22...\nAuthentication required. Use your network credentials.`);
+    }
+
+    function handleDiagnose() {
+      pushToChat(`🔍 Running AI Diagnostics on ${DEVICE.ip}...\nChecking: interface health · BGP session state · CPU/memory utilization · recent syslog errors · routing table anomalies.\n\nType any follow-up question to drill deeper.`);
+    }
+
+    function handleProgress() {
+      pushToChat(`📋 Progress log for ${DEVICE.ip}:\nNo steps recorded yet. Steps will appear here as operations are executed.`);
+    }
+
+    /* ----------------------------------------------------------
+       CHAT OPEN / CLOSE
+    ---------------------------------------------------------- */
+    function openChat()  { document.getElementById('chatPanel').classList.add('open'); }
+    function closeChat() { document.getElementById('chatPanel').classList.remove('open'); }
+
+    /* ----------------------------------------------------------
+       KEY HANDLERS
+    ---------------------------------------------------------- */
+    function handleBarKey(e) {
+      if (e.key === 'Enter') {
+        const val = e.target.value.trim();
+        if (val) { sendMessage(val); e.target.value = ''; }
+      }
+    }
+
+    function handleChatKey(e) {
+      if (e.key === 'Enter') sendFromChat();
+    }
+
+    function sendFromChat() {
+      const inp = document.getElementById('chatInput');
+      const val = inp.value.trim();
+      if (val) { sendMessage(val); inp.value = ''; }
+    }
+
+    /* ----------------------------------------------------------
+       DOM HELPERS
+    ---------------------------------------------------------- */
+    function addMsg(role, text, isCli) {
+      const box = document.getElementById('chatMessages');
+      const el  = document.createElement('div');
+      el.className = 'msg ' + (role === 'user' ? 'msg-user' : 'msg-ai');
+      if (isCli) el.classList.add('msg-cli');
+      el.textContent = text;
+      box.appendChild(el);
+      box.scrollTop = box.scrollHeight;
+      return el;
+    }
+
+    function addThinking() {
+      const box = document.getElementById('chatMessages');
+      const el  = document.createElement('div');
+      el.className = 'msg msg-thinking';
+      el.textContent = 'AI Assistant is thinking...';
+      box.appendChild(el);
+      box.scrollTop = box.scrollHeight;
+      return el;
+    }
+
+    function pushToChat(text) {
+      openChat();
+      addMsg('ai', text, false);
+    }
+
+    /* ----------------------------------------------------------
+       MAIN SEND — tries mock first, then Anthropic API
+    ---------------------------------------------------------- */
+    async function sendMessage(text) {
+      openChat();
+      addMsg('user', text, false);
+
+      /* 1. Check local mock */
+      const mock = getMockResponse(text);
+      if (mock) {
+        const thinking = addThinking();
+        await sleep(400);
+        thinking.remove();
+        addMsg('ai', mock.text, mock.cli);
+        return;
+      }
+
+      /* 2. Call Anthropic API */
+      const thinking = addThinking();
+      try {
+        const headers = { 'Content-Type': 'application/json' };
+        if (API_KEY) {
+          headers['x-api-key']         = API_KEY;
+          headers['anthropic-version'] = '2023-06-01';
+        }
+
+        const res = await fetch(API_URL, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            model:      API_MODEL,
+            max_tokens: 1000,
+            system:     SYSTEM_PROMPT,
+            messages:   [{ role: 'user', content: text }],
+          }),
+        });
+
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+        const data  = await res.json();
+        const reply = data.content?.map(b => b.text || '').filter(Boolean).join('') || 'No response received.';
+
+        thinking.remove();
+
+        /* Heuristic: treat as CLI if it looks like IOS output */
+        const looksLikeCli = /[A-Z][a-z]+\d/.test(reply) && reply.includes('\n');
+        addMsg('ai', reply, looksLikeCli);
+
+      } catch (err) {
+        thinking.remove();
+        addMsg('ai', `⚠️ Unable to reach AI backend.\nError: ${err.message}\n\nPlease check your connection or API key.`, false);
+      }
+    }
+
+    /* ----------------------------------------------------------
+       UTILITY
+    ---------------------------------------------------------- */
+    function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  </script>
+</body>
+</html>
