@@ -341,25 +341,36 @@ class DeviceDiscoveryEngine:
                 return
             step("SSH Port", True, f"Port {ssh_port} open")
 
-            # Step 3: Patch paramiko legacy KEX
-            try:
-                import paramiko
-                paramiko.Transport._preferred_kex = (
-                    "diffie-hellman-group14-sha256",
-                    "diffie-hellman-group14-sha1",
-                    "diffie-hellman-group-exchange-sha256",
-                    "diffie-hellman-group-exchange-sha1",
-                    "diffie-hellman-group1-sha1",
-                )
-                paramiko.Transport._preferred_ciphers = (
-                    "aes128-ctr","aes192-ctr","aes256-ctr",
-                    "aes128-cbc","aes192-cbc","aes256-cbc","3des-cbc",
-                )
-                paramiko.Transport._preferred_macs = (
-                    "hmac-sha2-256","hmac-sha2-512","hmac-sha1","hmac-md5",
-                )
-            except Exception:
-                pass
+            # Step 3: Patch paramiko — match working ~/.ssh/config for GNS3 routers
+        try:
+            import paramiko
+            # Match the working ~/.ssh/config for GNS3 / Cisco IOS:
+            # KexAlgorithms diffie-hellman-group1-sha1,...
+            # Ciphers aes128-cbc,3des-cbc,...
+            # HostKeyAlgorithms ssh-rsa
+            # MACs hmac-sha1
+            paramiko.Transport._preferred_kex = (
+                "diffie-hellman-group1-sha1",
+                "diffie-hellman-group14-sha1",
+                "diffie-hellman-group-exchange-sha1",
+                "diffie-hellman-group14-sha256",
+                "diffie-hellman-group-exchange-sha256",
+            )
+            paramiko.Transport._preferred_keys = (
+                "ssh-rsa",
+                "ecdsa-sha2-nistp256",
+                "ssh-ed25519",
+            )
+            paramiko.Transport._preferred_ciphers = (
+                "aes128-cbc", "3des-cbc", "aes192-cbc", "aes256-cbc",
+                "aes128-ctr", "aes192-ctr", "aes256-ctr",
+            )
+            paramiko.Transport._preferred_macs = (
+                "hmac-sha1", "hmac-md5",
+                "hmac-sha2-256", "hmac-sha2-512",
+            )
+        except Exception:
+            pass
 
             # Step 4: Login
             if not NETMIKO_OK:
@@ -512,25 +523,33 @@ class DeviceDiscoveryEngine:
             session.status = "failed"
             return
 
-        # Patch paramiko to support legacy GNS3/Cisco IOS SSH
-        # (old IOS uses diffie-hellman-group1-sha1 which modern paramiko drops)
+        # Patch paramiko — match working ~/.ssh/config for GNS3 routers
         try:
             import paramiko
+            # Match the working ~/.ssh/config for GNS3 / Cisco IOS:
+            # KexAlgorithms diffie-hellman-group1-sha1,...
+            # Ciphers aes128-cbc,3des-cbc,...
+            # HostKeyAlgorithms ssh-rsa
+            # MACs hmac-sha1
             paramiko.Transport._preferred_kex = (
-                "diffie-hellman-group14-sha256",
-                "diffie-hellman-group14-sha1",
-                "diffie-hellman-group-exchange-sha256",
-                "diffie-hellman-group-exchange-sha1",
                 "diffie-hellman-group1-sha1",
+                "diffie-hellman-group14-sha1",
+                "diffie-hellman-group-exchange-sha1",
+                "diffie-hellman-group14-sha256",
+                "diffie-hellman-group-exchange-sha256",
+            )
+            paramiko.Transport._preferred_keys = (
+                "ssh-rsa",
+                "ecdsa-sha2-nistp256",
+                "ssh-ed25519",
             )
             paramiko.Transport._preferred_ciphers = (
+                "aes128-cbc", "3des-cbc", "aes192-cbc", "aes256-cbc",
                 "aes128-ctr", "aes192-ctr", "aes256-ctr",
-                "aes128-cbc", "aes192-cbc", "aes256-cbc",
-                "3des-cbc",
             )
             paramiko.Transport._preferred_macs = (
-                "hmac-sha2-256", "hmac-sha2-512",
                 "hmac-sha1", "hmac-md5",
+                "hmac-sha2-256", "hmac-sha2-512",
             )
         except Exception:
             pass
