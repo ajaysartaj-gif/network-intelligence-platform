@@ -1210,8 +1210,8 @@ elif workspace == "admin":
     st.markdown("## ⚙️ Administration")
     st.caption("Configure connection settings, credentials, thresholds, and system actions.")
 
-    tab_conn, tab_creds, tab_thresh, tab_actions, tab_aicfg = st.tabs(
-        ["Connection", "Credentials", "Thresholds", "System Actions", "🧠 AI Config"]
+    tab_conn, tab_creds, tab_thresh, tab_actions, tab_aicfg, tab_devices = st.tabs(
+        ["Connection", "Credentials", "Thresholds", "System Actions", "🧠 AI Config", "🖧 Devices"]
     )
 
     # ── Connection tab ────────────────────────────────────────────────────────
@@ -1781,6 +1781,380 @@ OPENROUTER_API_KEY = "your-key-here"
             else:
                 st.error("AI unavailable. " + "; ".join(res.get("reasons", [])))
                 st.caption("Check that OPENROUTER_API_KEY is set in Secrets.")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB: DEVICES — Auto-discovery + AI Network Troubleshooting
+    # ══════════════════════════════════════════════════════════════════════════
+    with tab_devices:
+        # ── CSS ───────────────────────────────────────────────────────────────
+        st.markdown("""
+        <style>
+        .dd-card {
+            background: linear-gradient(135deg, #0c1622 0%, #0f2132 100%);
+            border: 1px solid #1e3a52;
+            border-radius: 12px;
+            padding: 1rem 1.2rem;
+            margin-bottom: .75rem;
+            position: relative;
+        }
+        .dd-card-pending  { border-left: 4px solid #f59e0b; }
+        .dd-card-approved { border-left: 4px solid #10b981; }
+        .dd-card-rejected { border-left: 4px solid #ef4444; }
+        .dd-card-trouble  { border-left: 4px solid #6366f1; }
+        .dd-badge {
+            display: inline-block; border-radius: 20px;
+            padding: 2px 10px; font-size: .72rem; font-weight: 600;
+        }
+        .dd-badge-pending  { background:#78350f; color:#fde68a; }
+        .dd-badge-approved { background:#064e3b; color:#6ee7b7; }
+        .dd-badge-rejected { background:#7f1d1d; color:#fca5a5; }
+        .dd-badge-online   { background:#052e16; color:#4ade80; }
+        .dd-ip { font-family: monospace; color: #67e8f9; font-size: .9rem; }
+        .dd-hostname { color: #f1f5f9; font-weight: 600; font-size: 1rem; }
+        .dd-meta { color: #94a3b8; font-size: .78rem; }
+        .dd-pulse {
+            display: inline-block; width: 10px; height: 10px;
+            background: #22c55e; border-radius: 50%;
+            box-shadow: 0 0 0 0 rgba(34,197,94,.4);
+            animation: pulse-ring 1.5s infinite;
+        }
+        @keyframes pulse-ring {
+            0%   { box-shadow: 0 0 0 0 rgba(34,197,94,.4); }
+            70%  { box-shadow: 0 0 0 8px rgba(34,197,94,0); }
+            100% { box-shadow: 0 0 0 0 rgba(34,197,94,0); }
+        }
+        .dd-section-title {
+            font-size: 1.05rem; font-weight: 700; color: #e2e8f0;
+            border-bottom: 1px solid #1e3a52; padding-bottom: .4rem;
+            margin-bottom: 1rem;
+        }
+        .ai-ts-step-ok   { color: #4ade80; }
+        .ai-ts-step-fail { color: #f87171; }
+        .ai-ts-step-info { color: #93c5fd; }
+        .health-critical { color:#ef4444; font-weight:700; }
+        .health-degraded { color:#f59e0b; font-weight:700; }
+        .health-healthy  { color:#22c55e; font-weight:700; }
+        </style>
+        """, unsafe_allow_html=True)
+
+        # ── Init discovery engine ─────────────────────────────────────────────
+        try:
+            from core.device_discovery import get_discovery_engine
+            disc = get_discovery_engine()
+            DISC_OK = True
+        except Exception as _de:
+            DISC_OK = False
+            st.error(f"Device discovery engine failed to load: {_de}")
+
+        if DISC_OK:
+            st.markdown("## 🖧 Device Management")
+            st.caption(
+                "Devices that ping from your Mac/Linux terminal are automatically detected "
+                "and queued below for approval. Once approved they join your network inventory "
+                "and become available for AI troubleshooting."
+            )
+
+            # ── Top action bar ────────────────────────────────────────────────
+            col_scan, col_ping, col_refresh = st.columns([2, 2, 1])
+            with col_scan:
+                subnet_prefix = st.text_input(
+                    "Scan subnet (first 3 octets)",
+                    value="192.168.0", key="dd_subnet",
+                    placeholder="192.168.1",
+                )
+                if st.button("🔍 Scan Subnet", use_container_width=True, key="dd_scan"):
+                    disc.scan_subnet(subnet_prefix)
+                    st.toast(f"Scanning {subnet_prefix}.1–254 in background… check back in ~30s")
+
+            with col_ping:
+                manual_ip = st.text_input(
+                    "Or ping a specific IP",
+                    key="dd_manual_ip", placeholder="10.0.0.1"
+                )
+                if st.button("📡 Ping & Discover", use_container_width=True, key="dd_ping"):
+                    if manual_ip:
+                        with st.spinner(f"Pinging {manual_ip}…"):
+                            result = disc.ping_and_discover(manual_ip.strip())
+                        if result:
+                            st.success(f"✅ {manual_ip} is reachable — added to pending queue")
+                        else:
+                            st.error(f"❌ {manual_ip} did not respond")
+                    else:
+                        st.warning("Enter an IP address first.")
+
+            with col_refresh:
+                st.markdown("<br>", unsafe_allow_html=True)
+                if st.button("🔄 Refresh", use_container_width=True, key="dd_refresh"):
+                    st.rerun()
+
+            st.divider()
+
+            # ════════════════════════════════════════════════════════════════
+            # SECTION 1 — PENDING DEVICES (auto-discovered, awaiting approval)
+            # ════════════════════════════════════════════════════════════════
+            pending = disc.get_pending()
+            pending_count = len(pending)
+
+            st.markdown(
+                f"<div class='dd-section-title'>"
+                f"⚠️ Pending Approval "
+                f"{'<span class=\"dd-pulse\"></span>' if pending_count else ''} "
+                f"&nbsp;({pending_count})</div>",
+                unsafe_allow_html=True
+            )
+
+            if not pending:
+                st.info(
+                    "No new devices detected yet.\n\n"
+                    "**To trigger auto-discovery:** ping any GNS3 router from your Mac terminal:\n"
+                    "```\nping 192.168.0.1\n```\n"
+                    "It will appear here within ~10 seconds."
+                )
+            else:
+                for dev in pending:
+                    ports_str  = ", ".join(str(p) for p in dev.open_ports) or "none detected"
+                    with st.container():
+                        st.markdown(f"""
+                        <div class='dd-card dd-card-pending'>
+                          <span class='dd-hostname'>{dev.hostname or 'Unknown'}</span>
+                          &nbsp;&nbsp;<span class='dd-ip'>{dev.ip}</span>
+                          &nbsp;&nbsp;<span class='dd-badge dd-badge-pending'>⏳ PENDING</span>
+                          <br><span class='dd-meta'>
+                            Type: {dev.device_type} &nbsp;·&nbsp;
+                            Source: {dev.source} &nbsp;·&nbsp;
+                            Open ports: {ports_str} &nbsp;·&nbsp;
+                            First seen: {dev.first_seen}
+                          </span>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+                        btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 3])
+                        with btn_col1:
+                            if st.button(f"✅ Approve", key=f"approve_{dev.ip}",
+                                         use_container_width=True, type="primary"):
+                                disc.approve_device(dev.ip, approved_by="admin")
+                                st.success(f"✅ {dev.ip} approved and added to inventory")
+                                st.rerun()
+                        with btn_col2:
+                            if st.button(f"❌ Reject", key=f"reject_{dev.ip}",
+                                         use_container_width=True):
+                                disc.reject_device(dev.ip)
+                                st.rerun()
+                        with btn_col3:
+                            override_type = st.selectbox(
+                                "Override device type",
+                                ["cisco_ios", "cisco_iosxe", "cisco_nxos",
+                                 "juniper_junos", "arista_eos", "linux", "cisco_ios_telnet"],
+                                key=f"dtype_{dev.ip}",
+                                index=["cisco_ios","cisco_iosxe","cisco_nxos",
+                                       "juniper_junos","arista_eos","linux",
+                                       "cisco_ios_telnet"].index(dev.device_type)
+                                       if dev.device_type in ["cisco_ios","cisco_iosxe","cisco_nxos",
+                                                               "juniper_junos","arista_eos","linux",
+                                                               "cisco_ios_telnet"] else 0,
+                            )
+                            dev.device_type = override_type
+
+            st.divider()
+
+            # ════════════════════════════════════════════════════════════════
+            # SECTION 2 — APPROVED INVENTORY
+            # ════════════════════════════════════════════════════════════════
+            approved = disc.get_approved()
+            st.markdown(
+                f"<div class='dd-section-title'>✅ Approved Inventory ({len(approved)})</div>",
+                unsafe_allow_html=True
+            )
+
+            if not approved:
+                st.caption("No devices approved yet. Approve devices from the Pending section above.")
+            else:
+                for dev in approved:
+                    # Check for an active session
+                    session = disc.get_session(dev.ip)
+                    sess_status = session.status if session else None
+                    card_cls = "dd-card-trouble" if sess_status == "running" \
+                               else "dd-card-approved"
+
+                    st.markdown(f"""
+                    <div class='dd-card {card_cls}'>
+                      <span class='dd-hostname'>{dev.hostname or dev.ip}</span>
+                      &nbsp;&nbsp;<span class='dd-ip'>{dev.ip}</span>
+                      &nbsp;&nbsp;<span class='dd-badge dd-badge-approved'>✅ APPROVED</span>
+                      <br><span class='dd-meta'>
+                        Type: {dev.device_type} &nbsp;·&nbsp;
+                        Ports: {", ".join(str(p) for p in dev.open_ports) or "—"} &nbsp;·&nbsp;
+                        Approved by: {dev.approved_by} &nbsp;·&nbsp;
+                        Added: {dev.first_seen}
+                      </span>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                    # ── AI NETWORK TROUBLESHOOTING BUTTON ─────────────────────
+                    ai_col, status_col = st.columns([2, 3])
+                    with ai_col:
+                        btn_label = (
+                            "⏳ Troubleshooting…" if sess_status == "running"
+                            else "🤖 AI Network Troubleshooting"
+                        )
+                        ai_btn = st.button(
+                            btn_label,
+                            key=f"ai_ts_{dev.ip}",
+                            use_container_width=True,
+                            type="primary",
+                            disabled=(sess_status == "running"),
+                        )
+                        if ai_btn:
+                            creds_dict = {
+                                "username": os.environ.get("GNS3_SSH_USER", "admin"),
+                                "password": os.environ.get("GNS3_SSH_PASS", "admin"),
+                                "enable_secret": os.environ.get("GNS3_SSH_SECRET", ""),
+                            }
+                            disc.start_ai_troubleshoot(
+                                dev.ip, call_ai, creds_dict, approved=False
+                            )
+                            st.session_state[f"ts_expanded_{dev.ip}"] = True
+                            st.rerun()
+
+                    with status_col:
+                        if session:
+                            health = "—"
+                            for line in session.ai_diagnosis.splitlines():
+                                if line.startswith("HEALTH:"):
+                                    health = line.replace("HEALTH:", "").strip()
+                            cls = {
+                                "CRITICAL": "health-critical",
+                                "DEGRADED": "health-degraded",
+                                "HEALTHY": "health-healthy",
+                            }.get(health.upper(), "health-healthy")
+                            st.markdown(
+                                f"Health: <span class='{cls}'>{health}</span> &nbsp;·&nbsp; "
+                                f"Status: {session.status} &nbsp;·&nbsp; "
+                                f"Steps: {len(session.steps)}",
+                                unsafe_allow_html=True
+                            )
+
+                    # ── Session details expander ───────────────────────────────
+                    if session and st.session_state.get(f"ts_expanded_{dev.ip}"):
+                        with st.expander(
+                            f"🔬 Troubleshoot Details — {dev.hostname or dev.ip}",
+                            expanded=True
+                        ):
+                            # Steps
+                            st.markdown("**📋 Progress Steps**")
+                            for s in session.steps:
+                                icon = "✅" if s["ok"] else "❌"
+                                st.markdown(
+                                    f"{icon} `{s['ts']}` **{s['name']}** — {s['detail']}"
+                                )
+                                if s.get("output"):
+                                    with st.expander(f"Output: {s['name']}"):
+                                        st.code(s["output"], language="text")
+
+                            # AI diagnosis
+                            if session.ai_diagnosis:
+                                st.markdown("**🤖 AI Diagnosis**")
+                                # Parse and colour health badge
+                                diag_display = session.ai_diagnosis
+                                if "HEALTH: CRITICAL" in diag_display:
+                                    st.error("🔴 HEALTH: CRITICAL")
+                                elif "HEALTH: DEGRADED" in diag_display:
+                                    st.warning("🟠 HEALTH: DEGRADED")
+                                elif "HEALTH: HEALTHY" in diag_display:
+                                    st.success("🟢 HEALTH: HEALTHY")
+                                st.markdown(diag_display)
+
+                            # Raw output
+                            if session.output:
+                                with st.expander("📄 Raw Diagnostic Output"):
+                                    st.code(session.output[:8000], language="text")
+
+                            # Fix plan + approve
+                            if session.ai_fix_plan and not session.fix_applied:
+                                st.markdown("**🔧 Proposed Fix Commands**")
+                                st.code(session.ai_fix_plan, language="text")
+                                st.warning(
+                                    "⚠️ Review the commands above carefully before approving. "
+                                    "They will be executed directly on the live device."
+                                )
+                                fix_col1, fix_col2 = st.columns(2)
+                                with fix_col1:
+                                    if st.button(
+                                        "✅ APPROVE & APPLY FIXES",
+                                        key=f"apply_fix_{dev.ip}",
+                                        type="primary",
+                                        use_container_width=True,
+                                    ):
+                                        creds_dict = {
+                                            "username": os.environ.get("GNS3_SSH_USER", "admin"),
+                                            "password": os.environ.get("GNS3_SSH_PASS", "admin"),
+                                            "enable_secret": os.environ.get("GNS3_SSH_SECRET", ""),
+                                        }
+                                        disc.approve_and_apply_fixes(dev.ip, call_ai, creds_dict)
+                                        st.success("Fix session started — refresh to see results")
+                                        st.rerun()
+                                with fix_col2:
+                                    if st.button(
+                                        "🚫 Dismiss",
+                                        key=f"dismiss_fix_{dev.ip}",
+                                        use_container_width=True,
+                                    ):
+                                        st.session_state[f"ts_expanded_{dev.ip}"] = False
+                                        st.rerun()
+
+                            elif session.fix_applied:
+                                st.success(
+                                    "✅ Fixes were applied. Run AI Troubleshooting again "
+                                    "to verify the device is healthy."
+                                )
+
+                    st.markdown("---")
+
+            st.divider()
+
+            # ════════════════════════════════════════════════════════════════
+            # SECTION 3 — FULL DISCOVERY LOG
+            # ════════════════════════════════════════════════════════════════
+            all_devices = disc.get_all()
+            with st.expander(f"📜 Full Discovery Log ({len(all_devices)} total)"):
+                if all_devices:
+                    import pandas as _pd
+                    rows = [
+                        {
+                            "IP":          d.ip,
+                            "Hostname":    d.hostname or "—",
+                            "Type":        d.device_type,
+                            "Status":      d.status,
+                            "Source":      d.source,
+                            "Open Ports":  ", ".join(str(p) for p in d.open_ports) or "—",
+                            "First Seen":  d.first_seen,
+                            "Last Seen":   d.last_seen,
+                        }
+                        for d in all_devices
+                    ]
+                    st.dataframe(_pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                else:
+                    st.caption("No devices discovered yet.")
+
+            # ── How it works callout ──────────────────────────────────────────
+            with st.expander("ℹ️ How Auto-Discovery Works"):
+                st.markdown("""
+                **Mac/Linux Terminal → Auto-Discovery Pipeline:**
+
+                1. Open your Mac Terminal and ping any GNS3 router:
+                   ```
+                   ping 192.168.0.1
+                   ```
+                2. NetBrain AI detects the ICMP reply within ~10 seconds
+                3. The device appears in the **Pending Approval** section above
+                4. Click **Approve** — it joins your network inventory
+                5. Click **🤖 AI Network Troubleshooting** to SSH in, run diagnostics, and get an AI-generated fix plan
+                6. Review the fix commands, then click **APPROVE & APPLY FIXES** to execute them
+
+                **Subnet Scan:** Use the scanner above to discover all live devices on a /24 subnet at once.
+
+                **Manual Add:** Enter any IP in the "Ping & Discover" box to check reachability and add it directly.
+                """)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
