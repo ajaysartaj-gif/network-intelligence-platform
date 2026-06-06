@@ -6,8 +6,8 @@ from openai import OpenAI
 # MODEL CONFIG
 # =========================================================
 
-# Canonical model — matches config/ai.py OPENROUTER_MODEL
-MODEL = "anthropic/claude-sonnet-4-5"
+# Free model — no credits needed
+MODEL = "deepseek/deepseek-chat-v3-0324:free"
 
 # =========================================================
 # GET API KEY — checks all possible sources in order
@@ -111,7 +111,7 @@ If the query is unclear, ask for clarification on specific symptoms, devices, or
                 }
             ],
             temperature=0.1,
-            max_tokens=800
+            max_tokens=1000
         )
         return response.choices[0].message.content
     except Exception as e:
