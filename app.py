@@ -2278,34 +2278,145 @@ OPENROUTER_API_KEY = "your-key-here"
                     if _ai_nlp_q and _ai_nlp_q != st.session_state.get(_nlp_last_key):
                         st.session_state[_nlp_last_key] = _ai_nlp_q
 
-                        # Build device-specific context
-                        _dev_ctx = (
-                            f"Device: {dev.ip}  hostname={dev.hostname or dev.ip}  "
-                            f"type={dev.device_type}  ports={dev.open_ports}\n"
-                        )
-                        if session and session.output:
-                            _dev_ctx += f"\nLatest device output (truncated):\n{session.output[:2000]}"
-                        if session and session.ai_diagnosis:
-                            _dev_ctx += f"\n\nPrevious AI diagnosis:\n{session.ai_diagnosis[:1000]}"
+                        # ── Check if operator is approving a pending config ───
+                        _pending_key = f"ai_nlp_pending_cmds_{dev.ip}"
+                        _approve_words = {"yes", "approve", "apply", "deploy",
+                                          "confirm", "go", "do it", "execute",
+                                          "proceed", "run it"}
+                        _reject_words  = {"no", "cancel", "reject", "abort",
+                                          "stop", "don't", "skip"}
+                        _q_lower = _ai_nlp_q.strip().lower()
 
-                        _nlp_sys = (
-                            "You are an AI Assistant embedded in NetBrain AI. "
-                            f"You are managing the following network device:\n{_dev_ctx}\n\n"
-                            "Help the operator with router configuration, interface status, "
-                            "syslog/logs, SNMP traps, debug commands, BGP, OSPF, routing tables, "
-                            "ACLs, and all Cisco IOS operational tasks. "
-                            "Be concise and practical. When showing CLI output or commands, "
-                            "use proper Cisco IOS format."
-                        )
+                        if st.session_state.get(_pending_key):
+                            # Operator is responding to an approval request
+                            _pending = st.session_state[_pending_key]
+                            if any(w in _q_lower for w in _approve_words):
+                                # ── EXECUTE the pending commands ──────────────
+                                _exec_log = []
+                                _creds_exec = {
+                                    "username":      os.environ.get("GNS3_SSH_USER", "admin"),
+                                    "password":      os.environ.get("GNS3_SSH_PASS", "admin"),
+                                    "enable_secret": os.environ.get("GNS3_SSH_SECRET", ""),
+                                }
+                                try:
+                                    from netmiko import ConnectHandler
+                                    _cfg_exec = dict(
+                                        device_type=dev.device_type or "cisco_ios",
+                                        host=dev.ip,
+                                        port=int(dev.ssh_port or 22),
+                                        username=_creds_exec["username"],
+                                        password=_creds_exec["password"],
+                                        timeout=30,
+                                        auth_timeout=30,
+                                        fast_cli=False,
+                                        global_delay_factor=2,
+                                    )
+                                    if _creds_exec["enable_secret"]:
+                                        _cfg_exec["secret"] = _creds_exec["enable_secret"]
 
-                        with st.spinner(f"🤖 AI Assistant thinking about {dev.ip}…"):
-                            try:
-                                _nlp_reply = call_ai(_nlp_sys + f"\n\nOperator: {_ai_nlp_q}\nAI Assistant:")
-                            except Exception as _nlp_err:
-                                _nlp_reply = f"AI unavailable: {_nlp_err}"
+                                    with st.spinner(f"⚙️ Deploying configuration on {dev.ip}…"):
+                                        _conn_exec = ConnectHandler(**_cfg_exec)
+                                        _config_cmds = [c.replace("[CONFIG]","").strip()
+                                                        for c in _pending if "[CONFIG]" in c]
+                                        _exec_cmds   = [c.replace("[EXEC]","").strip()
+                                                        for c in _pending if "[EXEC]" in c]
+                                        if _exec_cmds:
+                                            for _ec in _exec_cmds:
+                                                _o = _conn_exec.send_command(_ec, read_timeout=20)
+                                                _exec_log.append(f"$ {_ec}\n{_o}")
+                                        if _config_cmds:
+                                            _o = _conn_exec.send_config_set(_config_cmds)
+                                            _exec_log.append(f"[CONFIG MODE]\n{_o}")
+                                        _conn_exec.disconnect()
 
-                        if not _nlp_reply:
-                            _nlp_reply = "AI is unavailable. Please check your OPENROUTER_API_KEY in Secrets."
+                                    _nlp_reply = (
+                                        "✅ **Configuration deployed successfully on "
+                                        f"{dev.hostname or dev.ip}**\n\n"
+                                        "```\n" + "\n".join(_exec_log) + "\n```"
+                                    )
+                                except Exception as _exec_err:
+                                    _nlp_reply = f"❌ Execution failed: {_exec_err}"
+
+                                # Clear pending after execution
+                                st.session_state.pop(_pending_key, None)
+
+                            elif any(w in _q_lower for w in _reject_words):
+                                _nlp_reply = "❌ Configuration cancelled. No changes were made to the router."
+                                st.session_state.pop(_pending_key, None)
+                            else:
+                                _nlp_reply = (
+                                    "⏳ There are pending commands waiting for your approval. "
+                                    "Please say **yes** to deploy or **no** to cancel."
+                                )
+
+                        else:
+                            # ── Normal AI chat — understand intent ────────────
+                            _dev_ctx = (
+                                f"Device: {dev.ip}  hostname={dev.hostname or dev.ip}  "
+                                f"type={dev.device_type}  ports={dev.open_ports}\n"
+                            )
+                            if session and session.output:
+                                _dev_ctx += f"\nLatest device output:\n{session.output[:2000]}"
+                            if session and session.ai_diagnosis:
+                                _dev_ctx += f"\nPrevious AI diagnosis:\n{session.ai_diagnosis[:1000]}"
+
+                            # AI is told to return commands in a structured way
+                            _nlp_sys = (
+                                "You are an AI network engineer embedded in NetBrain AI, "
+                                "with LIVE SSH access to the following device:\n"
+                                f"{_dev_ctx}\n\n"
+                                "When the operator asks you to CONFIGURE, DEPLOY, ADD, REMOVE, "
+                                "ENABLE, DISABLE or CHANGE anything on the router, you MUST:\n"
+                                "1. Explain what you will do in 1-2 sentences.\n"
+                                "2. List ALL required IOS commands, one per line, prefixed with "
+                                "[CONFIG] for config-mode commands or [EXEC] for exec-mode commands.\n"
+                                "3. End with exactly this line: APPROVAL_REQUIRED\n\n"
+                                "When the operator asks a READ-ONLY question (show, verify, explain, "
+                                "check, what is, why), just answer directly — no commands needed.\n\n"
+                                "Always be concise, use proper Cisco IOS format."
+                            )
+
+                            with st.spinner(f"🤖 AI Assistant thinking about {dev.ip}…"):
+                                try:
+                                    _raw_reply = call_ai(
+                                        _nlp_sys + f"\n\nOperator: {_ai_nlp_q}\nAI Assistant:"
+                                    )
+                                except Exception as _nlp_err:
+                                    _raw_reply = f"AI unavailable: {_nlp_err}"
+
+                            if not _raw_reply:
+                                _raw_reply = "AI is unavailable. Please check your OPENROUTER_API_KEY in Secrets."
+
+                            # ── Parse AI response — extract commands if present ─
+                            if "APPROVAL_REQUIRED" in _raw_reply:
+                                _lines = _raw_reply.replace("APPROVAL_REQUIRED","").strip().splitlines()
+                                _cmds   = [l.strip() for l in _lines
+                                           if l.strip().startswith("[CONFIG]")
+                                           or l.strip().startswith("[EXEC]")]
+                                _explain = "\n".join(
+                                    l for l in _lines
+                                    if not l.strip().startswith("[CONFIG]")
+                                    and not l.strip().startswith("[EXEC]")
+                                ).strip()
+
+                                if _cmds:
+                                    # Store commands pending approval
+                                    st.session_state[_pending_key] = _cmds
+                                    _cmd_display = "\n".join(
+                                        c.replace("[CONFIG]","  ").replace("[EXEC]","  ")
+                                        for c in _cmds
+                                    )
+                                    _nlp_reply = (
+                                        f"{_explain}\n\n"
+                                        f"**Commands to be executed on {dev.hostname or dev.ip}:**\n"
+                                        f"```\n{_cmd_display}\n```\n\n"
+                                        "⚠️ **Type `yes` to deploy or `no` to cancel.**"
+                                    )
+                                else:
+                                    _nlp_reply = _raw_reply.replace("APPROVAL_REQUIRED","").strip()
+                            else:
+                                # Read-only response — just show it
+                                _nlp_reply = _raw_reply
 
                         # Store reply in session state to persist across reruns
                         if f"ai_nlp_history_{dev.ip}" not in st.session_state:
