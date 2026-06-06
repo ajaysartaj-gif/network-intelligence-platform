@@ -15,4 +15,8 @@ venv/
 .streamlit/secrets.toml
 .streamlit/secrets.toml
 .env
+<<<<<<< HEAD
 .streamlit/secrets.toml
+=======
+.env
+>>>>>>> 4dc7c8181fe3d53cbccd8cb72d0b32b3827ee612
