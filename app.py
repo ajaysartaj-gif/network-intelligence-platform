@@ -190,8 +190,9 @@ def _resolve_api_key() -> str:
         return os.environ.get("OPENROUTER_API_KEY", "")
 
 
-@st.cache_resource
 def _get_ai_client():
+    # No @st.cache_resource — caching None when key is missing would permanently
+    # break the chat even after the key is correctly set in secrets/env.
     if not OPENAI_AVAILABLE:
         return None
     key = _resolve_api_key()
@@ -201,7 +202,6 @@ def _get_ai_client():
         return OpenAI(api_key=key, base_url=OPENROUTER_BASE)
     except Exception:
         return None
-
 
 def call_ai(prompt: str) -> str:
     client = _get_ai_client()
