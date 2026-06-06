@@ -2497,7 +2497,8 @@ OPENROUTER_API_KEY = "your-key-here"
                                 with _col_yes:
                                     if st.button("✅ Deploy Now", key=f"nlp_approve_{dev.ip}",
                                                  type="primary", use_container_width=True):
-                                        _exec_log = []
+                                        _exec_log  = []
+                                        _rollback_cmds = []
                                         _creds_exec = {
                                             "username":      os.environ.get("GNS3_SSH_USER", "admin"),
                                             "password":      os.environ.get("GNS3_SSH_PASS", "admin"),
@@ -2505,45 +2506,132 @@ OPENROUTER_API_KEY = "your-key-here"
                                         }
                                         try:
                                             from netmiko import ConnectHandler
+                                            import re as _re
+
+                                            _dtype = dev.device_type or "cisco_ios"
                                             _cfg_exec = dict(
-                                                device_type=dev.device_type or "cisco_ios",
+                                                device_type=_dtype,
                                                 host=dev.ip,
                                                 port=int(dev.ssh_port or 22),
                                                 username=_creds_exec["username"],
                                                 password=_creds_exec["password"],
-                                                timeout=30,
-                                                auth_timeout=30,
+                                                timeout=60,
+                                                auth_timeout=60,
+                                                conn_timeout=30,
                                                 fast_cli=False,
-                                                global_delay_factor=2,
+                                                global_delay_factor=4,
+                                                session_log=None,
                                             )
                                             if _creds_exec["enable_secret"]:
                                                 _cfg_exec["secret"] = _creds_exec["enable_secret"]
-                                            with st.spinner(f"⚙️ Deploying on {dev.ip}…"):
+
+                                            with st.spinner("⚙️ Connecting to " + dev.ip + "…"):
                                                 _conn_exec = ConnectHandler(**_cfg_exec)
-                                                _config_cmds = [c.replace("[CONFIG]","").strip()
-                                                                for c in _pend if "[CONFIG]" in c]
-                                                _exec_cmds   = [c.replace("[EXEC]","").strip()
-                                                                for c in _pend if "[EXEC]" in c]
+                                                # Enter enable mode if secret is set
+                                                try:
+                                                    _conn_exec.enable()
+                                                except Exception:
+                                                    pass
+
+                                            _config_cmds = [c.replace("[CONFIG]","").strip()
+                                                            for c in _pend if "[CONFIG]" in c
+                                                            and c.replace("[CONFIG]","").strip()]
+                                            _exec_cmds   = [c.replace("[EXEC]","").strip()
+                                                            for c in _pend if "[EXEC]" in c
+                                                            and c.replace("[EXEC]","").strip()]
+
+                                            # ── Capture PRE-change state for rollback ──
+                                            with st.spinner("📸 Capturing pre-change snapshot…"):
+                                                try:
+                                                    _pre_run = _conn_exec.send_command(
+                                                        "show running-config", read_timeout=30
+                                                    )
+                                                    # Build rollback commands from config cmds
+                                                    for _cmd in _config_cmds:
+                                                        _c = _cmd.strip().lower()
+                                                        if _c.startswith("interface loopback"):
+                                                            _iface = _cmd.strip().split()[-1]
+                                                            _rollback_cmds += [
+                                                                "[CONFIG] no interface loopback " + _iface
+                                                            ]
+                                                        elif _c.startswith("router ospf"):
+                                                            _pid = _cmd.strip().split()[-1]
+                                                            _rollback_cmds += [
+                                                                "[CONFIG] no router ospf " + _pid
+                                                            ]
+                                                        elif _c.startswith("router bgp"):
+                                                            _asn = _cmd.strip().split()[-1]
+                                                            _rollback_cmds += [
+                                                                "[CONFIG] no router bgp " + _asn
+                                                            ]
+                                                        elif _c.startswith("ip route"):
+                                                            _rollback_cmds += [
+                                                                "[CONFIG] no " + _cmd.strip()
+                                                            ]
+                                                        elif _c.startswith("no "):
+                                                            # Reversing a "no" = add it back
+                                                            _rollback_cmds += [
+                                                                "[CONFIG] " + _cmd.strip()[3:]
+                                                            ]
+                                                except Exception:
+                                                    _pre_run = ""
+
+                                            # ── Execute EXEC-mode commands ────────────
+                                            with st.spinner("⚙️ Executing commands on " + dev.ip + "…"):
                                                 if _exec_cmds:
                                                     for _ec in _exec_cmds:
-                                                        _o = _conn_exec.send_command(_ec, read_timeout=20)
-                                                        _exec_log.append("$ " + _ec + "\n" + _o)
+                                                        try:
+                                                            _o = _conn_exec.send_command(
+                                                                _ec,
+                                                                read_timeout=30,
+                                                                expect_string=r"#",
+                                                            )
+                                                            _exec_log.append("$ " + _ec + "\n" + _o)
+                                                        except Exception as _ce:
+                                                            _exec_log.append("$ " + _ec + "\nERROR: " + str(_ce))
+
+                                                # ── Execute CONFIG-mode commands ──────
                                                 if _config_cmds:
-                                                    _o = _conn_exec.send_config_set(_config_cmds)
-                                                    _exec_log.append("[CONFIG]\n" + _o)
+                                                    try:
+                                                        _o = _conn_exec.send_config_set(
+                                                            _config_cmds,
+                                                            read_timeout=30,
+                                                            enter_config_mode=True,
+                                                            exit_config_mode=True,
+                                                        )
+                                                        _exec_log.append("[CONFIG MODE]\n" + _o)
+                                                        # Save config
+                                                        try:
+                                                            _conn_exec.save_config()
+                                                        except Exception:
+                                                            pass
+                                                    except Exception as _cfg_err:
+                                                        _exec_log.append("[CONFIG MODE] ERROR: " + str(_cfg_err))
+
                                                 _conn_exec.disconnect()
+
                                             _hostname_disp = dev.hostname or dev.ip
                                             _deploy_result = (
                                                 "✅ **Deployed successfully on " + _hostname_disp + "**\n\n"
                                                 + "```\n" + "\n".join(_exec_log) + "\n```"
                                             )
+                                            # Store rollback plan in session state
+                                            if _rollback_cmds:
+                                                st.session_state[f"ai_nlp_rollback_{dev.ip}"] = _rollback_cmds
+                                                _deploy_result += (
+                                                    "\n\n🔄 **Rollback available** — "
+                                                    "click **↩️ Undo** below to revert these changes."
+                                                )
+
                                         except Exception as _ex_err:
-                                            _deploy_result = f"❌ Deployment failed: {_ex_err}"
+                                            _deploy_result = "❌ Deployment failed: " + str(_ex_err)
+
                                         st.session_state.pop(f"ai_nlp_pending_cmds_{dev.ip}", None)
                                         st.session_state.setdefault(
                                             f"ai_nlp_history_{dev.ip}", []
                                         ).append({"q": "✅ Approved — Deploy Now", "a": _deploy_result})
                                         st.rerun()
+
                                 with _col_no:
                                     if st.button("❌ Cancel", key=f"nlp_reject_{dev.ip}",
                                                  use_container_width=True):
@@ -2551,6 +2639,83 @@ OPENROUTER_API_KEY = "your-key-here"
                                         st.session_state.setdefault(
                                             f"ai_nlp_history_{dev.ip}", []
                                         ).append({"q": "❌ Cancelled", "a": "Configuration cancelled. No changes made."})
+                                        st.rerun()
+
+                            # ── Rollback / Undo button ────────────────────────
+                            _rollback_key = f"ai_nlp_rollback_{dev.ip}"
+                            if st.session_state.get(_rollback_key) and not st.session_state.get(_pending_key):
+                                st.markdown("---")
+                                st.info("↩️ **Rollback available** — undo the last deployed configuration.")
+                                _col_rb, _col_rb2 = st.columns(2)
+                                with _col_rb:
+                                    if st.button("↩️ Undo Last Change", key=f"nlp_rollback_{dev.ip}",
+                                                 use_container_width=True):
+                                        _rb_cmds = st.session_state[_rollback_key]
+                                        _rb_log  = []
+                                        _creds_rb = {
+                                            "username":      os.environ.get("GNS3_SSH_USER", "admin"),
+                                            "password":      os.environ.get("GNS3_SSH_PASS", "admin"),
+                                            "enable_secret": os.environ.get("GNS3_SSH_SECRET", ""),
+                                        }
+                                        try:
+                                            from netmiko import ConnectHandler
+                                            _cfg_rb = dict(
+                                                device_type=dev.device_type or "cisco_ios",
+                                                host=dev.ip,
+                                                port=int(dev.ssh_port or 22),
+                                                username=_creds_rb["username"],
+                                                password=_creds_rb["password"],
+                                                timeout=60,
+                                                auth_timeout=60,
+                                                fast_cli=False,
+                                                global_delay_factor=4,
+                                            )
+                                            if _creds_rb["enable_secret"]:
+                                                _cfg_rb["secret"] = _creds_rb["enable_secret"]
+                                            with st.spinner("↩️ Rolling back changes on " + dev.ip + "…"):
+                                                _conn_rb = ConnectHandler(**_cfg_rb)
+                                                try:
+                                                    _conn_rb.enable()
+                                                except Exception:
+                                                    pass
+                                                _rb_config = [c.replace("[CONFIG]","").strip()
+                                                              for c in _rb_cmds if "[CONFIG]" in c]
+                                                _rb_exec   = [c.replace("[EXEC]","").strip()
+                                                              for c in _rb_cmds if "[EXEC]" in c]
+                                                if _rb_exec:
+                                                    for _rc in _rb_exec:
+                                                        _o = _conn_rb.send_command(
+                                                            _rc, read_timeout=30, expect_string=r"#"
+                                                        )
+                                                        _rb_log.append("$ " + _rc + "\n" + _o)
+                                                if _rb_config:
+                                                    _o = _conn_rb.send_config_set(
+                                                        _rb_config,
+                                                        read_timeout=30,
+                                                        enter_config_mode=True,
+                                                        exit_config_mode=True,
+                                                    )
+                                                    _rb_log.append("[ROLLBACK CONFIG]\n" + _o)
+                                                    try:
+                                                        _conn_rb.save_config()
+                                                    except Exception:
+                                                        pass
+                                                _conn_rb.disconnect()
+                                            _rb_result = (
+                                                "↩️ **Rollback completed on " + (dev.hostname or dev.ip) + "**\n\n"
+                                                + "```\n" + "\n".join(_rb_log) + "\n```"
+                                            )
+                                            st.session_state.pop(_rollback_key, None)
+                                        except Exception as _rb_err:
+                                            _rb_result = "❌ Rollback failed: " + str(_rb_err)
+                                        st.session_state.setdefault(
+                                            f"ai_nlp_history_{dev.ip}", []
+                                        ).append({"q": "↩️ Undo Last Change", "a": _rb_result})
+                                        st.rerun()
+                                with _col_rb2:
+                                    if st.button("🗑 Discard Rollback", key=f"nlp_discard_rb_{dev.ip}",
+                                                 use_container_width=True):
+                                        st.session_state.pop(_rollback_key, None)
                                         st.rerun()
 
                             if st.button("🗑 Clear chat", key=f"nlp_clear_{dev.ip}"):
