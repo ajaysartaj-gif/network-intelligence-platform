@@ -13,3 +13,4 @@ venv/
 *.db
 .streamlit/secrets.toml
 .streamlit/secrets.toml
+.streamlit/secrets.toml
