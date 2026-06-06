@@ -93,8 +93,8 @@ echo -e "${GREEN}[OK]${NC} Dependencies ready."
 if [ ! -f "$REPO_PATH/.env" ]; then
     echo -e "${YELLOW}[INFO]${NC} Creating .env template..."
     cat > "$REPO_PATH/.env" << 'ENV'
-# Get your key from: https://openrouter.ai/keys
-OPENROUTER_API_KEY=your_openrouter_key_here
+# Get your FREE key from: https://console.groq.com
+GROQ_API_KEY=your_groq_api_key_here
 
 STREAMLIT_PORT=8501
 PINGGY_FALLBACK_URL=
@@ -106,7 +106,7 @@ ROUTER_DEFAULT_USERNAME=admin
 ROUTER_DEFAULT_PASSWORD=
 ROUTER_ENABLE_SECRET=
 ENV
-    echo -e "${YELLOW}[ACTION NEEDED]${NC} Edit .env and add your OPENROUTER_API_KEY"
+    echo -e "${YELLOW}[ACTION NEEDED]${NC} Edit .env and add your GROQ_API_KEY"
     # Open in editor
     command -v open &>/dev/null && open -t "$REPO_PATH/.env"   # macOS
     command -v nano &>/dev/null && echo "  Run: nano $REPO_PATH/.env"
