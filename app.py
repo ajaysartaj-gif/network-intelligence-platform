@@ -2527,22 +2527,15 @@ OPENROUTER_API_KEY = "your-key-here"
                                                 if _exec_cmds:
                                                     for _ec in _exec_cmds:
                                                         _o = _conn_exec.send_command(_ec, read_timeout=20)
-                                                        _exec_log.append(f"$ {_ec}
-{_o}")
+                                                        _exec_log.append("$ " + _ec + "\n" + _o)
                                                 if _config_cmds:
                                                     _o = _conn_exec.send_config_set(_config_cmds)
-                                                    _exec_log.append(f"[CONFIG]
-{_o}")
+                                                    _exec_log.append("[CONFIG]\n" + _o)
                                                 _conn_exec.disconnect()
+                                            _hostname_disp = dev.hostname or dev.ip
                                             _deploy_result = (
-                                                f"✅ **Deployed successfully on "
-                                                f"{dev.hostname or dev.ip}**
-
-"
-                                                "```
-" + "
-".join(_exec_log) + "
-```"
+                                                "✅ **Deployed successfully on " + _hostname_disp + "**\n\n"
+                                                + "```\n" + "\n".join(_exec_log) + "\n```"
                                             )
                                         except Exception as _ex_err:
                                             _deploy_result = f"❌ Deployment failed: {_ex_err}"
