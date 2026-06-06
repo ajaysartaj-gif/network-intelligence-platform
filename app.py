@@ -252,7 +252,7 @@ def call_ai(prompt: str) -> str:
                 )},
                 {"role": "user", "content": prompt},
             ],
-            max_tokens=1200,
+            max_tokens=800,
             temperature=0.1,
         )
         return resp.choices[0].message.content
