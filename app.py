@@ -8,6 +8,14 @@ The full remediation pipeline is visible step-by-step in real time.
 # ── MUST BE FIRST ────────────────────────────────────────────────────────────
 import streamlit as st
 
+# Load .env file BEFORE anything reads os.environ
+# .env file lives in the repo root (same folder as app.py)
+try:
+    from dotenv import load_dotenv
+    load_dotenv(override=False)   # override=False: Streamlit Secrets take priority
+except ImportError:
+    pass  # python-dotenv not installed; rely on os.environ / Streamlit Secrets
+
 st.set_page_config(
     page_title="NetBrain AI — Autonomous NOC",
     page_icon="🧠",
@@ -17,6 +25,10 @@ st.set_page_config(
 
 # ── IMPORTS ───────────────────────────────────────────────────────────────────
 import os
+from core.ai_engine import ask_ai, get_api_key
+from core.orchestration_engine import OperationsOrchestrator
+from core.github_log_engine import GitHubLogEngine
+from config.netmiko_devices import load_device_catalog
 import time
 import logging
 import random
@@ -31,6 +43,14 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+# ── LOCAL ROUTER ACCESS (primary access layer — Pinggy is fallback only) ──────
+try:
+    from Local_Router_Access import get_manager as _get_lra_manager, render_local_access_ui, LocalLinkGenerator
+    LRA_AVAILABLE = True
+except Exception as _lra_err:
+    LRA_AVAILABLE = False
+    logger.warning(f"Local_Router_Access not loaded: {_lra_err}")
 
 # ── OPTIONAL IMPORTS ──────────────────────────────────────────────────────────
 OPENAI_AVAILABLE = False
@@ -93,9 +113,25 @@ if DATABASE_AVAILABLE:
     try:
         seed_database()
     except Exception as e:
-        logger.warning(f"DB seed failed: {e}")
+        logger.warning(f"Database seed failed: {e}")
 
-# ── AI CONFIG (must be defined before _get_monitor references call_ai) ────────
+# GitHub logs engine and device catalog — cached to avoid re-init on every rerun
+@st.cache_resource
+def _get_gh_log_engine():
+    return GitHubLogEngine()
+
+@st.cache_resource
+def _get_device_catalog():
+    return load_device_catalog()
+
+gh_log_engine  = _get_gh_log_engine()
+device_catalog = _get_device_catalog()
+
+# =========================================================
+# AI CONFIG
+# =========================================================
+
+# ── AI CONFIG (must come before _get_monitor) ─────────────────────────────────
 OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 # Free model by default (no cost, no credit card). Override via the
 # OPENROUTER_MODEL secret if you want a different one. ':free' models and the
@@ -189,39 +225,13 @@ def call_ai(prompt: str) -> str:
         logger.warning(f"AI call failed: {e}")
         return ""
 
-
-def diagnose_ai() -> dict:
-    """Make a real OpenRouter call and return the ACTUAL reason the AI isn't
-    working (bad key, no credits, wrong model) instead of a swallowed error."""
-    if not OPENAI_AVAILABLE:
-        return {"ok": False, "stage": "library",
-                "detail": "The 'openai' python package isn't installed."}
-    key = _resolve_api_key()
-    if not key:
-        return {"ok": False, "stage": "key",
-                "detail": "OPENROUTER_API_KEY is empty. Add it to Secrets and reboot."}
-    masked = key[:8] + "…" + key[-4:] if len(key) > 14 else "set"
-    try:
-        client = OpenAI(api_key=key, base_url=OPENROUTER_BASE)
-        resp = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[{"role": "user", "content": "Reply with exactly: OK"}],
-            max_tokens=10, temperature=0,
-        )
-        return {"ok": True, "stage": "done",
-                "detail": f"Model responded: {resp.choices[0].message.content!r}",
-                "model": MODEL_NAME, "key": masked}
-    except Exception as e:
-        return {"ok": False, "stage": "request",
-                "detail": f"{type(e).__name__}: {e}", "model": MODEL_NAME, "key": masked}
-
 # ── PINGPY / TUNNEL CONFIG ────────────────────────────────────────────────────
 
-def _resolve_gns3_endpoint() -> tuple:
+def _resolve_gns3_endpoint() -> tuple[str, int]:
     """
     Returns (host, port) for GNS3.
-    Priority: GNS3_TUNNEL_URL secret/env → localhost:3080.
-    GNS3_TUNNEL_URL examples: abc123.pinggy.io:12345  or  https://abc123.pinggy.io
+    Priority: GNS3_TUNNEL_URL env/secret → localhost:3080.
+    GNS3_TUNNEL_URL can be a full URL like https://abc123.pinggy.io or host:port.
     """
     try:
         raw = st.secrets.get("GNS3_TUNNEL_URL", "")
@@ -232,23 +242,28 @@ def _resolve_gns3_endpoint() -> tuple:
 
     if raw:
         raw = raw.strip().rstrip("/")
+        # Strip protocol
         for scheme in ("https://", "http://"):
             if raw.startswith(scheme):
                 raw = raw[len(scheme):]
                 break
+        # host:port or just host
         if ":" in raw:
             host, port_str = raw.rsplit(":", 1)
             try:
                 return host, int(port_str)
             except ValueError:
                 return raw, 443
-        return raw, 443
+        return raw, 443  # pingpy tunnel uses 443 by default
 
     return "localhost", 3080
 
 
 def _check_tunnel_and_reconnect() -> bool:
-    """Returns True if GNS3 became newly reachable this call."""
+    """
+    Returns True if GNS3 became newly reachable this call (tunnel just connected).
+    Side-effect: updates gns3_engine when tunnel URL changes.
+    """
     host, port = _resolve_gns3_endpoint()
     gns3 = getattr(orchestrator, "gns3", None)
     if gns3 is None:
@@ -256,6 +271,7 @@ def _check_tunnel_and_reconnect() -> bool:
 
     current_url = f"http://{host}:{port}/v2"
     if gns3.base_url != current_url:
+        # Tunnel URL changed — reconfigure
         gns3.base_url = current_url
         gns3.available = False
 
@@ -267,6 +283,7 @@ def _check_tunnel_and_reconnect() -> bool:
     if newly_connected:
         gns3.refresh()
         logger.info(f"GNS3 tunnel connected: {current_url}")
+
     return newly_connected
 
 # ── ORCHESTRATOR (singleton — survives reruns) ─────────────────────────────────
@@ -274,6 +291,7 @@ def _check_tunnel_and_reconnect() -> bool:
 def _get_orchestrator():
     from core.orchestration_engine import OperationsOrchestrator
     orc = OperationsOrchestrator()
+    # Inject GNS3 engine with tunnel-aware endpoint
     try:
         from core.gns3_engine import GNS3Engine
         host, port = _resolve_gns3_endpoint()
@@ -506,7 +524,7 @@ def _render_approval_card(run_id: str, data: dict) -> None:
 
     col_approve, col_reject, col_skip = st.columns([1, 1, 3])
     with col_approve:
-        if st.button(f"✅ APPROVE FIX", key=f"approve_{run_id}", type="primary", use_container_width=True):
+        if st.button(f"✅ APPROVE FIX", key=f"approve_{run_id}", type="primary", width='stretch'):
             monitor.approved_run_ids.add(run_id)
             # Run a cycle immediately so the fix executes now, not on next refresh.
             try:
@@ -532,7 +550,7 @@ def _render_approval_card(run_id: str, data: dict) -> None:
                 st.error(f"❌ Fix attempt failed: {last_fix.get('error','unknown error')}")
             st.rerun()
     with col_reject:
-        if st.button(f"❌ REJECT", key=f"reject_{run_id}", use_container_width=True):
+        if st.button(f"❌ REJECT", key=f"reject_{run_id}", width='stretch'):
             monitor.rejected_run_ids.add(run_id)
             st.warning("Fix rejected.")
             st.rerun()
@@ -636,26 +654,76 @@ with st.sidebar:
     else:
         st.info("🔵 No tunnel configured")
 
-# ══════════════════════════════════════════════════════════════════════════════
+    # ── Tunnel / GNS3 connection status ──────────────────────────────────────
+    st.divider()
+    st.markdown("**GNS3 / TUNNEL**")
+    gns3_engine = getattr(orchestrator, "gns3", None)
+    gns3_host, gns3_port = _resolve_gns3_endpoint()
+    tunnel_url = os.environ.get("GNS3_TUNNEL_URL", "") or ""
+    try:
+        tunnel_url = st.secrets.get("GNS3_TUNNEL_URL", tunnel_url)
+    except Exception:
+        pass
+    if gns3_engine and gns3_engine.available:
+        st.success(f"🟢 Connected  v{gns3_engine.version}")
+        st.caption(f"{gns3_host}:{gns3_port} · {len(gns3_engine.nodes)} nodes · {len(gns3_engine.links)} links")
+    elif tunnel_url:
+        st.warning("🟡 Tunnel configured — waiting for GNS3")
+        st.caption(f"URL: {tunnel_url}")
+    else:
+        st.info("🔵 Simulation mode\nSet GNS3_TUNNEL_URL to connect live")
+
+    # ── LOCAL ACCESS LINKS ────────────────────────────────────────────────────
+    st.divider()
+    st.markdown("**🔗 LOCAL ACCESS**")
+    if LRA_AVAILABLE:
+        try:
+            _links = LocalLinkGenerator.generate_links()
+            _lan   = _links.get("local_lan", "")
+            _local = _links.get("localhost", "")
+            if _lan:
+                st.markdown(
+                    f"<div style='background:#0c1a2e;border:1px solid #22d3ee;border-radius:6px;"
+                    f"padding:.45rem .7rem;font-size:.78rem;color:#22d3ee;font-family:monospace;"
+                    f"word-break:break-all;'>🌐 <a href='{_lan}' target='_blank' "
+                    f"style='color:#22d3ee;text-decoration:none;'>{_lan}</a></div>",
+                    unsafe_allow_html=True,
+                )
+            if _local:
+                st.caption(f"🖥️ [localhost]({_local})  ·  [Open Local Router Access](?workspace=local_router)")
+            pinggy_url = _links.get("pinggy_fallback", "")
+            if pinggy_url:
+                st.caption(f"☁️ Pinggy fallback: [link]({pinggy_url})")
+            else:
+                st.caption("☁️ Pinggy: _not configured_ (secondary)")
+        except Exception:
+            st.caption("Local links unavailable")
+    else:
+        st.caption("Local_Router_Access module not found")
+
+
 # WORKSPACE CONTENT
 # ══════════════════════════════════════════════════════════════════════════════
 
 workspace     = st.session_state["workspace"]
 POLL_INTERVAL = 5  # seconds
 
-# ── Check tunnel + poll monitor ───────────────────────────────────────────────
+# ── Check tunnel on every render — reconnect if GNS3 just became reachable ───
 tunnel_just_connected = _check_tunnel_and_reconnect()
 if tunnel_just_connected:
+    # GNS3 tunnel just came up — switch telemetry to live mode and alert
     try:
         orchestrator.telemetry.live_mode = True
-        gns3_nodes = list(orchestrator.gns3.nodes.keys()) if getattr(orchestrator, "gns3", None) else []
-        add_live_alert("recovery",
-            f"GNS3 tunnel connected — {len(gns3_nodes)} device(s) now live",
-            {"type": "tunnel_connected", "device": "gns3"},
+        gns3_nodes = list(getattr(orchestrator, "gns3", {}).nodes.keys()) if getattr(orchestrator, "gns3", None) else []
+        add_live_alert(
+            "recovery",
+            f"GNS3 tunnel connected — pulling live data from {len(gns3_nodes)} device(s)",
+            {"type": "tunnel_connected", "device": "gns3", "nodes": gns3_nodes},
         )
     except Exception:
         pass
 
+# ── Poll if due ───────────────────────────────────────────────────────────────
 now = time.time()
 if now - st.session_state["last_poll_time"] >= POLL_INTERVAL:
     cycle_result = run_monitor_cycle()
@@ -896,7 +964,71 @@ elif workspace == "Workflows":
                 "Duration": f"{run.elapsed_seconds:.1f}s",
                 "Summary":  (run.summary or "—")[:55],
             })
+
         st.dataframe(pd.DataFrame(wf_rows), use_container_width=True)
+
+    st.divider()
+    st.markdown("### GitHub Router Logs (gns3-router-logs)")
+    col_sync, col_file = st.columns([1, 3])
+    with col_sync:
+        if st.button("Sync logs from GitHub", key="sync_github_logs"):
+            sync_result = gh_log_engine.sync_repo()
+            st.success(f"Sync result: {sync_result}")
+            # refresh device catalog
+            device_catalog = load_device_catalog()
+            st.rerun()
+    with col_file:
+        logs = gh_log_engine.list_logs()
+        if not logs:
+            st.info("No logs found. Click 'Sync logs from GitHub' to fetch the repo.")
+        else:
+            selected = st.selectbox("Select log file", options=logs, index=0, key="selected_github_log")
+            if selected:
+                content = gh_log_engine.read_log(selected)
+                st.code(content[:20000])
+                if st.button("Analyze selected log", key="analyze_github_log"):
+                    with st.spinner("Analyzing log with AI..."):
+                        analysis = gh_log_engine.analyze_log(content)
+                        st.text_area("AI Analysis", value=analysis, height=240)
+                        suggested_cmds = gh_log_engine.propose_remediation_commands(analysis)
+                        st.subheader("Suggested Diagnostic / Remediation Commands")
+                        for cmd in suggested_cmds:
+                            st.code(cmd)
+
+                        # Remediation approval UI
+                        if device_catalog:
+                            device_names = [d.get('hostname') or d.get('host') for d in device_catalog]
+                            chosen = st.selectbox("Target device for remediation", options=device_names, key="gh_log_target_device")
+                            target_device = next((d for d in device_catalog if (d.get('hostname') or d.get('host')) == chosen), device_catalog[0])
+                            dry = st.checkbox("Dry run (do not execute commands)", value=True, key="gh_log_dry_run")
+                            if st.button("Approve & Execute Remediation", key="gh_log_execute"):
+                                with st.spinner("Executing remediation..."):
+                                    res = gh_log_engine.apply_remediation(target_device, suggested_cmds, dry_run=dry)
+                                    if res.get('error'):
+                                        st.error(f"Remediation failed: {res['error']}")
+                                    else:
+                                        st.success(f"Remediation executed: {res.get('executed')}")
+                                        st.text_area("Execution Output", value='\n\n'.join(res.get('output', []))[:20000], height=300)
+                        else:
+                            st.info("No device catalog configured. Set NETBRAIN_DEVICE_* env vars or NETBRAIN_DEVICE_CATALOG.")
+
+    st.divider()
+    st.markdown("### Incident & Recovery Timeline")
+    active_incidents = [
+        i for i in orchestrator.state.get_all_incidents().values()
+        if i["status"] in {"new", "investigating"}
+    ]
+    recovery_feed = st.session_state.get("incident_timeline", [])
+    if active_incidents or recovery_feed:
+        timeline_rows = []
+        for event in st.session_state.get("incident_timeline", [])[:15]:
+            timeline_rows.append({
+                "time": event.get("timestamp", "")[-8:],
+                "event": event.get("event", "unknown"),
+                "severity": event.get("severity", "info").upper(),
+                "details": event.get("details", "")[:80],
+            })
+        st.dataframe(pd.DataFrame(timeline_rows), use_container_width=True)
 
     st.divider()
     wf_s = tracker.export_summary()
@@ -1092,8 +1224,8 @@ elif workspace == "admin":
     st.markdown("## ⚙️ Administration")
     st.caption("Configure connection settings, credentials, thresholds, and system actions.")
 
-    tab_conn, tab_creds, tab_thresh, tab_actions, tab_aicfg = st.tabs(
-        ["Connection", "Credentials", "Thresholds", "System Actions", "🧠 AI Config"]
+    tab_conn, tab_creds, tab_thresh, tab_actions, tab_aicfg, tab_devices = st.tabs(
+        ["Connection", "Credentials", "Thresholds", "System Actions", "🧠 AI Config", "🖧 Devices"]
     )
 
     # ── Connection tab ────────────────────────────────────────────────────────
@@ -1253,7 +1385,7 @@ OPENROUTER_API_KEY = "your-key-here"
         )
         gh_engine = getattr(monitor, "github_log", None)
         default_gh_url = (
-            gh_engine.raw_url if gh_engine else
+            getattr(gh_engine, "raw_url", "") if gh_engine else
             os.environ.get("GNS3_LOG_GITHUB_URL", "")
         )
         with st.form("gh_log_form"):
@@ -1274,13 +1406,14 @@ OPENROUTER_API_KEY = "your-key-here"
                     gh_engine.default_device = new_gh_dev.strip() or "R1"
                 st.success("Log source applied for this session.")
 
-        if gh_engine:
+        if gh_engine and callable(getattr(gh_engine, "status", None)):
             colp, colr = st.columns([1, 4])
             with colp:
                 if st.button("🔄 Poll Now"):
                     # Run a FULL monitoring cycle (not just a feed refresh) so any
                     # down interface is analyzed and turned into an approval card.
-                    gh_engine.poll()
+                    if callable(getattr(gh_engine, "poll", None)):
+                        gh_engine.poll()
                     try:
                         run_monitor_cycle()
                     except Exception as _e:
@@ -1304,23 +1437,25 @@ OPENROUTER_API_KEY = "your-key-here"
                 st.warning("Down now: " + ", ".join(status["open_interfaces"]))
 
             st.markdown("**Recent log events** (newest first)")
-            events = gh_engine.recent_events[:15]
+            events = getattr(gh_engine, "recent_events", [])[:15]
             if events:
                 import pandas as _pd
                 df = _pd.DataFrame([
                     {
-                        "Time": e["ts"],
-                        "Device": e["device"],
-                        "Event": e["mnemonic"],
-                        "Interface": e["interface"] or "—",
-                        "State": e["state"] or "—",
-                        "Action?": "⚠️ fixable" if e["actionable"] else "",
+                        "Time": e.get("ts", ""),
+                        "Device": e.get("device", ""),
+                        "Event": e.get("mnemonic", ""),
+                        "Interface": e.get("interface") or "—",
+                        "State": e.get("state") or "—",
+                        "Action?": "⚠️ fixable" if e.get("actionable") else "",
                     }
                     for e in events
                 ])
                 st.dataframe(df, use_container_width=True, hide_index=True)
             else:
                 st.caption("No events parsed yet — click Poll Now.")
+        else:
+            st.warning("GitHub log engine is unavailable or incomplete. Check app logs for init errors.")
 
         st.markdown("**Add to Streamlit secrets:**")
         st.code(f'GNS3_LOG_GITHUB_URL = "{default_gh_url}"\n'
@@ -1423,22 +1558,22 @@ OPENROUTER_API_KEY = "your-key-here"
 
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("🗑️ Clear All Incidents", use_container_width=True):
+            if st.button("🗑️ Clear All Incidents", width='stretch'):
                 orchestrator.state.incidents.clear()
                 st.success("All incidents cleared.")
-            if st.button("🔄 Reset Monitor", use_container_width=True):
+            if st.button("🔄 Reset Monitor", width='stretch'):
                 monitor._active_signatures.clear()
                 monitor.pending_approvals.clear()
                 monitor.approved_run_ids.clear()
                 monitor.rejected_run_ids.clear()
                 monitor.cycle_count = 0
                 st.success("Monitor reset.")
-            if st.button("📋 Clear Workflow History", use_container_width=True):
+            if st.button("📋 Clear Workflow History", width='stretch'):
                 tracker.runs.clear()
                 st.success("Workflow history cleared.")
 
         with col2:
-            if st.button("🔌 Test Router SSH Connection", use_container_width=True):
+            if st.button("🔌 Test Router SSH Connection", width='stretch'):
                 host = os.environ.get("GNS3_ROUTER_HOST","")
                 port = os.environ.get("GNS3_ROUTER_PORT","22")
                 if not host:
@@ -1446,15 +1581,6 @@ OPENROUTER_API_KEY = "your-key-here"
                 else:
                     with st.spinner(f"Connecting to {host}:{port}..."):
                         try:
-                            import paramiko
-                            paramiko.Transport._preferred_kex = (
-                                "diffie-hellman-group14-sha1",
-                                "diffie-hellman-group-exchange-sha1",
-                                "diffie-hellman-group1-sha1",
-                            )
-                            paramiko.Transport._preferred_ciphers = (
-                                "aes128-cbc","aes192-cbc","aes256-cbc",
-                            )
                             from netmiko import ConnectHandler
                             _dtype = os.environ.get("GNS3_DEVICE_TYPE", "cisco_ios").strip() or "cisco_ios"
                             _cfg = dict(
@@ -1473,7 +1599,7 @@ OPENROUTER_API_KEY = "your-key-here"
                         except Exception as e:
                             st.error(f"Connection failed: {e}")
 
-            if st.button("📊 Show Current Anomalies", use_container_width=True):
+            if st.button("📊 Show Current Anomalies", width='stretch'):
                 anomalies = orchestrator.telemetry.detect_anomalies()
                 if anomalies:
                     for a in anomalies:
@@ -1550,7 +1676,16 @@ OPENROUTER_API_KEY = "your-key-here"
                 risk = res.get("risk", "unknown")
                 risk_icon = {"low": "🟢", "medium": "🟡", "high": "🟠"}.get(risk, "⚪")
 
-                if mode == "diagnostic":
+                # Plain prose answer (AI answered a question rather than returning commands)
+                if res.get("plain_answer"):
+                    st.info("💬 AI answered your question:")
+                    st.markdown(res["plain_answer"])
+                    st.caption(
+                        "Tip: For router commands use requests like "
+                        "'show ip interface brief' or 'add description Uplink to Gi1/0'"
+                    )
+
+                elif mode == "diagnostic":
                     st.info(f"🔍 Diagnostic query — read-only. {res.get('summary','')}")
                     st.markdown("**Commands:**")
                     st.code("\n".join(res.get("commands", [])), language="text")
@@ -1661,9 +1796,1055 @@ OPENROUTER_API_KEY = "your-key-here"
                 st.error("AI unavailable. " + "; ".join(res.get("reasons", [])))
                 st.caption("Check that OPENROUTER_API_KEY is set in Secrets.")
 
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB: DEVICES — Auto-discovery + AI Network Troubleshooting
+    # ══════════════════════════════════════════════════════════════════════════
+    with tab_devices:
+        # ── CSS ───────────────────────────────────────────────────────────────
+        st.markdown("""
+        <style>
+        .dd-card {
+            background: linear-gradient(135deg, #0c1622 0%, #0f2132 100%);
+            border: 1px solid #1e3a52;
+            border-radius: 12px;
+            padding: 1rem 1.2rem;
+            margin-bottom: .75rem;
+            position: relative;
+        }
+        .dd-card-pending  { border-left: 4px solid #f59e0b; }
+        .dd-card-approved { border-left: 4px solid #10b981; }
+        .dd-card-rejected { border-left: 4px solid #ef4444; }
+        .dd-card-trouble  { border-left: 4px solid #6366f1; }
+        .dd-badge {
+            display: inline-block; border-radius: 20px;
+            padding: 2px 10px; font-size: .72rem; font-weight: 600;
+        }
+        .dd-badge-pending  { background:#78350f; color:#fde68a; }
+        .dd-badge-approved { background:#064e3b; color:#6ee7b7; }
+        .dd-badge-rejected { background:#7f1d1d; color:#fca5a5; }
+        .dd-badge-online   { background:#052e16; color:#4ade80; }
+        .dd-ip { font-family: monospace; color: #67e8f9; font-size: .9rem; }
+        .dd-hostname { color: #f1f5f9; font-weight: 600; font-size: 1rem; }
+        .dd-meta { color: #94a3b8; font-size: .78rem; }
+        .dd-pulse {
+            display: inline-block; width: 10px; height: 10px;
+            background: #22c55e; border-radius: 50%;
+            box-shadow: 0 0 0 0 rgba(34,197,94,.4);
+            animation: pulse-ring 1.5s infinite;
+        }
+        @keyframes pulse-ring {
+            0%   { box-shadow: 0 0 0 0 rgba(34,197,94,.4); }
+            70%  { box-shadow: 0 0 0 8px rgba(34,197,94,0); }
+            100% { box-shadow: 0 0 0 0 rgba(34,197,94,0); }
+        }
+        .dd-section-title {
+            font-size: 1.05rem; font-weight: 700; color: #e2e8f0;
+            border-bottom: 1px solid #1e3a52; padding-bottom: .4rem;
+            margin-bottom: 1rem;
+        }
+        .ai-ts-step-ok   { color: #4ade80; }
+        .ai-ts-step-fail { color: #f87171; }
+        .ai-ts-step-info { color: #93c5fd; }
+        .health-critical { color:#ef4444; font-weight:700; }
+        .health-degraded { color:#f59e0b; font-weight:700; }
+        .health-healthy  { color:#22c55e; font-weight:700; }
+        </style>
+        """, unsafe_allow_html=True)
+
+        # ── Init discovery engine ─────────────────────────────────────────────
+        try:
+            from core.device_discovery import get_discovery_engine, get_log_store
+            # Anchor engine in session_state so it survives Streamlit reruns
+            # within the same browser session. Module-level singleton + JSON
+            # file handle full-process restarts.
+            if "disc_engine" not in st.session_state:
+                st.session_state["disc_engine"] = get_discovery_engine()
+            disc = st.session_state["disc_engine"]
+            log_store = get_log_store()
+            DISC_OK = True
+        except Exception as _de:
+            DISC_OK = False
+            st.error(f"Device discovery engine failed to load: {_de}")
+
+        if DISC_OK:
+            st.markdown("## 🖧 Device Management")
+            st.caption(
+                "Devices that ping from your Mac/Linux terminal are automatically detected "
+                "and queued below for approval. Once approved they join your network inventory "
+                "and become available for AI troubleshooting."
+            )
+
+            # ── AI ASSISTANT — search-style input box ─────────────────────────
+            st.markdown("""
+            <style>
+            .ai-assistant-container {
+                position: relative;
+                margin: 0.8rem 0 1.2rem 0;
+            }
+            .ai-assistant-label {
+                display: flex; align-items: center; gap: .5rem;
+                color: #475569; font-size: .78rem; font-weight: 500;
+                margin-bottom: .3rem; letter-spacing: .04em;
+                text-transform: uppercase;
+            }
+            /* Override Streamlit text_input to look like a search bar */
+            div[data-testid="stTextInput"][id^="ai_assistant"] > div > div > input {
+                background: #0a1628 !important;
+                border: 1px solid #1e3a52 !important;
+                border-radius: 30px !important;
+                padding: .7rem 1.2rem .7rem 3rem !important;
+                color: #94a3b8 !important;
+                font-size: .95rem !important;
+                box-shadow: 0 4px 24px rgba(0,0,0,.4), 0 0 0 1px rgba(34,211,238,.06) !important;
+                transition: all .2s ease;
+            }
+            div[data-testid="stTextInput"][id^="ai_assistant"] > div > div > input:focus {
+                border-color: #22d3ee !important;
+                box-shadow: 0 4px 32px rgba(0,0,0,.5), 0 0 0 2px rgba(34,211,238,.2) !important;
+                color: #e2e8f0 !important;
+            }
+            .ai-response-box {
+                background: linear-gradient(135deg, #0a1628 0%, #0f2132 100%);
+                border: 1px solid #1e3a52;
+                border-left: 3px solid #22d3ee;
+                border-radius: 10px;
+                padding: 1rem 1.2rem;
+                margin: .5rem 0 1rem 0;
+                color: #cbd5e1;
+                font-size: .92rem;
+                line-height: 1.6;
+                box-shadow: 0 4px 20px rgba(0,0,0,.3);
+            }
+            .ai-response-header {
+                color: #22d3ee; font-size: .78rem; font-weight: 600;
+                text-transform: uppercase; letter-spacing: .05em;
+                margin-bottom: .5rem; display: flex; align-items: center; gap: .4rem;
+            }
+            </style>
+            """, unsafe_allow_html=True)
+
+            # Robot icon overlay using a label trick
+            _aic1, _aic2 = st.columns([20, 1])
+            with _aic1:
+                st.markdown(
+                    "<div class='ai-assistant-label'>🤖 &nbsp;AI Assistant</div>",
+                    unsafe_allow_html=True
+                )
+                _ai_q = st.text_input(
+                    label="ai_assistant_input",
+                    label_visibility="collapsed",
+                    placeholder="✦ AI Assistant  —  ask about your network, devices, or configs...",
+                    key="devices_ai_input",
+                )
+
+            # Handle submission — Enter key submits automatically via Streamlit
+            if _ai_q and _ai_q != st.session_state.get("devices_ai_last_q"):
+                st.session_state["devices_ai_last_q"] = _ai_q
+                # Build context from approved devices
+                try:
+                    _d_ctx = ""
+                    if DISC_OK:
+                        _devs = disc.get_approved()
+                        if _devs:
+                            _d_ctx = "Approved devices: " + ", ".join(
+                                f"{d.hostname or d.ip} ({d.ip}, {d.device_type})"
+                                for d in _devs
+                            ) + "\n\n"
+                except Exception:
+                    _d_ctx = ""
+                with st.spinner(""):
+                    _ai_ans = call_ai(
+                        "You are NetBrain AI — a senior network engineer. "
+                        "Be concise, technical, and use bullet points for lists.\n\n"
+                        + _d_ctx
+                        + f"Question: {_ai_q}"
+                    ) or "AI unavailable — check OPENROUTER_API_KEY."
+                st.session_state["devices_ai_last_ans"] = _ai_ans
+
+            # Show answer
+            if st.session_state.get("devices_ai_last_ans") and st.session_state.get("devices_ai_last_q"):
+                _q_display = st.session_state["devices_ai_last_q"]
+                _a_display = st.session_state["devices_ai_last_ans"]
+                st.markdown(
+                    f"<div class='ai-response-box'>"
+                    f"<div class='ai-response-header'>🤖 AI Assistant &nbsp;·&nbsp; "
+                    f"<span style='color:#475569;font-weight:400;text-transform:none;font-size:.82rem'>"
+                    f"{_q_display}</span></div>"
+                    f"{_a_display}"
+                    f"</div>",
+                    unsafe_allow_html=True
+                )
+
+            st.divider()
+
+            # ── Top action bar ────────────────────────────────────────────────
+            col_scan, col_ping, col_refresh = st.columns([2, 2, 1])
+            with col_scan:
+                subnet_prefix = st.text_input(
+                    "Scan subnet (first 3 octets)",
+                    value="192.168.0", key="dd_subnet",
+                    placeholder="192.168.1",
+                )
+                if st.button("🔍 Scan Subnet", width='stretch', key="dd_scan"):
+                    disc.scan_subnet(subnet_prefix)
+                    st.toast(f"Scanning {subnet_prefix}.1–254 in background… check back in ~30s")
+
+            with col_ping:
+                manual_ip = st.text_input(
+                    "Or ping a specific IP",
+                    key="dd_manual_ip", placeholder="10.0.0.1"
+                )
+                if st.button("📡 Ping & Discover", width='stretch', key="dd_ping"):
+                    if manual_ip:
+                        with st.spinner(f"Pinging {manual_ip}…"):
+                            result = disc.ping_and_discover(manual_ip.strip())
+                        if result:
+                            st.success(f"✅ {manual_ip} is reachable — added to pending queue")
+                        else:
+                            st.error(f"❌ {manual_ip} did not respond")
+                    else:
+                        st.warning("Enter an IP address first.")
+
+            with col_refresh:
+                st.markdown("<br>", unsafe_allow_html=True)
+                if st.button("🔄 Refresh", width='stretch', key="dd_refresh"):
+                    st.rerun()
+
+            st.divider()
+
+            # ════════════════════════════════════════════════════════════════
+            # SECTION 1 — PENDING DEVICES (auto-discovered, awaiting approval)
+            # ════════════════════════════════════════════════════════════════
+            pending = disc.get_pending()
+            pending_count = len(pending)
+
+            _pulse_html = "<span class='dd-pulse'></span>" if pending_count else ""
+            st.markdown(
+                f"<div class='dd-section-title'>"
+                f"⚠️ Pending Approval {_pulse_html}"
+                f"&nbsp;({pending_count})</div>",
+                unsafe_allow_html=True
+            )
+
+            if not pending:
+                st.info(
+                    "No new devices detected yet.\n\n"
+                    "**To trigger auto-discovery:** ping any GNS3 router from your Mac terminal:\n"
+                    "```\nping 192.168.0.1\n```\n"
+                    "It will appear here within ~10 seconds."
+                )
+            else:
+                for dev in pending:
+                    ports_str = ", ".join(str(p) for p in dev.open_ports) or "none detected"
+                    _display_name = dev.hostname if dev.hostname else "Resolving name..."
+                    _name_style = "color:#f1f5f9" if dev.hostname else "color:#94a3b8;font-style:italic"
+                    with st.container():
+                        st.markdown(f"""
+                        <div class='dd-card dd-card-pending'>
+                          <span class='dd-hostname' style='{_name_style}'>{_display_name}</span>
+                          &nbsp;&nbsp;<span class='dd-ip'>{dev.ip}</span>
+                          &nbsp;&nbsp;<span class='dd-badge dd-badge-pending'>⏳ PENDING</span>
+                          <br><span class='dd-meta'>
+                            Type: {dev.device_type} &nbsp;·&nbsp;
+                            Source: {dev.source} &nbsp;·&nbsp;
+                            Open ports: {ports_str} &nbsp;·&nbsp;
+                            First seen: {dev.first_seen}
+                          </span>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+                        btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 3])
+                        with btn_col1:
+                            if st.button(f"✅ Approve", key=f"approve_{dev.ip}",
+                                         use_container_width=True, type="primary"):
+                                disc.approve_device(dev.ip, approved_by="admin")
+                                st.success(f"✅ {dev.ip} approved and added to inventory")
+                                st.rerun()
+                        with btn_col2:
+                            if st.button(f"❌ Reject", key=f"reject_{dev.ip}",
+                                         use_container_width=True):
+                                disc.reject_device(dev.ip)
+                                st.rerun()
+                        with btn_col3:
+                            override_type = st.selectbox(
+                                "Override device type",
+                                ["cisco_ios", "cisco_iosxe", "cisco_nxos",
+                                 "juniper_junos", "arista_eos", "linux", "cisco_ios_telnet"],
+                                key=f"dtype_{dev.ip}",
+                                index=["cisco_ios","cisco_iosxe","cisco_nxos",
+                                       "juniper_junos","arista_eos","linux",
+                                       "cisco_ios_telnet"].index(dev.device_type)
+                                       if dev.device_type in ["cisco_ios","cisco_iosxe","cisco_nxos",
+                                                               "juniper_junos","arista_eos","linux",
+                                                               "cisco_ios_telnet"] else 0,
+                            )
+                            dev.device_type = override_type
+
+            st.divider()
+
+            # ════════════════════════════════════════════════════════════════
+            # SECTION 2 — APPROVED INVENTORY
+            # ════════════════════════════════════════════════════════════════
+            approved = disc.get_approved()
+            st.markdown(
+                f"<div class='dd-section-title'>✅ Approved Inventory ({len(approved)})</div>",
+                unsafe_allow_html=True
+            )
+
+            if not approved:
+                st.caption("No devices approved yet. Approve devices from the Pending section above.")
+            else:
+                for dev in approved:
+                    session = disc.get_session(dev.ip)
+                    sess_status = session.status if session else None
+                    _live_name = (session.device_hostname
+                                  if session and session.device_hostname != dev.ip
+                                  else dev.hostname) or dev.ip
+
+                    # ── Health badge ──────────────────────────────────────────
+                    _health = "—"
+                    _health_cls = "health-healthy"
+                    _health_icon = "⚪"
+                    if session and session.ai_diagnosis:
+                        for _ln in session.ai_diagnosis.splitlines():
+                            if _ln.startswith("HEALTH:"):
+                                _health = _ln.replace("HEALTH:", "").strip()
+                        _health_icon = {"CRITICAL":"🔴","DEGRADED":"🟠","HEALTHY":"🟢"}.get(_health.upper(),"⚪")
+                        _health_cls  = {"CRITICAL":"health-critical","DEGRADED":"health-degraded","HEALTHY":"health-healthy"}.get(_health.upper(),"health-healthy")
+
+                    _card_cls = "dd-card-trouble" if sess_status == "running" else "dd-card-approved"
+
+                    st.markdown(f"""
+                    <div class='dd-card {_card_cls}'>
+                      <span class='dd-hostname'>{_live_name}</span>
+                      &nbsp;&nbsp;<span class='dd-ip'>{dev.ip}</span>
+                      &nbsp;&nbsp;<span class='dd-badge dd-badge-approved'>✅ APPROVED</span>
+                      &nbsp;&nbsp;<span class='dd-meta'>{_health_icon} Health: <span class='{_health_cls}'>{_health}</span>
+                      &nbsp;·&nbsp; Status: {sess_status or "idle"}
+                      &nbsp;·&nbsp; Steps: {len(session.steps) if session else 0}</span>
+                      <br><span class='dd-meta'>
+                        Type: {dev.device_type} &nbsp;·&nbsp;
+                        Ports: {", ".join(str(p) for p in dev.open_ports) or "—"} &nbsp;·&nbsp;
+                        Added: {dev.first_seen}
+                      </span>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                    # ── Action bar: 4 small buttons + AI Assistant NLP bar ────
+                    st.markdown("""
+                    <style>
+                    /* Shrink all buttons inside .dev-action-row to be compact */
+                    .dev-action-row div[data-testid="stButton"] > button {
+                        padding: 4px 8px !important;
+                        font-size: 10.5px !important;
+                        min-height: 0 !important;
+                        height: 34px !important;
+                        white-space: nowrap !important;
+                        border-radius: 6px !important;
+                    }
+                    /* AI Assistant bar styling */
+                    .dev-action-row div[data-testid="stTextInput"] > div > div > input {
+                        background: #1a2030 !important;
+                        border: 1px solid #1D9E7566 !important;
+                        border-radius: 8px !important;
+                        color: #e0e6f0 !important;
+                        font-size: 12.5px !important;
+                        height: 34px !important;
+                        padding: 4px 12px 4px 12px !important;
+                    }
+                    .dev-action-row div[data-testid="stTextInput"] > div > div > input:focus {
+                        border-color: #1D9E75 !important;
+                        box-shadow: 0 0 0 2px #1D9E7522 !important;
+                    }
+                    .dev-action-row div[data-testid="stTextInput"] > div > div > input::placeholder {
+                        color: #4a5570 !important;
+                    }
+                    /* Remove default Streamlit label margin above input */
+                    .dev-action-row div[data-testid="stTextInput"] > label {
+                        display: none !important;
+                    }
+                    </style>
+                    <div class="dev-action-row">
+                    """, unsafe_allow_html=True)
+
+                    _login_running = (
+                        sess_status == "running"
+                        and st.session_state.get(f"login_mode_{dev.ip}")
+                    )
+                    _ts_running = (
+                        sess_status == "running"
+                        and not st.session_state.get(f"login_mode_{dev.ip}")
+                    )
+                    _panel_open = st.session_state.get(f"ts_expanded_{dev.ip}", False)
+                    _steps_n    = len(session.steps) if session else 0
+
+                    # 4 small buttons + AI bar in a single row (ratio: 1:1:1:1:4)
+                    _b1, _b2, _b3, _b4, _bai = st.columns([1, 1, 1, 1.4, 4], gap="small")
+
+                    # Button 1 — Disapprove
+                    with _b1:
+                        if st.button("🔴 Disapprove", key=f"dis_{dev.ip}",
+                                     use_container_width=True,
+                                     help="Move back to Pending"):
+                            disc.disapprove_device(dev.ip)
+                            st.session_state.pop(f"ts_expanded_{dev.ip}", None)
+                            st.session_state.pop(f"login_expanded_{dev.ip}", None)
+                            st.rerun()
+
+                    # Button 2 — Login
+                    with _b2:
+                        if st.button(
+                            "⏳ Login…" if _login_running else "🔐 Login",
+                            key=f"login_{dev.ip}",
+                            disabled=_login_running,
+                            use_container_width=True,
+                            help="SSH into device",
+                        ):
+                            _creds = {
+                                "username":      os.environ.get("GNS3_SSH_USER", "admin"),
+                                "password":      os.environ.get("GNS3_SSH_PASS", "admin"),
+                                "enable_secret": os.environ.get("GNS3_SSH_SECRET", ""),
+                            }
+                            st.session_state[f"login_mode_{dev.ip}"] = True
+                            st.session_state[f"ts_expanded_{dev.ip}"] = True
+                            st.session_state.pop(f"poll_count_{dev.ip}", None)
+                            disc.start_login_session(dev.ip, _creds)
+                            st.rerun()
+
+                    # Button 3 — AI Diagnose
+                    with _b3:
+                        if st.button(
+                            "⏳ Running…" if _ts_running else "🤖 AI Diagnose",
+                            key=f"ai_ts_{dev.ip}",
+                            disabled=_ts_running,
+                            type="primary",
+                            use_container_width=True,
+                            help="Full diagnostics + AI fix plan",
+                        ):
+                            _creds = {
+                                "username":      os.environ.get("GNS3_SSH_USER", "admin"),
+                                "password":      os.environ.get("GNS3_SSH_PASS", "admin"),
+                                "enable_secret": os.environ.get("GNS3_SSH_SECRET", ""),
+                            }
+                            st.session_state[f"login_mode_{dev.ip}"] = False
+                            st.session_state[f"ts_expanded_{dev.ip}"] = True
+                            st.session_state.pop(f"poll_count_{dev.ip}", None)
+                            disc.start_ai_troubleshoot(dev.ip, call_ai, _creds, approved=False)
+                            st.rerun()
+
+                    # Button 4 — Show / Hide Progress
+                    with _b4:
+                        _panel_lbl = f"{'🔼 Hide' if _panel_open else '🔽 Show'} ({_steps_n})"
+                        if st.button(_panel_lbl, key=f"toggle_{dev.ip}",
+                                     use_container_width=True):
+                            st.session_state[f"ts_expanded_{dev.ip}"] = not _panel_open
+                            st.rerun()
+
+                    # AI Assistant NLP bar — 5th option (wider)
+                    with _bai:
+                        _ai_nlp_q = st.text_input(
+                            label=f"ai_nlp_{dev.ip}",
+                            label_visibility="collapsed",
+                            placeholder="🤖  AI Assistant — ask about config, logs, BGP, traps, debug...",
+                            key=f"ai_nlp_input_{dev.ip}",
+                        )
+
+                    st.markdown("</div>", unsafe_allow_html=True)
+
+                    # ── Handle AI Assistant NLP submission ────────────────────
+                    _nlp_last_key = f"ai_nlp_last_{dev.ip}"
+                    if _ai_nlp_q and _ai_nlp_q != st.session_state.get(_nlp_last_key):
+                        st.session_state[_nlp_last_key] = _ai_nlp_q
+
+                        # Build device-specific context
+                        _dev_ctx = (
+                            f"Device: {dev.ip}  hostname={dev.hostname or dev.ip}  "
+                            f"type={dev.device_type}  ports={dev.open_ports}\n"
+                        )
+                        if session and session.output:
+                            _dev_ctx += f"\nLatest device output (truncated):\n{session.output[:2000]}"
+                        if session and session.ai_diagnosis:
+                            _dev_ctx += f"\n\nPrevious AI diagnosis:\n{session.ai_diagnosis[:1000]}"
+
+                        _nlp_sys = (
+                            "You are an AI Assistant embedded in NetBrain AI. "
+                            f"You are managing the following network device:\n{_dev_ctx}\n\n"
+                            "Help the operator with router configuration, interface status, "
+                            "syslog/logs, SNMP traps, debug commands, BGP, OSPF, routing tables, "
+                            "ACLs, and all Cisco IOS operational tasks. "
+                            "Be concise and practical. When showing CLI output or commands, "
+                            "use proper Cisco IOS format."
+                        )
+
+                        with st.spinner(f"🤖 AI Assistant thinking about {dev.ip}…"):
+                            try:
+                                _nlp_reply = call_ai(_nlp_sys + f"\n\nOperator: {_ai_nlp_q}\nAI Assistant:")
+                            except Exception as _nlp_err:
+                                _nlp_reply = f"AI unavailable: {_nlp_err}"
+
+                        if not _nlp_reply:
+                            _nlp_reply = "AI is unavailable. Please check your OPENROUTER_API_KEY in Secrets."
+
+                        # Store reply in session state to persist across reruns
+                        if f"ai_nlp_history_{dev.ip}" not in st.session_state:
+                            st.session_state[f"ai_nlp_history_{dev.ip}"] = []
+                        st.session_state[f"ai_nlp_history_{dev.ip}"].append({
+                            "q": _ai_nlp_q,
+                            "a": _nlp_reply,
+                        })
+
+                    # ── Render NLP chat history for this device ───────────────
+                    _nlp_history = st.session_state.get(f"ai_nlp_history_{dev.ip}", [])
+                    if _nlp_history:
+                        st.markdown("""
+                        <style>
+                        .nlp-chat-wrap {
+                            background: #0d1320;
+                            border: 1px solid #1e3a52;
+                            border-radius: 10px;
+                            padding: .75rem 1rem;
+                            margin: .4rem 0 .6rem 0;
+                        }
+                        .nlp-msg-user {
+                            background: #1e3a5f;
+                            border-left: 3px solid #378ADD;
+                            border-radius: 6px;
+                            padding: .45rem .8rem;
+                            margin: .35rem 0;
+                            color: #cbd5e1;
+                            font-size: .85rem;
+                        }
+                        .nlp-msg-ai {
+                            background: #0f2132;
+                            border-left: 3px solid #1D9E75;
+                            border-radius: 6px;
+                            padding: .45rem .8rem;
+                            margin: .35rem 0;
+                            color: #cbd5e1;
+                            font-size: .85rem;
+                            white-space: pre-wrap;
+                        }
+                        .nlp-label { font-size: .72rem; font-weight: 600;
+                                     margin-bottom: .2rem; }
+                        .nlp-label-user { color: #60a5fa; }
+                        .nlp-label-ai   { color: #1D9E75; }
+                        </style>
+                        """, unsafe_allow_html=True)
+
+                        import html as _html
+                        with st.expander(
+                            f"🤖 AI Assistant — {len(_nlp_history)} message(s) for {dev.ip}",
+                            expanded=True
+                        ):
+                            st.markdown("<div class='nlp-chat-wrap'>", unsafe_allow_html=True)
+                            for _entry in _nlp_history[-6:]:   # show last 6 turns
+                                _q_safe = _html.escape(_entry["q"])
+                                _a_safe = _html.escape(_entry["a"])
+                                st.markdown(
+                                    f"<div class='nlp-msg-user'>"
+                                    f"<div class='nlp-label nlp-label-user'>👤 You</div>{_q_safe}"
+                                    f"</div>"
+                                    f"<div class='nlp-msg-ai'>"
+                                    f"<div class='nlp-label nlp-label-ai'>🤖 AI Assistant</div>{_a_safe}"
+                                    f"</div>",
+                                    unsafe_allow_html=True
+                                )
+                            st.markdown("</div>", unsafe_allow_html=True)
+                            if st.button("🗑 Clear chat", key=f"nlp_clear_{dev.ip}"):
+                                st.session_state.pop(f"ai_nlp_history_{dev.ip}", None)
+                                st.session_state.pop(_nlp_last_key, None)
+                                st.rerun()
+
+                    # ── Live Progress + Details Panel ─────────────────────────
+                    if st.session_state.get(f"ts_expanded_{dev.ip}") and session:
+
+                        # Live polling: use st.empty + rerun only when running,
+                        # capped at max 30 polls to prevent infinite loop
+                        _poll_key = f"poll_count_{dev.ip}"
+                        if sess_status == "running":
+                            _polls = st.session_state.get(_poll_key, 0)
+                            if _polls < 30:
+                                st.session_state[_poll_key] = _polls + 1
+                                import time as _time
+                                _time.sleep(1.2)
+                                st.rerun()
+                            else:
+                                # Safety: stop polling after 30 cycles (~36 sec)
+                                st.warning("⏳ Session taking longer than expected — click Refresh to check progress.")
+                        else:
+                            # Reset poll counter when session completes
+                            st.session_state.pop(_poll_key, None)
+
+                        with st.container():
+                            st.markdown("""
+                            <div style='background:#080f1a;border:1px solid #1e3a52;
+                                        border-radius:10px;padding:1rem 1.2rem;margin:.5rem 0'>
+                            """, unsafe_allow_html=True)
+
+                            # ── Live progress steps ───────────────────────────
+                            _mode_label = "🔐 Login" if st.session_state.get(f"login_mode_{dev.ip}") else "🤖 AI Troubleshooting"
+                            _status_badge = {
+                                "running":  "<span style='color:#f59e0b'>⏳ Running…</span>",
+                                "complete": "<span style='color:#22c55e'>✅ Complete</span>",
+                                "failed":   "<span style='color:#ef4444'>❌ Failed</span>",
+                            }.get(session.status, "")
+                            st.markdown(
+                                f"**📋 Progress — {_mode_label}** &nbsp; {_status_badge}",
+                                unsafe_allow_html=True
+                            )
+
+                            # Historical sessions count from log store
+                            _prior = log_store.get_all_logs(dev.ip)
+                            _hist_count = len(_prior.get("ai_history", []))
+                            if _hist_count:
+                                st.caption(f"📚 {_hist_count} historical session(s) stored — AI uses these for context")
+
+                            # Steps — live streaming
+                            for _s in session.steps:
+                                _icon = "✅" if _s["ok"] else "❌"
+                                _step_col, _detail_col = st.columns([2, 5])
+                                with _step_col:
+                                    st.markdown(
+                                        f"{_icon} `{_s['ts']}` **{_s['name']}**"
+                                    )
+                                with _detail_col:
+                                    st.markdown(f"<span style='color:#94a3b8'>{_s['detail']}</span>",
+                                                unsafe_allow_html=True)
+                                if _s.get("output"):
+                                    with st.expander(f"📄 Output: {_s['name']}"):
+                                        st.code(_s["output"][:3000], language="text")
+
+                            # Spinner if still running
+                            if sess_status == "running":
+                                st.markdown(
+                                    "<span style='color:#f59e0b'>⏳ Working — page refreshes automatically…</span>",
+                                    unsafe_allow_html=True
+                                )
+
+                            st.markdown("</div>", unsafe_allow_html=True)
+
+                        # ── AI Diagnosis (only for AI troubleshoot mode) ───────
+                        if session.ai_diagnosis and not st.session_state.get(f"login_mode_{dev.ip}"):
+                            with st.expander("🤖 AI Diagnosis", expanded=True):
+                                if "HEALTH: CRITICAL" in session.ai_diagnosis:
+                                    st.error("🔴 HEALTH: CRITICAL")
+                                elif "HEALTH: DEGRADED" in session.ai_diagnosis:
+                                    st.warning("🟠 HEALTH: DEGRADED")
+                                elif "HEALTH: HEALTHY" in session.ai_diagnosis:
+                                    st.success("🟢 HEALTH: HEALTHY")
+                                st.markdown(session.ai_diagnosis)
+
+                        # ── Raw output ────────────────────────────────────────
+                        if session.output:
+                            with st.expander("📄 Raw Device Output"):
+                                st.code(session.output[:8000], language="text")
+
+                        # ── Fix plan + approve/dismiss ────────────────────────
+                        if session.ai_fix_plan and not session.fix_applied and session.status == "complete":
+                            st.markdown("**🔧 Proposed Fix Commands**")
+                            st.code(session.ai_fix_plan, language="text")
+                            st.warning(
+                                "⚠️ Review carefully — these will execute on the live device."
+                            )
+                            _fc1, _fc2 = st.columns(2)
+                            with _fc1:
+                                if st.button("✅ APPROVE & APPLY FIXES",
+                                             key=f"apply_fix_{dev.ip}", type="primary"):
+                                    _creds = {
+                                        "username": os.environ.get("GNS3_SSH_USER", "admin"),
+                                        "password": os.environ.get("GNS3_SSH_PASS", "admin"),
+                                        "enable_secret": os.environ.get("GNS3_SSH_SECRET", ""),
+                                    }
+                                    disc.approve_and_apply_fixes(dev.ip, call_ai, _creds)
+                                    st.session_state[f"ts_expanded_{dev.ip}"] = True
+                                    st.rerun()
+                            with _fc2:
+                                if st.button("🚫 Dismiss", key=f"dismiss_fix_{dev.ip}"):
+                                    st.session_state[f"ts_expanded_{dev.ip}"] = False
+                                    st.rerun()
+
+                        elif session.fix_applied:
+                            st.success("✅ Fixes applied. Run AI Diagnose again to verify health.")
+
+                    st.markdown("---")
+
+            st.divider()
+
+            # ════════════════════════════════════════════════════════════════
+            # SECTION 3 — FULL DISCOVERY LOG
+            # ════════════════════════════════════════════════════════════════
+            all_devices = disc.get_all()
+            with st.expander(f"📜 Full Discovery Log ({len(all_devices)} total)"):
+                if all_devices:
+                    import pandas as _pd
+                    rows = [
+                        {
+                            "IP":          d.ip,
+                            "Hostname":    d.hostname or "—",
+                            "Type":        d.device_type,
+                            "Status":      d.status,
+                            "Source":      d.source,
+                            "Open Ports":  ", ".join(str(p) for p in d.open_ports) or "—",
+                            "First Seen":  d.first_seen,
+                            "Last Seen":   d.last_seen,
+                        }
+                        for d in all_devices
+                    ]
+                    st.dataframe(_pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                else:
+                    st.caption("No devices discovered yet.")
+
+            st.divider()
+
+            # ════════════════════════════════════════════════════════════════
+            # SECTION 4 — DEVICE LOG STORE (AI memory for each device)
+            # ════════════════════════════════════════════════════════════════
+            st.markdown(
+                "<div class='dd-section-title'>🧠 Device Log Store — AI Memory</div>",
+                unsafe_allow_html=True
+            )
+            st.caption(
+                "All SSH outputs, AI diagnoses and applied fixes are stored here. "
+                "The AI uses this history as context for smarter future suggestions."
+            )
+
+            all_log_devices = log_store.get_all_devices()
+            if not all_log_devices:
+                st.info("No logs stored yet. Approve a device and run AI Troubleshooting to populate.")
+            else:
+                for _lip, _ldata in all_log_devices.items():
+                    _ldev = disc.get_device(_lip)
+                    _lname = (_ldev.hostname if _ldev and _ldev.hostname else _lip)
+                    _lhealth = _ldata.get("last_health", "unknown")
+                    _health_icon = {"CRITICAL": "🔴", "DEGRADED": "🟠",
+                                    "HEALTHY": "🟢"}.get(_lhealth.upper(), "⚪")
+                    _logs = _ldata.get("logs", [])
+                    _ai_hist = _ldata.get("ai_history", [])
+
+                    with st.expander(
+                        f"{_health_icon} {_lname} ({_lip})  "
+                        f"· {len(_logs)} log entries · {len(_ai_hist)} AI sessions",
+                        expanded=False
+                    ):
+                        # Tabs within expander
+                        _lt1, _lt2, _lt3 = st.tabs(["📋 Logs", "🤖 AI History", "🔍 Full Context"])
+
+                        with _lt1:
+                            if _logs:
+                                import pandas as _pd2
+                                st.dataframe(
+                                    _pd2.DataFrame([{
+                                        "Time": l.get("ts","")[:19],
+                                        "Type": l.get("type",""),
+                                        "Summary": str(l.get("summary",""))[:120],
+                                    } for l in reversed(_logs)]),
+                                    use_container_width=True, hide_index=True
+                                )
+                            else:
+                                st.caption("No logs yet.")
+
+                        with _lt2:
+                            if _ai_hist:
+                                for _ah in reversed(_ai_hist):
+                                    _applied = "✅ Applied" if _ah.get("applied") else "📋 Plan only"
+                                    with st.expander(
+                                        f"{_ah.get('ts','')[:19]}  · {_applied}"
+                                    ):
+                                        st.markdown("**AI Diagnosis:**")
+                                        st.markdown(_ah.get("diagnosis",""))
+                                        if _ah.get("fix_plan"):
+                                            st.markdown("**Fix Plan:**")
+                                            st.code(_ah.get("fix_plan",""), language="text")
+                            else:
+                                st.caption("No AI sessions yet. Run AI Troubleshooting on the device.")
+
+                        with _lt3:
+                            ctx = log_store.get_context_for_ai(_lip)
+                            if ctx:
+                                st.code(ctx, language="text")
+                                st.caption("This is the exact context passed to AI on the next troubleshoot run.")
+                            else:
+                                st.caption("No context available yet.")
+
+            st.divider()
+
+            # ── How it works callout ──────────────────────────────────────────
+            # ── SSH Credentials for Troubleshooting ──────────────────────────
+            with st.expander("🔑 SSH Credentials for AI Troubleshooting", expanded=False):
+                st.caption(
+                    "These credentials are used when **AI Network Troubleshooting** SSHs "
+                    "into your approved devices. They must match the login configured on "
+                    "your GNS3 router (set via `username admin privilege 15 secret <pass>`)."
+                )
+                col_u, col_p, col_s = st.columns(3)
+                _ts_user   = col_u.text_input("SSH Username",    value=os.environ.get("GNS3_SSH_USER", "admin"),    key="dd_ts_user")
+                _ts_pass   = col_p.text_input("SSH Password",    value=os.environ.get("GNS3_SSH_PASS", "admin"),    key="dd_ts_pass", type="password")
+                _ts_secret = col_s.text_input("Enable Secret",   value=os.environ.get("GNS3_SSH_SECRET", ""),       key="dd_ts_secret", type="password")
+                if st.button("💾 Save Credentials", key="dd_save_creds"):
+                    os.environ["GNS3_SSH_USER"]   = _ts_user.strip()
+                    os.environ["GNS3_SSH_PASS"]   = _ts_pass.strip()
+                    if _ts_secret.strip():
+                        os.environ["GNS3_SSH_SECRET"] = _ts_secret.strip()
+                    st.success("✅ Credentials saved for this session.")
+                    st.caption("Add to `.env` file to persist: `ROUTER_DEFAULT_USERNAME=admin`")
+
+                st.divider()
+                st.markdown("**Quick credential test** — tries SSH login without running any commands:")
+                _test_ip = st.text_input("Device IP to test", key="dd_cred_test_ip",
+                                          placeholder="192.168.96.128")
+                if st.button("🔌 Test SSH Login", key="dd_test_ssh"):
+                    if _test_ip:
+                        with st.spinner(f"Testing SSH to {_test_ip}..."):
+                            try:
+                                from netmiko import ConnectHandler
+                                _conn = ConnectHandler(
+                                    device_type=os.environ.get("GNS3_DEVICE_TYPE","cisco_ios"),
+                                    host=_test_ip.strip(),
+                                    port=22,
+                                    username=os.environ.get("GNS3_SSH_USER","admin"),
+                                    password=os.environ.get("GNS3_SSH_PASS","admin"),
+                                    timeout=15, auth_timeout=15, fast_cli=False,
+                                )
+                                _out = _conn.send_command("show version | include uptime")
+                                _conn.disconnect()
+                                st.success(f"✅ Login successful!\n```\n{_out[:200]}\n```")
+                            except Exception as _e:
+                                st.error(f"❌ Login failed: {_e}")
+                                st.markdown("""
+                                **Common fixes:**
+                                - Verify username/password above match your GNS3 router config
+                                - On your GNS3 router run:
+                                  ```
+                                  username admin privilege 15 secret cisco
+                                  line vty 0 4
+                                   login local
+                                   transport input ssh
+                                  crypto key generate rsa modulus 1024
+                                  ```
+                                - Make sure the device IP is reachable (`ping` it first)
+                                """)
+                    else:
+                        st.warning("Enter a device IP to test.")
+
+            with st.expander("ℹ️ How Auto-Discovery Works"):
+                st.markdown("""
+                **Mac/Linux Terminal → Auto-Discovery Pipeline:**
+
+                1. Open your Mac Terminal and ping any GNS3 router:
+                   ```
+                   ping 192.168.0.1
+                   ```
+                2. NetBrain AI detects the ICMP reply within ~10 seconds
+                3. The device appears in the **Pending Approval** section above
+                4. Click **Approve** — it joins your network inventory
+                5. Click **🤖 AI Network Troubleshooting** to SSH in, run diagnostics, and get an AI-generated fix plan
+                6. Review the fix commands, then click **APPROVE & APPLY FIXES** to execute them
+
+                **Subnet Scan:** Use the scanner above to discover all live devices on a /24 subnet at once.
+
+                **Manual Add:** Enter any IP in the "Ping & Discover" box to check reachability and add it directly.
+
+                **Auth failed?** Open the **SSH Credentials** section above and click **Test SSH Login**.
+                """)
 
 
-else:
+# ══════════════════════════════════════════════════════════════════════════════
+# WORKSPACE: LOCAL ROUTER ACCESS
+# ══════════════════════════════════════════════════════════════════════════════
+elif workspace == "local_router":
+    if LRA_AVAILABLE:
+        render_local_access_ui(_get_lra_manager())
+    else:
+        st.error("❌ Local_Router_Access module could not be loaded.")
+        st.markdown("""
+        **To fix this:**
+        1. Make sure `Local_Router_Access.py` is in the **root** of your repository (same folder as `app.py`)
+        2. Install dependencies: `pip install paramiko requests`
+        3. Restart the Streamlit app
+        """)
+        with st.expander("📋 Quick manual access (fallback)"):
+            st.markdown("Use these links to access your app on the local network:")
+            import socket
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as _s:
+                    _s.connect(("8.8.8.8", 80))
+                    _local_ip = _s.getsockname()[0]
+            except Exception:
+                _local_ip = "127.0.0.1"
+            _port = int(os.environ.get("STREAMLIT_PORT", 8501))
+            st.code(f"http://localhost:{_port}", language="text")
+            st.code(f"http://{_local_ip}:{_port}", language="text")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# WORKSPACE: NLP — AI ASSISTANT
+# ══════════════════════════════════════════════════════════════════════════════
+elif workspace == "nlp":
+    st.markdown("""
+    <style>
+    .ai-assistant-wrap {
+        max-width: 860px; margin: 0 auto;
+    }
+    .ai-msg-user {
+        background: #1e3a5f;
+        border-left: 3px solid #3b82f6;
+        border-radius: 8px;
+        padding: .7rem 1rem;
+        margin: .5rem 0;
+        color: #e2e8f0;
+    }
+    .ai-msg-bot {
+        background: #0f2132;
+        border-left: 3px solid #22d3ee;
+        border-radius: 8px;
+        padding: .7rem 1rem;
+        margin: .5rem 0;
+        color: #e2e8f0;
+    }
+    .ai-msg-label-user { color: #93c5fd; font-size:.75rem; margin-bottom:.3rem; font-weight:600; }
+    .ai-msg-label-bot  { color: #22d3ee; font-size:.75rem; margin-bottom:.3rem; font-weight:600; }
+    .ai-shadow-hint {
+        color: #334155; font-size: 1.1rem; text-align: center;
+        padding: 2rem 0 1rem 0; font-style: italic;
+    }
+    .ai-typing {
+        color: #22d3ee; font-size:.85rem; padding:.4rem 1rem;
+        animation: blink 1s step-start infinite;
+    }
+    @keyframes blink { 50% { opacity: 0; } }
+    </style>
+    """, unsafe_allow_html=True)
+
+    st.markdown("<div class='ai-assistant-wrap'>", unsafe_allow_html=True)
+
+    # ── Header ────────────────────────────────────────────────────────────────
+    st.markdown("""
+    <div style='text-align:center; padding: 1.5rem 0 .5rem 0;'>
+        <div style='font-size:2.5rem'>🤖</div>
+        <div style='font-size:1.4rem; font-weight:700; color:#f1f5f9;'>AI Assistant</div>
+        <div style='font-size:.85rem; color:#64748b; margin-top:.3rem;'>
+            Ask anything about your network · Diagnose issues · Generate configs
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── Init chat history ─────────────────────────────────────────────────────
+    if "nlp_messages" not in st.session_state:
+        st.session_state["nlp_messages"] = []
+    if "nlp_devices_ctx" not in st.session_state:
+        st.session_state["nlp_devices_ctx"] = ""
+
+    # ── Build device context for AI ───────────────────────────────────────────
+    try:
+        from core.device_discovery import get_discovery_engine
+        _disc = get_discovery_engine()
+        _approved_devs = _disc.get_approved()
+        if _approved_devs:
+            _dev_lines = "\n".join(
+                f"- {d.hostname or d.ip} ({d.ip}) type={d.device_type} ports={d.open_ports}"
+                for d in _approved_devs
+            )
+            st.session_state["nlp_devices_ctx"] = f"Approved network devices:\n{_dev_lines}"
+    except Exception:
+        pass
+
+    # ── Suggested prompts ─────────────────────────────────────────────────────
+    if not st.session_state["nlp_messages"]:
+        st.markdown(
+            "<div class='ai-shadow-hint'>✨ AI Assistant — ask me anything about your network</div>",
+            unsafe_allow_html=True
+        )
+        st.markdown("**Quick actions:**")
+        _suggestions = [
+            "Show me the health of all approved devices",
+            "What is BGP and when should I use it?",
+            "Generate OSPF config for R1 on 192.168.1.0/24",
+            "What does 'show ip interface brief' output tell me?",
+            "How do I configure SSH on a Cisco router?",
+            "Explain the difference between EIGRP and OSPF",
+        ]
+        _sg_cols = st.columns(3)
+        for idx, sg in enumerate(_suggestions):
+            with _sg_cols[idx % 3]:
+                if st.button(sg, key=f"nlp_sg_{idx}", use_container_width=True):
+                    st.session_state["nlp_messages"].append({"role": "user", "content": sg})
+                    st.rerun()
+
+    # ── Chat history ──────────────────────────────────────────────────────────
+    for msg in st.session_state["nlp_messages"]:
+        if msg["role"] == "user":
+            st.markdown(
+                f"<div class='ai-msg-user'>"
+                f"<div class='ai-msg-label-user'>👤 You</div>{msg['content']}"
+                f"</div>", unsafe_allow_html=True
+            )
+        else:
+            st.markdown(
+                f"<div class='ai-msg-bot'>"
+                f"<div class='ai-msg-label-bot'>🤖 AI Assistant</div>{msg['content']}"
+                f"</div>", unsafe_allow_html=True
+            )
+
+    # ── Generate AI reply for latest user message ─────────────────────────────
+    msgs = st.session_state["nlp_messages"]
+    if msgs and msgs[-1]["role"] == "user" and (
+        len(msgs) < 2 or msgs[-2]["role"] != "user"
+    ):
+        _last_q = msgs[-1]["content"]
+        with st.spinner("🤖 AI Assistant is thinking…"):
+            try:
+                _dev_ctx = st.session_state.get("nlp_devices_ctx", "")
+                _history = "\n".join(
+                    f"{'User' if m['role']=='user' else 'Assistant'}: {m['content']}"
+                    for m in msgs[-10:-1]
+                )
+                _sys_prompt = (
+                    "You are NetBrain AI Assistant — an expert network engineer and Cisco IOS specialist. "
+                    "You help with network troubleshooting, configuration, diagnostics, and best practices. "
+                    "Be concise, technical, and actionable. Use bullet points for lists. "
+                    "When generating IOS configs, use proper formatting with indentation.\n\n"
+                    + (f"{_dev_ctx}\n\n" if _dev_ctx else "")
+                    + (f"Conversation so far:\n{_history}\n\n" if _history else "")
+                )
+                _full_prompt = _sys_prompt + f"User question: {_last_q}"
+                _reply = call_ai(_full_prompt) or "I'm unable to respond right now. Check your OPENROUTER_API_KEY."
+            except Exception as _e:
+                _reply = f"Error: {_e}"
+        st.session_state["nlp_messages"].append({"role": "assistant", "content": _reply})
+        st.rerun()
+
+    # ── Input box ─────────────────────────────────────────────────────────────
+    st.markdown("<br>", unsafe_allow_html=True)
+    with st.container():
+        _in_col, _btn_col, _clr_col = st.columns([7, 1, 1])
+        with _in_col:
+            _user_input = st.text_input(
+                label="message",
+                label_visibility="collapsed",
+                placeholder="💬 Ask AI Assistant — e.g. 'Why is my interface down?' or 'Generate OSPF config'",
+                key="nlp_input",
+            )
+        with _btn_col:
+            _send = st.button("Send ➤", key="nlp_send", type="primary",
+                              use_container_width=True)
+        with _clr_col:
+            if st.button("🗑 Clear", key="nlp_clear", use_container_width=True):
+                st.session_state["nlp_messages"] = []
+                st.rerun()
+
+        if _send and _user_input.strip():
+            st.session_state["nlp_messages"].append(
+                {"role": "user", "content": _user_input.strip()}
+            )
+            st.rerun()
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+
+
+
+
     st.header("🧠 NetBrain AI — Autonomous Network Operations")
     st.info("Select a workspace from the sidebar.")
     c1, c2, c3 = st.columns(3)

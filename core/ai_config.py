@@ -187,7 +187,16 @@ def generate_config(request: str, device: str, ai_call,
 
     data = _parse_json(raw)
     if not data:
-        out["reasons"] = ["AI response could not be parsed into commands."]
+        # AI returned prose instead of JSON — show it as a diagnostic answer
+        # (happens when user asks a question rather than a config request)
+        out["status"] = "ok"
+        out["mode"] = "diagnostic"
+        out["commands"] = []
+        out["summary"] = raw.strip()[:500]
+        out["risk"] = "low"
+        out["reasons"] = []
+        # Signal to UI that this is a plain-text AI answer, not commands
+        out["plain_answer"] = raw.strip()
         return out
 
     cmds = data.get("commands", [])

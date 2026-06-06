@@ -558,7 +558,20 @@ class AutonomousMonitor:
         if not self.github_log:
             return []
         try:
-            anomalies = self.github_log.poll()
+            # github_log.poll() returns None (updates internal state in-place)
+            # We must call poll() first to refresh, then read open anomalies
+            self.github_log.poll()
+            # Build anomaly dicts from the actionable recent_events
+            anomalies = []
+            for ev in getattr(self.github_log, "recent_events", []) or []:
+                if ev.get("actionable") and ev.get("interface"):
+                    anomalies.append({
+                        "device":    ev.get("device", self.github_log.default_device),
+                        "type":      "interface_down",
+                        "interface": ev.get("interface", ""),
+                        "severity":  "high",
+                        "source":    "github_log",
+                    })
             if anomalies:
                 logger.info(
                     f"[MONITOR] GitHub log source: {len(anomalies)} open anomaly(ies)"

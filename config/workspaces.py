@@ -21,4 +21,5 @@ WORKSPACES = [
     ('finops', '💰', 'FinOps'),
     ('audit', '🔐', 'Audit'),
     ('Network Engineering', '🔐', 'Network Engineering'),
+    ('local_router', '🔌', 'Local Router Access'),
 ]
