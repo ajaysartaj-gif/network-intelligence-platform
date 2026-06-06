@@ -3,13 +3,7 @@
 import os
 from typing import Dict
 
-# API Configuration
-OPENROUTER_BASE = "https://openrouter.ai/api/v1"
-OPENROUTER_MODEL = "anthropic/claude-sonnet-4-5"
-OPENROUTER_HEADERS = {
-    "HTTP-Referer": "https://netbrain-ai.streamlit.app",
-    "X-Title": "NetBrain AI",
-}
+# API Configuration — see config/ai.py for the canonical AI provider settings
 
 # Database
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///netbrain.db")
