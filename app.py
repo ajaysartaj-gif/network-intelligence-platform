@@ -2533,9 +2533,15 @@ OPENROUTER_API_KEY = "your-key-here"
                                                 except Exception:
                                                     pass
 
-                                            _config_cmds = [c.replace("[CONFIG]","").strip()
-                                                            for c in _pend if "[CONFIG]" in c
-                                                            and c.replace("[CONFIG]","").strip()]
+                                            # Strip "end", "exit", "write memory" — 
+                                            # send_config_set handles these automatically
+                                            _strip_cmds = {"end", "exit", "write memory", "wr", "wr mem"}
+                                            _config_cmds = [
+                                                c.replace("[CONFIG]","").strip()
+                                                for c in _pend if "[CONFIG]" in c
+                                                and c.replace("[CONFIG]","").strip()
+                                                and c.replace("[CONFIG]","").strip().lower() not in _strip_cmds
+                                            ]
                                             _exec_cmds   = [c.replace("[EXEC]","").strip()
                                                             for c in _pend if "[EXEC]" in c
                                                             and c.replace("[EXEC]","").strip()]
@@ -2643,6 +2649,7 @@ OPENROUTER_API_KEY = "your-key-here"
 
                             # ── Rollback / Undo button ────────────────────────
                             _rollback_key = f"ai_nlp_rollback_{dev.ip}"
+                            _pending_key  = f"ai_nlp_pending_cmds_{dev.ip}"
                             if st.session_state.get(_rollback_key) and not st.session_state.get(_pending_key):
                                 st.markdown("---")
                                 st.info("↩️ **Rollback available** — undo the last deployed configuration.")
