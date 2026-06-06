@@ -2263,19 +2263,47 @@ OPENROUTER_API_KEY = "your-key-here"
                             st.rerun()
 
                     # AI Assistant NLP bar — 5th option (wider)
-                    with _bai:
-                        _ai_nlp_q = st.text_input(
-                            label=f"ai_nlp_{dev.ip}",
-                            label_visibility="collapsed",
-                            placeholder="🤖  AI Assistant — ask about config, logs, BGP, traps, debug...",
-                            key=f"ai_nlp_input_{dev.ip}",
+                    # Login is mandatory before any chat operation
+                    _login_ok = (
+                        session is not None
+                        and session.status == "complete"
+                        and any(
+                            s.get("name") in ("Login", "SSH Login")
+                            and s.get("ok")
+                            for s in (session.steps or [])
                         )
+                    )
+                    with _bai:
+                        if _login_ok:
+                            _ai_nlp_q = st.text_input(
+                                label=f"ai_nlp_{dev.ip}",
+                                label_visibility="collapsed",
+                                placeholder="🤖  AI Assistant — ask about config, logs, BGP, traps, debug...",
+                                key=f"ai_nlp_input_{dev.ip}",
+                            )
+                        else:
+                            st.text_input(
+                                label=f"ai_nlp_{dev.ip}",
+                                label_visibility="collapsed",
+                                placeholder="🔐  Login required before using AI Assistant...",
+                                key=f"ai_nlp_input_{dev.ip}",
+                                disabled=True,
+                            )
+                            _ai_nlp_q = ""
 
                     st.markdown("</div>", unsafe_allow_html=True)
 
+                    # Show login required notice below the bar
+                    if not _login_ok:
+                        st.warning(
+                            "🔐 **Login required** — click the **Login** button above "
+                            "to establish an SSH session before using AI Assistant.",
+                            icon="🔐",
+                        )
+
                     # ── Handle AI Assistant NLP submission ────────────────────
                     _nlp_last_key = f"ai_nlp_last_{dev.ip}"
-                    if _ai_nlp_q and _ai_nlp_q != st.session_state.get(_nlp_last_key):
+                    if _login_ok and _ai_nlp_q and _ai_nlp_q != st.session_state.get(_nlp_last_key):
                         st.session_state[_nlp_last_key] = _ai_nlp_q
 
                         # ── Check if operator is approving a pending config ───
@@ -2402,6 +2430,44 @@ OPENROUTER_API_KEY = "your-key-here"
                                 if _cmds:
                                     # Store commands pending approval
                                     st.session_state[_pending_key] = _cmds
+
+                                    # ── Take snapshot NOW before user approves ──
+                                    # Stored separately so it's ready the moment Deploy is clicked.
+                                    _snap_key = f"ai_nlp_presnap_{dev.ip}"
+                                    _creds_snap = {
+                                        "username":      os.environ.get("GNS3_SSH_USER", "admin"),
+                                        "password":      os.environ.get("GNS3_SSH_PASS", "admin"),
+                                        "enable_secret": os.environ.get("GNS3_SSH_SECRET", ""),
+                                    }
+                                    try:
+                                        from netmiko import ConnectHandler as _CH
+                                        _scfg = dict(
+                                            device_type=dev.device_type or "cisco_ios",
+                                            host=dev.ip,
+                                            port=int(dev.ssh_port or 22),
+                                            username=_creds_snap["username"],
+                                            password=_creds_snap["password"],
+                                            timeout=60, auth_timeout=60,
+                                            fast_cli=False, global_delay_factor=4,
+                                        )
+                                        if _creds_snap["enable_secret"]:
+                                            _scfg["secret"] = _creds_snap["enable_secret"]
+                                        _sc = _CH(**_scfg)
+                                        try:
+                                            _sc.enable()
+                                        except Exception:
+                                            pass
+                                        _snap_raw = _sc.send_command(
+                                            "show running-config",
+                                            read_timeout=30, expect_string=r"#"
+                                        )
+                                        _sc.disconnect()
+                                        st.session_state[_snap_key] = _snap_raw
+                                        _snap_status = "✅ Snapshot captured — " + str(len(_snap_raw.splitlines())) + " lines"
+                                    except Exception as _se:
+                                        st.session_state[_snap_key] = ""
+                                        _snap_status = "⚠️ Snapshot failed: " + str(_se)
+
                                     _cmd_display = "\n".join(
                                         c.replace("[CONFIG]","  ").replace("[EXEC]","  ")
                                         for c in _cmds
@@ -2410,7 +2476,8 @@ OPENROUTER_API_KEY = "your-key-here"
                                         f"{_explain}\n\n"
                                         f"**Commands to be executed on {dev.hostname or dev.ip}:**\n"
                                         f"```\n{_cmd_display}\n```\n\n"
-                                        "⚠️ **Type `yes` to deploy or `no` to cancel.**"
+                                        f"📸 **Pre-change snapshot:** {_snap_status}\n\n"
+                                        "⚠️ **Click ✅ Deploy Now to apply or ❌ Cancel to abort.**"
                                     )
                                 else:
                                     _nlp_reply = _raw_reply.replace("APPROVAL_REQUIRED","").strip()
@@ -2492,13 +2559,28 @@ OPENROUTER_API_KEY = "your-key-here"
                             _pend = st.session_state.get(f"ai_nlp_pending_cmds_{dev.ip}")
                             if _pend:
                                 st.markdown("---")
+                                _snap_key = f"ai_nlp_presnap_{dev.ip}"
+                                _snap_val = st.session_state.get(_snap_key, "")
+
+                                # Show snapshot preview
+                                _snap_lines = len(_snap_val.splitlines()) if _snap_val else 0
+                                if _snap_val:
+                                    with st.expander(
+                                        f"📸 Pre-change snapshot — {_snap_lines} lines captured "
+                                        f"(will be restored on ↩️ Undo)",
+                                        expanded=False
+                                    ):
+                                        st.code(_snap_val[:3000] + ("\n... (truncated)" if len(_snap_val) > 3000 else ""),
+                                                language="text")
+                                else:
+                                    st.warning("⚠️ No snapshot available — rollback will not be possible after deploy.")
+
                                 st.warning(f"⚠️ **{len(_pend)} command(s) ready to deploy on {dev.hostname or dev.ip}. Approve?**")
                                 _col_yes, _col_no = st.columns(2)
                                 with _col_yes:
                                     if st.button("✅ Deploy Now", key=f"nlp_approve_{dev.ip}",
                                                  type="primary", use_container_width=True):
-                                        _exec_log  = []
-                                        _rollback_cmds = []
+                                        _exec_log = []
                                         _creds_exec = {
                                             "username":      os.environ.get("GNS3_SSH_USER", "admin"),
                                             "password":      os.environ.get("GNS3_SSH_PASS", "admin"),
@@ -2506,7 +2588,6 @@ OPENROUTER_API_KEY = "your-key-here"
                                         }
                                         try:
                                             from netmiko import ConnectHandler
-                                            import re as _re
 
                                             _dtype = dev.device_type or "cisco_ios"
                                             _cfg_exec = dict(
@@ -2520,70 +2601,51 @@ OPENROUTER_API_KEY = "your-key-here"
                                                 conn_timeout=30,
                                                 fast_cli=False,
                                                 global_delay_factor=4,
-                                                session_log=None,
                                             )
                                             if _creds_exec["enable_secret"]:
                                                 _cfg_exec["secret"] = _creds_exec["enable_secret"]
 
                                             with st.spinner("⚙️ Connecting to " + dev.ip + "…"):
                                                 _conn_exec = ConnectHandler(**_cfg_exec)
-                                                # Enter enable mode if secret is set
                                                 try:
                                                     _conn_exec.enable()
                                                 except Exception:
                                                     pass
 
-                                            # Strip "end", "exit", "write memory" — 
-                                            # send_config_set handles these automatically
+                                            # ── USE PRE-CAPTURED SNAPSHOT (taken at approval time) ──
+                                            # Snapshot was already captured when AI proposed the commands.
+                                            # Reuse it — no need to SSH again just for this.
+                                            _snap_key = f"ai_nlp_presnap_{dev.ip}"
+                                            _pre_snapshot = st.session_state.get(_snap_key, "")
+                                            if not _pre_snapshot:
+                                                # Fallback: capture now if somehow missing
+                                                try:
+                                                    _pre_snapshot = _conn_exec.send_command(
+                                                        "show running-config",
+                                                        read_timeout=30,
+                                                        expect_string=r"#",
+                                                    )
+                                                except Exception as _snap_err:
+                                                    _exec_log.append("⚠️ Snapshot unavailable: " + str(_snap_err))
+
+                                            # Strip terminal-only commands that send_config_set handles itself
                                             _strip_cmds = {"end", "exit", "write memory", "wr", "wr mem"}
                                             _config_cmds = [
-                                                c.replace("[CONFIG]","").strip()
-                                                for c in _pend if "[CONFIG]" in c
-                                                and c.replace("[CONFIG]","").strip()
-                                                and c.replace("[CONFIG]","").strip().lower() not in _strip_cmds
+                                                c.replace("[CONFIG]", "").strip()
+                                                for c in _pend
+                                                if "[CONFIG]" in c
+                                                and c.replace("[CONFIG]", "").strip()
+                                                and c.replace("[CONFIG]", "").strip().lower() not in _strip_cmds
                                             ]
-                                            _exec_cmds   = [c.replace("[EXEC]","").strip()
-                                                            for c in _pend if "[EXEC]" in c
-                                                            and c.replace("[EXEC]","").strip()]
-
-                                            # ── Capture PRE-change state for rollback ──
-                                            with st.spinner("📸 Capturing pre-change snapshot…"):
-                                                try:
-                                                    _pre_run = _conn_exec.send_command(
-                                                        "show running-config", read_timeout=30
-                                                    )
-                                                    # Build rollback commands from config cmds
-                                                    for _cmd in _config_cmds:
-                                                        _c = _cmd.strip().lower()
-                                                        if _c.startswith("interface loopback"):
-                                                            _iface = _cmd.strip().split()[-1]
-                                                            _rollback_cmds += [
-                                                                "[CONFIG] no interface loopback " + _iface
-                                                            ]
-                                                        elif _c.startswith("router ospf"):
-                                                            _pid = _cmd.strip().split()[-1]
-                                                            _rollback_cmds += [
-                                                                "[CONFIG] no router ospf " + _pid
-                                                            ]
-                                                        elif _c.startswith("router bgp"):
-                                                            _asn = _cmd.strip().split()[-1]
-                                                            _rollback_cmds += [
-                                                                "[CONFIG] no router bgp " + _asn
-                                                            ]
-                                                        elif _c.startswith("ip route"):
-                                                            _rollback_cmds += [
-                                                                "[CONFIG] no " + _cmd.strip()
-                                                            ]
-                                                        elif _c.startswith("no "):
-                                                            # Reversing a "no" = add it back
-                                                            _rollback_cmds += [
-                                                                "[CONFIG] " + _cmd.strip()[3:]
-                                                            ]
-                                                except Exception:
-                                                    _pre_run = ""
+                                            _exec_cmds = [
+                                                c.replace("[EXEC]", "").strip()
+                                                for c in _pend
+                                                if "[EXEC]" in c
+                                                and c.replace("[EXEC]", "").strip()
+                                            ]
 
                                             # ── Execute EXEC-mode commands ────────────
-                                            with st.spinner("⚙️ Executing commands on " + dev.ip + "…"):
+                                            with st.spinner("⚙️ Executing on " + dev.ip + "…"):
                                                 if _exec_cmds:
                                                     for _ec in _exec_cmds:
                                                         try:
@@ -2606,7 +2668,6 @@ OPENROUTER_API_KEY = "your-key-here"
                                                             exit_config_mode=True,
                                                         )
                                                         _exec_log.append("[CONFIG MODE]\n" + _o)
-                                                        # Save config
                                                         try:
                                                             _conn_exec.save_config()
                                                         except Exception:
@@ -2621,18 +2682,21 @@ OPENROUTER_API_KEY = "your-key-here"
                                                 "✅ **Deployed successfully on " + _hostname_disp + "**\n\n"
                                                 + "```\n" + "\n".join(_exec_log) + "\n```"
                                             )
-                                            # Store rollback plan in session state
-                                            if _rollback_cmds:
-                                                st.session_state[f"ai_nlp_rollback_{dev.ip}"] = _rollback_cmds
+
+                                            # ── Store SNAPSHOT for rollback (not pattern-matched commands) ──
+                                            if _pre_snapshot:
+                                                st.session_state[f"ai_nlp_rollback_{dev.ip}"] = _pre_snapshot
                                                 _deploy_result += (
                                                     "\n\n🔄 **Rollback available** — "
-                                                    "click **↩️ Undo** below to revert these changes."
+                                                    "click **↩️ Undo** below to restore the "
+                                                    "exact pre-change config."
                                                 )
 
                                         except Exception as _ex_err:
                                             _deploy_result = "❌ Deployment failed: " + str(_ex_err)
 
                                         st.session_state.pop(f"ai_nlp_pending_cmds_{dev.ip}", None)
+                                        st.session_state.pop(f"ai_nlp_presnap_{dev.ip}", None)
                                         st.session_state.setdefault(
                                             f"ai_nlp_history_{dev.ip}", []
                                         ).append({"q": "✅ Approved — Deploy Now", "a": _deploy_result})
@@ -2666,6 +2730,8 @@ OPENROUTER_API_KEY = "your-key-here"
                                         }
                                         try:
                                             from netmiko import ConnectHandler
+                                            import re as _re_rb
+
                                             _cfg_rb = dict(
                                                 device_type=dev.device_type or "cisco_ios",
                                                 host=dev.ip,
@@ -2679,37 +2745,55 @@ OPENROUTER_API_KEY = "your-key-here"
                                             )
                                             if _creds_rb["enable_secret"]:
                                                 _cfg_rb["secret"] = _creds_rb["enable_secret"]
-                                            with st.spinner("↩️ Rolling back changes on " + dev.ip + "…"):
+
+                                            with st.spinner("↩️ Restoring pre-change config on " + dev.ip + "…"):
                                                 _conn_rb = ConnectHandler(**_cfg_rb)
                                                 try:
                                                     _conn_rb.enable()
                                                 except Exception:
                                                     pass
-                                                _rb_config = [c.replace("[CONFIG]","").strip()
-                                                              for c in _rb_cmds if "[CONFIG]" in c]
-                                                _rb_exec   = [c.replace("[EXEC]","").strip()
-                                                              for c in _rb_cmds if "[EXEC]" in c]
-                                                if _rb_exec:
-                                                    for _rc in _rb_exec:
-                                                        _o = _conn_rb.send_command(
-                                                            _rc, read_timeout=30, expect_string=r"#"
-                                                        )
-                                                        _rb_log.append("$ " + _rc + "\n" + _o)
-                                                if _rb_config:
+
+                                                # _rb_cmds is the full running-config snapshot (a string)
+                                                # Parse it into config lines, skipping header boilerplate
+                                                _skip_prefixes = (
+                                                    "!", "Building configuration",
+                                                    "Current configuration", "version ",
+                                                    "boot-start", "boot-end", "no service pad",
+                                                    "service ", "hostname ", "logging ",
+                                                    "enable secret", "enable password",
+                                                    "username ", "aaa ", "crypto ",
+                                                    "spanning-tree ", "vtp ", "cdp ",
+                                                    "ip ssh ", "ip domain", "line con",
+                                                    "line vty", "line aux", "end",
+                                                )
+                                                _raw_lines = _rb_cmds.splitlines()
+                                                _restore_lines = []
+                                                for _rl in _raw_lines:
+                                                    _rs = _rl.strip()
+                                                    if not _rs:
+                                                        continue
+                                                    if any(_rs.startswith(_p) for _p in _skip_prefixes):
+                                                        continue
+                                                    _restore_lines.append(_rs)
+
+                                                if _restore_lines:
                                                     _o = _conn_rb.send_config_set(
-                                                        _rb_config,
-                                                        read_timeout=30,
+                                                        _restore_lines,
+                                                        read_timeout=60,
                                                         enter_config_mode=True,
                                                         exit_config_mode=True,
                                                     )
-                                                    _rb_log.append("[ROLLBACK CONFIG]\n" + _o)
+                                                    _rb_log.append("[RESTORED FROM SNAPSHOT]\n" + _o)
                                                     try:
                                                         _conn_rb.save_config()
                                                     except Exception:
                                                         pass
                                                 _conn_rb.disconnect()
+
                                             _rb_result = (
-                                                "↩️ **Rollback completed on " + (dev.hostname or dev.ip) + "**\n\n"
+                                                "↩️ **Rollback completed on "
+                                                + (dev.hostname or dev.ip) + "**\n\n"
+                                                + "Pre-change configuration restored from snapshot.\n\n"
                                                 + "```\n" + "\n".join(_rb_log) + "\n```"
                                             )
                                             st.session_state.pop(_rollback_key, None)
