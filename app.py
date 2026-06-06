@@ -228,7 +228,11 @@ def _get_ai_client():
 def call_ai(prompt: str) -> str:
     client = _get_ai_client()
     if not client:
-        return ""
+        # Return diagnostic so user sees exactly what is wrong
+        key = _resolve_api_key()
+        if not key:
+            return "AI is unavailable. OPENROUTER_API_KEY not found in .streamlit/secrets.toml or .env file."
+        return "AI is unavailable. Could not create OpenAI client — check that openai package is installed."
     try:
         resp = client.chat.completions.create(
             model=MODEL_NAME,
@@ -2233,7 +2237,17 @@ OPENROUTER_API_KEY = "your-key-here"
                             disc.start_login_session(dev.ip, _creds)
                             st.rerun()
 
-                    # Button 3 — AI Diagnose
+                    # Button 3 — AI Diagnose (login required)
+                    # Compute login status here so it's available for both
+                    # the AI Diagnose button and the chat bar below
+                    _login_ok_early = (
+                        session is not None
+                        and session.status == "complete"
+                        and any(
+                            s.get("name") in ("Login", "SSH Login") and s.get("ok")
+                            for s in (session.steps or [])
+                        )
+                    )
                     with _b3:
                         if st.button(
                             "⏳ Running…" if _ts_running else "🤖 AI Diagnose",
@@ -2241,18 +2255,22 @@ OPENROUTER_API_KEY = "your-key-here"
                             disabled=_ts_running,
                             type="primary",
                             use_container_width=True,
-                            help="Full diagnostics + AI fix plan",
+                            help="Full diagnostics + AI fix plan (login required)",
                         ):
-                            _creds = {
-                                "username":      os.environ.get("GNS3_SSH_USER", "admin"),
-                                "password":      os.environ.get("GNS3_SSH_PASS", "admin"),
-                                "enable_secret": os.environ.get("GNS3_SSH_SECRET", ""),
-                            }
-                            st.session_state[f"login_mode_{dev.ip}"] = False
-                            st.session_state[f"ts_expanded_{dev.ip}"] = True
-                            st.session_state.pop(f"poll_count_{dev.ip}", None)
-                            disc.start_ai_troubleshoot(dev.ip, call_ai, _creds, approved=False)
-                            st.rerun()
+                            if not _login_ok_early:
+                                st.warning("🔐 Please click **Login** first before running AI Diagnose.")
+                                st.rerun()
+                            else:
+                                _creds = {
+                                    "username":      os.environ.get("GNS3_SSH_USER", "admin"),
+                                    "password":      os.environ.get("GNS3_SSH_PASS", "admin"),
+                                    "enable_secret": os.environ.get("GNS3_SSH_SECRET", ""),
+                                }
+                                st.session_state[f"login_mode_{dev.ip}"] = False
+                                st.session_state[f"ts_expanded_{dev.ip}"] = True
+                                st.session_state.pop(f"poll_count_{dev.ip}", None)
+                                disc.start_ai_troubleshoot(dev.ip, call_ai, _creds, approved=False)
+                                st.rerun()
 
                     # Button 4 — Show / Hide Progress
                     with _b4:
@@ -2264,15 +2282,8 @@ OPENROUTER_API_KEY = "your-key-here"
 
                     # AI Assistant NLP bar — 5th option (wider)
                     # Login is mandatory before any chat operation
-                    _login_ok = (
-                        session is not None
-                        and session.status == "complete"
-                        and any(
-                            s.get("name") in ("Login", "SSH Login")
-                            and s.get("ok")
-                            for s in (session.steps or [])
-                        )
-                    )
+                    # Reuse _login_ok_early computed above for AI Diagnose button
+                    _login_ok = _login_ok_early
                     with _bai:
                         if _login_ok:
                             _ai_nlp_q = st.text_input(
