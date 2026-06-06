@@ -132,20 +132,18 @@ device_catalog = _get_device_catalog()
 # =========================================================
 
 # ── AI CONFIG (must come before _get_monitor) ─────────────────────────────────
-OPENROUTER_BASE = "https://openrouter.ai/api/v1"
+GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 # Free model by default (no cost, no credit card). Override via the
-# OPENROUTER_MODEL secret if you want a different one. ':free' models and the
-# 'openrouter/free' auto-router are free on OpenRouter.
+# Groq model — completely free, no credits needed
 def _resolve_model() -> str:
     try:
         import streamlit as _st
-        m = _st.secrets.get("OPENROUTER_MODEL", "")
+        m = _st.secrets.get("GROQ_MODEL", "")
     except Exception:
         m = ""
     if not m:
-        m = os.environ.get("OPENROUTER_MODEL", "")
-    # Free model — no credits needed
-    return (m or "deepseek/deepseek-chat-v3-0324:free").strip()
+        m = os.environ.get("GROQ_MODEL", "")
+    return (m or "llama-3.3-70b-versatile").strip()
 
 MODEL_NAME = _resolve_model()
 
@@ -168,7 +166,7 @@ def _load_secrets_into_env() -> None:
         "GNS3_DEVICE_TYPE", "GNS3_SSH_USER", "GNS3_SSH_PASS", "GNS3_SSH_SECRET",
         "GNS3_TELNET_USER", "GNS3_ROUTER_USER", "GNS3_ROUTER_PASS",
         "GNS3_LOG_GITHUB_URL", "GNS3_LOG_DEFAULT_DEVICE", "GNS3_LOG_GITHUB_TOKEN",
-        "NETBRAIN_LIVE_ONLY", "OPENROUTER_API_KEY",
+        "NETBRAIN_LIVE_ONLY", "GROQ_API_KEY",
     ]
     for k in keys:
         try:
@@ -187,23 +185,23 @@ _load_secrets_into_env()
 def _resolve_api_key() -> str:
     # 1. Streamlit Secrets (works on Cloud + local .streamlit/secrets.toml)
     try:
-        key = st.secrets.get("OPENROUTER_API_KEY", "")
+        key = st.secrets.get("GROQ_API_KEY", "")
         if key and key.strip():
             return key.strip()
     except Exception:
         pass
-    # 2. os.environ (already set via _load_secrets_into_env or export)
-    key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    # 2. os.environ
+    key = os.environ.get("GROQ_API_KEY", "").strip()
     if key:
         return key
-    # 3. Read .env file directly — covers local Mac / Codespace development
+    # 3. .env file in repo root
     try:
         from dotenv import load_dotenv
         _repo = os.path.dirname(os.path.abspath(__file__))
         _env  = os.path.join(_repo, ".env")
         if os.path.exists(_env):
             load_dotenv(_env, override=True)
-            key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+            key = os.environ.get("GROQ_API_KEY", "").strip()
             if key:
                 return key
     except Exception:
@@ -220,7 +218,7 @@ def _get_ai_client():
     if not key:
         return None
     try:
-        return OpenAI(api_key=key, base_url=OPENROUTER_BASE)
+        return OpenAI(api_key=key, base_url=GROQ_BASE_URL)
     except Exception:
         return None
 
@@ -229,7 +227,7 @@ def call_ai(prompt: str) -> str:
     # Step 1: check key
     key = _resolve_api_key()
     if not key:
-        return "AI is unavailable — OPENROUTER_API_KEY not found in .streamlit/secrets.toml or .env"
+        return "AI is unavailable — GROQ_API_KEY not found in .streamlit/secrets.toml or .env"
 
     # Step 2: check openai package
     if not OPENAI_AVAILABLE:
@@ -237,7 +235,7 @@ def call_ai(prompt: str) -> str:
 
     # Step 3: create client
     try:
-        client = OpenAI(api_key=key, base_url=OPENROUTER_BASE)
+        client = OpenAI(api_key=key, base_url=GROQ_BASE_URL)
     except Exception as e:
         return f"AI is unavailable — could not create client: {e}"
 
@@ -948,7 +946,7 @@ elif workspace == "Workflows":
                 if answer:
                     st.markdown(answer)
                 else:
-                    st.warning("AI is unavailable (check OPENROUTER_API_KEY). "
+                    st.warning("AI is unavailable (check GROQ_API_KEY). "
                                "Showing raw data instead:")
                     st.code(context, language="text")
 
@@ -1324,7 +1322,7 @@ GNS3_ROUTER_HOST = "{new_router_h if 'new_router_h' in dir() else ''}"
 GNS3_ROUTER_PORT = "{new_router_p if 'new_router_p' in dir() else '22'}"
 GNS3_SSH_USER = "admin"
 GNS3_SSH_PASS = "admin"
-OPENROUTER_API_KEY = "your-key-here"
+GROQ_API_KEY = "your-key-here"
 """, language="toml")
 
         # ── Router Login Test (Pinggy tunnel) ─────────────────────────────────
@@ -1520,17 +1518,17 @@ OPENROUTER_API_KEY = "your-key-here"
                 st.success("Credentials updated.")
 
         st.divider()
-        st.markdown("### OpenRouter AI Key")
+        st.markdown("### Groq AI Key")
         with st.form("ai_form"):
-            new_ai_key = st.text_input("OPENROUTER_API_KEY", value=os.environ.get("OPENROUTER_API_KEY",""),
+            new_ai_key = st.text_input("GROQ_API_KEY", value=os.environ.get("GROQ_API_KEY",""),
                                        type="password")
             if st.form_submit_button("Save AI Key"):
-                os.environ["OPENROUTER_API_KEY"] = new_ai_key
+                os.environ["GROQ_API_KEY"] = new_ai_key
                 st.success("AI key updated. Restart the app if the AI client was already cached.")
 
         st.caption(f"Current model: `{MODEL_NAME}`  ·  set `OPENROUTER_MODEL` in Secrets to change it.")
         if st.button("🔌 Test AI Connection"):
-            with st.spinner("Calling OpenRouter..."):
+            with st.spinner("Calling Groq..."):
                 diag = diagnose_ai()
             if diag["ok"]:
                 st.success(f"✅ AI is working. {diag['detail']}")
@@ -1541,7 +1539,7 @@ OPENROUTER_API_KEY = "your-key-here"
                 if diag["stage"] == "request":
                     st.caption("Common causes: invalid/expired key, rate-limited, or the model "
                                f"isn't available. Current model: `{MODEL_NAME}`. Free options: "
-                               "`deepseek/deepseek-chat-v3-0324:free`, `openrouter/free`.")
+                               "`llama-3.3-70b-versatile`, `openrouter/free`.")
 
     # ── Thresholds tab ────────────────────────────────────────────────────────
     with tab_thresh:
@@ -1831,7 +1829,7 @@ OPENROUTER_API_KEY = "your-key-here"
                     st.caption(f"• {r}")
             else:
                 st.error("AI unavailable. " + "; ".join(res.get("reasons", [])))
-                st.caption("Check that OPENROUTER_API_KEY is set in Secrets.")
+                st.caption("Check that GROQ_API_KEY is set in Secrets.")
 
     # ══════════════════════════════════════════════════════════════════════════
     # TAB: DEVICES — Auto-discovery + AI Network Troubleshooting
@@ -1995,7 +1993,7 @@ OPENROUTER_API_KEY = "your-key-here"
                         "Be concise, technical, and use bullet points for lists.\n\n"
                         + _d_ctx
                         + f"Question: {_ai_q}"
-                    ) or "AI unavailable — check OPENROUTER_API_KEY."
+                    ) or "AI unavailable — check GROQ_API_KEY."
                 st.session_state["devices_ai_last_ans"] = _ai_ans
 
             # Show answer
@@ -2435,7 +2433,7 @@ OPENROUTER_API_KEY = "your-key-here"
                                     _raw_reply = f"AI unavailable: {_nlp_err}"
 
                             if not _raw_reply:
-                                _raw_reply = "AI is unavailable. Please check your OPENROUTER_API_KEY in Secrets."
+                                _raw_reply = "AI is unavailable. Please check your GROQ_API_KEY in Secrets."
 
                             # ── Parse AI response — extract commands if present ─
                             if "APPROVAL_REQUIRED" in _raw_reply:
@@ -3289,7 +3287,7 @@ elif workspace == "nlp":
                     + (f"Conversation so far:\n{_history}\n\n" if _history else "")
                 )
                 _full_prompt = _sys_prompt + f"User question: {_last_q}"
-                _reply = call_ai(_full_prompt) or "I'm unable to respond right now. Check your OPENROUTER_API_KEY."
+                _reply = call_ai(_full_prompt) or "I'm unable to respond right now. Check your GROQ_API_KEY."
             except Exception as _e:
                 _reply = f"Error: {_e}"
         st.session_state["nlp_messages"].append({"role": "assistant", "content": _reply})
