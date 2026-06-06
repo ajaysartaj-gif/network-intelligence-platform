@@ -2470,22 +2470,100 @@ OPENROUTER_API_KEY = "your-key-here"
                             expanded=True
                         ):
                             st.markdown("<div class='nlp-chat-wrap'>", unsafe_allow_html=True)
-                            for _entry in _nlp_history[-6:]:   # show last 6 turns
+                            for _entry in _nlp_history[-6:]:
                                 _q_safe = _html.escape(_entry["q"])
-                                _a_safe = _html.escape(_entry["a"])
+                                _a_safe = _entry["a"]   # keep markdown for AI responses
                                 st.markdown(
                                     f"<div class='nlp-msg-user'>"
                                     f"<div class='nlp-label nlp-label-user'>👤 You</div>{_q_safe}"
-                                    f"</div>"
-                                    f"<div class='nlp-msg-ai'>"
-                                    f"<div class='nlp-label nlp-label-ai'>🤖 AI Assistant</div>{_a_safe}"
                                     f"</div>",
                                     unsafe_allow_html=True
                                 )
+                                st.markdown(
+                                    f"<div class='nlp-label nlp-label-ai' style='color:#1D9E75;"
+                                    f"font-size:.72rem;font-weight:600;margin:.35rem 0 .1rem 0'>"
+                                    f"🤖 AI Assistant</div>",
+                                    unsafe_allow_html=True
+                                )
+                                st.markdown(_a_safe)
                             st.markdown("</div>", unsafe_allow_html=True)
+
+                            # ── Approval buttons — shown when commands are pending ──
+                            _pend = st.session_state.get(f"ai_nlp_pending_cmds_{dev.ip}")
+                            if _pend:
+                                st.markdown("---")
+                                st.warning(f"⚠️ **{len(_pend)} command(s) ready to deploy on {dev.hostname or dev.ip}. Approve?**")
+                                _col_yes, _col_no = st.columns(2)
+                                with _col_yes:
+                                    if st.button("✅ Deploy Now", key=f"nlp_approve_{dev.ip}",
+                                                 type="primary", use_container_width=True):
+                                        _exec_log = []
+                                        _creds_exec = {
+                                            "username":      os.environ.get("GNS3_SSH_USER", "admin"),
+                                            "password":      os.environ.get("GNS3_SSH_PASS", "admin"),
+                                            "enable_secret": os.environ.get("GNS3_SSH_SECRET", ""),
+                                        }
+                                        try:
+                                            from netmiko import ConnectHandler
+                                            _cfg_exec = dict(
+                                                device_type=dev.device_type or "cisco_ios",
+                                                host=dev.ip,
+                                                port=int(dev.ssh_port or 22),
+                                                username=_creds_exec["username"],
+                                                password=_creds_exec["password"],
+                                                timeout=30,
+                                                auth_timeout=30,
+                                                fast_cli=False,
+                                                global_delay_factor=2,
+                                            )
+                                            if _creds_exec["enable_secret"]:
+                                                _cfg_exec["secret"] = _creds_exec["enable_secret"]
+                                            with st.spinner(f"⚙️ Deploying on {dev.ip}…"):
+                                                _conn_exec = ConnectHandler(**_cfg_exec)
+                                                _config_cmds = [c.replace("[CONFIG]","").strip()
+                                                                for c in _pend if "[CONFIG]" in c]
+                                                _exec_cmds   = [c.replace("[EXEC]","").strip()
+                                                                for c in _pend if "[EXEC]" in c]
+                                                if _exec_cmds:
+                                                    for _ec in _exec_cmds:
+                                                        _o = _conn_exec.send_command(_ec, read_timeout=20)
+                                                        _exec_log.append(f"$ {_ec}
+{_o}")
+                                                if _config_cmds:
+                                                    _o = _conn_exec.send_config_set(_config_cmds)
+                                                    _exec_log.append(f"[CONFIG]
+{_o}")
+                                                _conn_exec.disconnect()
+                                            _deploy_result = (
+                                                f"✅ **Deployed successfully on "
+                                                f"{dev.hostname or dev.ip}**
+
+"
+                                                "```
+" + "
+".join(_exec_log) + "
+```"
+                                            )
+                                        except Exception as _ex_err:
+                                            _deploy_result = f"❌ Deployment failed: {_ex_err}"
+                                        st.session_state.pop(f"ai_nlp_pending_cmds_{dev.ip}", None)
+                                        st.session_state.setdefault(
+                                            f"ai_nlp_history_{dev.ip}", []
+                                        ).append({"q": "✅ Approved — Deploy Now", "a": _deploy_result})
+                                        st.rerun()
+                                with _col_no:
+                                    if st.button("❌ Cancel", key=f"nlp_reject_{dev.ip}",
+                                                 use_container_width=True):
+                                        st.session_state.pop(f"ai_nlp_pending_cmds_{dev.ip}", None)
+                                        st.session_state.setdefault(
+                                            f"ai_nlp_history_{dev.ip}", []
+                                        ).append({"q": "❌ Cancelled", "a": "Configuration cancelled. No changes made."})
+                                        st.rerun()
+
                             if st.button("🗑 Clear chat", key=f"nlp_clear_{dev.ip}"):
                                 st.session_state.pop(f"ai_nlp_history_{dev.ip}", None)
-                                st.session_state.pop(_nlp_last_key, None)
+                                st.session_state.pop(f"ai_nlp_last_{dev.ip}", None)
+                                st.session_state.pop(f"ai_nlp_pending_cmds_{dev.ip}", None)
                                 st.rerun()
 
                     # ── Live Progress + Details Panel ─────────────────────────
