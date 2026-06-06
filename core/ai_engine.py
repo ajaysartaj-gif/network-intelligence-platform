@@ -6,31 +6,61 @@ from openai import OpenAI
 # MODEL CONFIG
 # =========================================================
 
-MODEL = "openai/gpt-4.1-mini"
+# Canonical model — matches config/ai.py OPENROUTER_MODEL
+MODEL = "anthropic/claude-sonnet-4-5"
 
 # =========================================================
-# GET API KEY
+# GET API KEY — checks all possible sources in order
 # =========================================================
 
-def get_api_key():
+def get_api_key() -> str:
+    """
+    Load the OpenRouter API key from every possible source, in priority order:
+      1. Streamlit Secrets       → works on Streamlit Cloud + local .streamlit/secrets.toml
+      2. OS environment variable → works when set via export or Codespace secret
+      3. .env file in repo root  → works locally via python-dotenv
+    Returns empty string if not found anywhere.
+    """
 
+    # 1. Streamlit Secrets (Streamlit Cloud OR local .streamlit/secrets.toml)
     try:
-        return st.secrets["OPENROUTER_API_KEY"]
-
+        key = st.secrets.get("OPENROUTER_API_KEY", "")
+        if key and key.strip():
+            return key.strip()
     except Exception:
-        return os.getenv("OPENROUTER_API_KEY", "")
+        pass
+
+    # 2. Already in os.environ (Codespace secret, docker, export, etc.)
+    key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    if key:
+        return key
+
+    # 3. .env file in repo root (local development)
+    try:
+        from dotenv import load_dotenv
+        # Find repo root — walk up from this file's location
+        here = os.path.dirname(os.path.abspath(__file__))
+        repo_root = os.path.dirname(here)   # core/ → repo root
+        env_path = os.path.join(repo_root, ".env")
+        if os.path.exists(env_path):
+            load_dotenv(env_path, override=False)
+            key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+            if key:
+                return key
+    except Exception:
+        pass
+
+    return ""
+
 
 # =========================================================
 # CREATE CLIENT
 # =========================================================
 
 def get_client():
-
     api_key = get_api_key()
-
     if not api_key:
         return None
-
     return OpenAI(
         api_key=api_key,
         base_url="https://openrouter.ai/api/v1"
@@ -40,15 +70,11 @@ def get_client():
 # ASK AI
 # =========================================================
 
-def ask_ai(query: str):
-
+def ask_ai(query: str) -> str:
     client = get_client()
-
     if not client:
-        return "ERROR: OpenRouter API key missing."
-
+        return "AI is unavailable. Please check your OPENROUTER_API_KEY in Secrets."
     try:
-
         response = client.chat.completions.create(
             model=MODEL,
             messages=[
@@ -85,11 +111,8 @@ If the query is unclear, ask for clarification on specific symptoms, devices, or
                 }
             ],
             temperature=0.1,
-            max_tokens=1200
+            max_tokens=800
         )
-
         return response.choices[0].message.content
-
     except Exception as e:
-
         return f"AI Error: {str(e)}"
