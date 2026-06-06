@@ -144,8 +144,8 @@ def _resolve_model() -> str:
         m = ""
     if not m:
         m = os.environ.get("OPENROUTER_MODEL", "")
-    # Default to claude-sonnet — reliable, matches config/ai.py
-    return (m or "anthropic/claude-sonnet-4-5").strip()
+    # Free model — no credits needed
+    return (m or "deepseek/deepseek-chat-v3-0324:free").strip()
 
 MODEL_NAME = _resolve_model()
 
