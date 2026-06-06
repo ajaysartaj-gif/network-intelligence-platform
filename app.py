@@ -144,7 +144,8 @@ def _resolve_model() -> str:
         m = ""
     if not m:
         m = os.environ.get("OPENROUTER_MODEL", "")
-    return (m or "deepseek/deepseek-chat-v3-0324:free").strip()
+    # Default to claude-sonnet — reliable, matches config/ai.py
+    return (m or "anthropic/claude-sonnet-4-5").strip()
 
 MODEL_NAME = _resolve_model()
 
@@ -184,15 +185,35 @@ _load_secrets_into_env()
 
 
 def _resolve_api_key() -> str:
+    # 1. Streamlit Secrets (works on Cloud + local .streamlit/secrets.toml)
     try:
-        return st.secrets.get("OPENROUTER_API_KEY", "")
+        key = st.secrets.get("OPENROUTER_API_KEY", "")
+        if key and key.strip():
+            return key.strip()
     except Exception:
-        return os.environ.get("OPENROUTER_API_KEY", "")
+        pass
+    # 2. os.environ (already set via _load_secrets_into_env or export)
+    key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    if key:
+        return key
+    # 3. Read .env file directly — covers local Mac / Codespace development
+    try:
+        from dotenv import load_dotenv
+        _repo = os.path.dirname(os.path.abspath(__file__))
+        _env  = os.path.join(_repo, ".env")
+        if os.path.exists(_env):
+            load_dotenv(_env, override=True)
+            key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+            if key:
+                return key
+    except Exception:
+        pass
+    return ""
 
 
 def _get_ai_client():
-    # No @st.cache_resource — caching None when key is missing would permanently
-    # break the chat even after the key is correctly set in secrets/env.
+    # NOT cached — caching None when key is missing would permanently break
+    # the chat even after the key is correctly set in secrets/.env
     if not OPENAI_AVAILABLE:
         return None
     key = _resolve_api_key()
@@ -202,6 +223,7 @@ def _get_ai_client():
         return OpenAI(api_key=key, base_url=OPENROUTER_BASE)
     except Exception:
         return None
+
 
 def call_ai(prompt: str) -> str:
     client = _get_ai_client()
