@@ -226,13 +226,22 @@ def _get_ai_client():
 
 
 def call_ai(prompt: str) -> str:
-    client = _get_ai_client()
-    if not client:
-        # Return diagnostic so user sees exactly what is wrong
-        key = _resolve_api_key()
-        if not key:
-            return "AI is unavailable. OPENROUTER_API_KEY not found in .streamlit/secrets.toml or .env file."
-        return "AI is unavailable. Could not create OpenAI client — check that openai package is installed."
+    # Step 1: check key
+    key = _resolve_api_key()
+    if not key:
+        return "AI is unavailable — OPENROUTER_API_KEY not found in .streamlit/secrets.toml or .env"
+
+    # Step 2: check openai package
+    if not OPENAI_AVAILABLE:
+        return "AI is unavailable — openai package not installed. Run: pip install openai"
+
+    # Step 3: create client
+    try:
+        client = OpenAI(api_key=key, base_url=OPENROUTER_BASE)
+    except Exception as e:
+        return f"AI is unavailable — could not create client: {e}"
+
+    # Step 4: call API — return the real error so it is visible in the chat
     try:
         resp = client.chat.completions.create(
             model=MODEL_NAME,
@@ -248,8 +257,10 @@ def call_ai(prompt: str) -> str:
         )
         return resp.choices[0].message.content
     except Exception as e:
-        logger.warning(f"AI call failed: {e}")
-        return ""
+        # Surface the real error — do not swallow it
+        err = str(e)
+        logger.warning(f"AI call failed: {err}")
+        return f"AI Error: {err}"
 
 # ── PINGPY / TUNNEL CONFIG ────────────────────────────────────────────────────
 
