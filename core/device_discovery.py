@@ -54,6 +54,11 @@ class DiscoveredDevice:
     ssh_port: int = 22
     telnet_port: int = 23
     notes: str = ""
+    # ── Site / inventory metadata (filled at approval time) ──
+    region: str = ""              # "US" | "EMEA" | "APAC"
+    country: str = ""
+    city: str = ""
+    site_name: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return self.__dict__.copy()
@@ -83,9 +88,12 @@ class DeviceDiscoveryEngine:
     """
     Passive + active discovery of devices on the local network.
 
-    Passive  : Sniffs ICMP echo-replies via scapy (if available).
-    Active   : TCP probe against common management ports (22, 23, 80, 443).
+    Passive  : Sniffs ICMP echo-replies via scapy (if available), then verifies
+               with an active ping from this host before queuing for approval.
+    Active   : Reads the ARP table as hints only — each candidate must respond
+               to ICMP from this tool or it is ignored.
     Poll loop: Runs in a background thread; Streamlit reads `pending_devices`.
+               Only ICMP-reachable hosts appear in the approval list.
     """
 
     def __init__(self):
@@ -114,7 +122,7 @@ class DeviceDiscoveryEngine:
             self._sniff_thread.start()
             logger.info("Passive ICMP sniffer started (scapy).")
         else:
-            logger.info("Scapy not available — using ARP+probe fallback.")
+            logger.info("Scapy not available — using ARP hints + ICMP verification.")
         self._probe_thread = threading.Thread(
             target=self._arp_probe_loop, daemon=True, name="DevDisc-Probe")
         self._probe_thread.start()
@@ -143,7 +151,7 @@ class DeviceDiscoveryEngine:
     # - ARP / probe fallback loop -
 
     def _arp_probe_loop(self):
-        """Parse ARP table + probe common ports to find live hosts."""
+        """Use ARP table entries as hints; only ICMP-reachable hosts are queued."""
         while self._running:
             try:
                 # macOS / Linux ARP table
@@ -165,8 +173,19 @@ class DeviceDiscoveryEngine:
 
     # - Register a discovered IP -
 
-    def _register_ip(self, ip: str, mac: str = "", source: str = "ping"):
-        """Classify and queue a newly discovered IP for approval."""
+    def _register_ip(
+        self,
+        ip: str,
+        mac: str = "",
+        source: str = "ping",
+        ping_rtt_ms: Optional[float] = None,
+        require_ping: bool = True,
+    ):
+        """Classify and queue a newly discovered IP for approval.
+
+        Only hosts that respond to ICMP from this tool are added to the
+        pending approval list (unless require_ping=False and ping_rtt_ms is set).
+        """
         # Filter non-device IPs before doing any work
         try:
             import ipaddress
@@ -184,9 +203,29 @@ class DeviceDiscoveryEngine:
         with self._lock:
             if ip in self._known:
                 self._known[ip].last_seen = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                if ping_rtt_ms is not None:
+                    self._known[ip].ping_rtt_ms = ping_rtt_ms
                 return   # already known
 
-            logger.info(f"New device discovered: {ip} (via {source})")
+        # ICMP gate — ARP/scapy hints alone never enter the approval queue.
+        if require_ping:
+            if ping_rtt_ms is None:
+                ping_rtt_ms = self._icmp_ping(ip)
+            if ping_rtt_ms is None:
+                logger.debug(f"Skipping {ip} ({source}): no ICMP reply from this host")
+                return
+
+        with self._lock:
+            if ip in self._known:
+                self._known[ip].last_seen = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                if ping_rtt_ms is not None:
+                    self._known[ip].ping_rtt_ms = ping_rtt_ms
+                return
+
+            logger.info(
+                f"New device discovered: {ip} (via {source}, icmp ok, "
+                f"{ping_rtt_ms:.0f}ms)"
+            )
 
             # Resolve hostname
             hostname = self._resolve_hostname(ip)
@@ -201,6 +240,7 @@ class DeviceDiscoveryEngine:
                 ip=ip, hostname=hostname, mac=mac,
                 device_type=device_type, vendor=vendor,
                 open_ports=open_ports, source=source,
+                ping_rtt_ms=ping_rtt_ms or 0.0,
                 status="pending",
             )
             self._known[ip] = dev
@@ -212,11 +252,8 @@ class DeviceDiscoveryEngine:
         """Actively ping an IP and register if reachable."""
         rtt = self._icmp_ping(ip)
         if rtt is not None:
-            self._register_ip(ip, source="manual")
-            dev = self._known.get(ip)
-            if dev:
-                dev.ping_rtt_ms = rtt
-            return dev
+            self._register_ip(ip, source="manual", ping_rtt_ms=rtt, require_ping=False)
+            return self._known.get(ip)
         return None
 
     def scan_subnet(self, subnet_prefix: str = "192.168.0"):
@@ -226,21 +263,43 @@ class DeviceDiscoveryEngine:
                 ip = f"{subnet_prefix}.{i}"
                 rtt = self._icmp_ping(ip, timeout=0.5)
                 if rtt is not None:
-                    self._register_ip(ip, source="ping")
-                    if ip in self._known:
-                        self._known[ip].ping_rtt_ms = rtt
+                    self._register_ip(
+                        ip, source="ping", ping_rtt_ms=rtt, require_ping=False,
+                    )
         t = threading.Thread(target=_scan, daemon=True)
         t.start()
 
     # - Approval workflow -
 
-    def approve_device(self, ip: str, approved_by: str = "admin") -> bool:
+    def approve_device(
+        self,
+        ip: str,
+        approved_by: str = "admin",
+        region: str = "",
+        country: str = "",
+        city: str = "",
+        site_name: str = "",
+    ) -> bool:
         with self._lock:
             dev = self._pending.get(ip)
             if not dev:
                 return False
+
+            # ── Enterprise inventory requirement: site metadata mandatory ──
+            if not (region and country and city and site_name):
+                logger.warning(
+                    f"approve_device({ip}) rejected: missing site metadata "
+                    f"(region={region!r}, country={country!r}, city={city!r}, "
+                    f"site_name={site_name!r})"
+                )
+                return False
+
             dev.status = "approved"
             dev.approved_by = approved_by
+            dev.region = region
+            dev.country = country
+            dev.city = city
+            dev.site_name = site_name
             self._approved[ip] = dev
             self._pending.pop(ip, None)
 
@@ -266,7 +325,8 @@ class DeviceDiscoveryEngine:
                 get_log_store().add_log(ip, {
                     "type": "approval",
                     "summary": f"Device approved by {approved_by}. Type: {dev.device_type}. "
-                               f"Open ports: {dev.open_ports}. Source: {dev.source}.",
+                               f"Open ports: {dev.open_ports}. Source: {dev.source}. "
+                               f"Site: {site_name}, {city}, {country}, {region}.",
                 })
             except Exception:
                 pass
@@ -390,13 +450,29 @@ class DeviceDiscoveryEngine:
                 prompt = conn.find_prompt()
                 step("Prompt", True, f"CLI: {prompt}")
 
-                # 7. Interface brief
+                # 7. Interface brief + routing/neighbors for NetBrain topology analysis
                 brief = conn.send_command("show ip interface brief", read_timeout=15)
                 up   = brief.count(" up ")
                 down = brief.count(" down ")
                 step("Interfaces", True, f"{up} up / {down} down", output=brief)
 
-                session.output = f"=== show version ===\n{ver}\n\n=== show ip interface brief ===\n{brief}"
+                route = ""
+                cdp = ""
+                try:
+                    route = conn.send_command("show ip route", read_timeout=15)
+                except Exception:
+                    pass
+                try:
+                    cdp = conn.send_command("show cdp neighbors", read_timeout=15)
+                except Exception:
+                    pass
+
+                session.output = (
+                    f"=== show version ===\n{ver}\n\n"
+                    f"=== show ip interface brief ===\n{brief}\n\n"
+                    f"=== show ip route ===\n{route}\n\n"
+                    f"=== show cdp neighbors ===\n{cdp}"
+                )
                 session.ai_diagnosis = f"Login successful. Prompt: {prompt}"
                 try:
                     get_log_store().add_log(ip, {"type": "manual_login",
@@ -508,15 +584,13 @@ class DeviceDiscoveryEngine:
 
         try:
             # - Step 4: Gather diagnostics -
-            # First run show version alone to grab the real hostname
+            ver_out = ""
             try:
                 ver_out = conn.send_command("show version", read_timeout=15)
-                # Parse "hostname uptime is ..." from show version
                 m = re.search(r'^(\S+)\s+uptime\s+is', ver_out, re.MULTILINE | re.IGNORECASE)
                 if m:
                     real_hostname = m.group(1).strip()
                     session.device_hostname = real_hostname
-                    # Update the device record so UI shows the real name
                     if dev:
                         dev.hostname = real_hostname
                     step("Hostname", True, f"Router name: {real_hostname}")
@@ -525,11 +599,8 @@ class DeviceDiscoveryEngine:
 
             diag_cmds = [
                 "show version",
-                "show interfaces",
-                "show ip interface brief",
-                "show ip route",
-                "show logging | last 30",
-                "show processes cpu sorted | head 10",
+                "show logging | last 50",
+                "show processes cpu sorted",
             ]
             raw_outputs: Dict[str, str] = {"show version": ver_out} if ver_out else {}
             for cmd in diag_cmds:
@@ -717,6 +788,32 @@ class DeviceDiscoveryEngine:
 
     def _guess_device_type(self, ip: str, open_ports: List[int],
                             hostname: str) -> tuple:
+        """
+        Identify OEM + device type. Tries a live banner/version fingerprint
+        first (reliable); falls back to hostname-keyword guessing only if
+        the device can't be reached or doesn't expose a recognizable banner.
+        """
+        # ── Attempt 1: reliable banner-based detection ──
+        if 22 in open_ports or 23 in open_ports:
+            try:
+                from core.device_inventory_meta import detect_oem_and_type
+                username = os.environ.get("GNS3_SSH_USER", "")
+                password = os.environ.get("GNS3_SSH_PASS", "")
+                vendor, dtype, _banner = detect_oem_and_type(
+                    ip,
+                    ssh_port=22 if 22 in open_ports else 22,
+                    telnet_port=23 if 23 in open_ports else 23,
+                    username=username,
+                    password=password,
+                    timeout=6,
+                )
+                if dtype:
+                    logger.info(f"Banner-detected {ip}: vendor={vendor} type={dtype}")
+                    return dtype, vendor
+            except Exception as exc:
+                logger.debug(f"Banner detection failed for {ip}, falling back: {exc}")
+
+        # ── Attempt 2: hostname-keyword fallback (weak signal) ──
         h = hostname.lower()
         if any(k in h for k in ["router", "r1", "r2", "r3", "gns", "cisco"]):
             return "cisco_ios", "Cisco"
@@ -726,6 +823,12 @@ class DeviceDiscoveryEngine:
             return "juniper_junos", "Juniper"
         if any(k in h for k in ["arista", "eos"]):
             return "arista_eos", "Arista"
+        if any(k in h for k in ["aruba", "cx"]):
+            return "aruba_os", "HPE Aruba"
+        if any(k in h for k in ["palo", "pan"]):
+            return "paloalto_panos", "Palo Alto"
+        if any(k in h for k in ["forti"]):
+            return "fortinet", "Fortinet"
         if 22 in open_ports and 443 not in open_ports:
             return "cisco_ios", "Unknown"
         if 23 in open_ports:
