@@ -1,0 +1,11 @@
+# Knowledge cache (auto-generated)
+.knowledge_cache/
+*.knowledge.db
+
+# Python
+__pycache__/
+*.pyc
+
+# Secrets
+.streamlit/secrets.toml
+.env
