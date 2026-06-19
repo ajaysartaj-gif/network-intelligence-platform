@@ -28,6 +28,7 @@ import os
 from core.ai_engine import ask_ai, get_api_key
 from core.orchestration_engine import OperationsOrchestrator
 from core.github_log_engine import GitHubLogEngine
+from core.intent_engine import IntentEngine, IntentResult, INTENT_CONFIG
 from config.netmiko_devices import load_device_catalog
 import time
 import logging
@@ -447,14 +448,15 @@ def run_monitor_cycle() -> Dict[str, Any]:
 
 # ── WORKSPACES list (updated to include Admin) ───────────────────────────────
 WORKSPACES = [
-    ("dashboard", "🖥",  "Dashboard"),
-    ("Workflows", "🤖",  "AI Action"),
-    ("incident",  "🚨",  "Incidents"),
-    ("topology",  "🗺",  "Topology"),
+    ("dashboard",  "🖥",  "Dashboard"),
+    ("copilot",    "✨",  "Network Copilot"),
+    ("Workflows",  "🤖",  "AI Action"),
+    ("incident",   "🚨",  "Incidents"),
+    ("topology",   "🗺",  "Topology"),
     ("Observability", "📡", "Observability"),
-    ("security",  "🔒",  "Security"),
-    ("executive", "📈",  "Executive"),
-    ("admin",     "⚙️",  "Admin"),
+    ("security",   "🔒",  "Security"),
+    ("executive",  "📈",  "Executive"),
+    ("admin",      "⚙️",  "Admin"),
 ]
 
 # ── CSS ───────────────────────────────────────────────────────────────────────
@@ -467,35 +469,52 @@ def _device_card(hostname: str, m, health: dict) -> None:
     score  = health.get("score", 100)
     status = health.get("status", "healthy")
     reachable = getattr(m, "reachable", True)
-    color  = {"critical": "#cc0000", "warning": "#cc8800", "healthy": "#00aa44"}.get(status, "#555")
+    color  = {"critical": "#ff4560", "warning": "#ffb300", "healthy": "#00e676"}.get(status, "#4a617a")
     icon   = {"critical": "🔴", "warning": "🟡", "healthy": "🟢"}.get(status, "⚫")
 
     cpu_bar  = int(m.cpu)
     mem_bar  = int(m.memory)
-    cpu_col  = "#cc0000" if m.cpu >= 90 else "#cc8800" if m.cpu >= 70 else "#00aa44"
-    mem_col  = "#cc0000" if m.memory >= 90 else "#cc8800" if m.memory >= 70 else "#00aa44"
+    cpu_col  = "#ff4560" if m.cpu >= 90 else "#ffb300" if m.cpu >= 70 else "#00e676"
+    mem_col  = "#ff4560" if m.memory >= 90 else "#ffb300" if m.memory >= 70 else "#00e676"
 
     st.markdown(f"""
-    <div style="background:#161b22; border:1px solid {color}; border-left:4px solid {color};
-                border-radius:10px; padding:14px; margin:4px 0;">
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-            <span style="font-weight:700; color:#cdd9e5; font-size:14px;">{icon} {hostname}</span>
-            <span style="font-size:11px; color:{color}; font-weight:600;">{status.upper()}</span>
+    <div style="background:linear-gradient(145deg,#080e1a,#0d1626);
+                border:1px solid {color}44; border-left:3px solid {color};
+                border-radius:14px; padding:16px 18px; margin:6px 0;
+                box-shadow:0 4px 16px rgba(0,0,0,.35),0 0 24px {color}0a;
+                transition:all .2s ease;">
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:10px;">
+            <div>
+                <span style="font-weight:700; color:#e8f0fc; font-size:14px; letter-spacing:-.01em;">{icon} {hostname}</span>
+                <div style="font-size:11px; color:#4a617a; margin-top:2px; font-family:'JetBrains Mono',monospace;">
+                    {'✅ Reachable' if reachable else '❌ Unreachable'}
+                </div>
+            </div>
+            <div style="background:{color}18; border:1px solid {color}44; border-radius:20px;
+                        padding:3px 10px; font-size:10px; color:{color}; font-weight:700;
+                        letter-spacing:.06em; font-family:'JetBrains Mono',monospace;">
+                {status.upper()}
+            </div>
         </div>
-        <div style="font-size:11px; color:#8b949e; margin-bottom:6px;">
-            {'✅ Reachable' if reachable else '❌ Unreachable'} &nbsp;|&nbsp; Health: {score:.0f}%
+        <div style="display:flex; justify-content:space-between; margin-bottom:8px;">
+            <span style="font-size:10px; color:#4a617a; font-weight:600; letter-spacing:.05em; text-transform:uppercase;">HEALTH</span>
+            <span style="font-size:13px; font-weight:800; color:{color};">{score:.0f}%</span>
         </div>
-        <div style="font-size:11px; color:#8b949e; margin:2px 0;">CPU</div>
-        <div style="background:#30363d; border-radius:3px; height:6px; margin-bottom:4px;">
-            <div style="background:{cpu_col}; width:{min(cpu_bar,100)}%; height:6px; border-radius:3px;"></div>
+        <div style="font-size:10.5px; color:#4a617a; margin-bottom:4px; display:flex; justify-content:space-between;">
+            <span>CPU</span><span style="color:#8ba3c0;">{m.cpu:.1f}%</span>
         </div>
-        <div style="font-size:11px; color:#8b949e; margin:2px 0;">Memory</div>
-        <div style="background:#30363d; border-radius:3px; height:6px; margin-bottom:6px;">
-            <div style="background:{mem_col}; width:{min(mem_bar,100)}%; height:6px; border-radius:3px;"></div>
+        <div style="background:#0d1626; border-radius:4px; height:5px; margin-bottom:8px; overflow:hidden;">
+            <div style="background:linear-gradient(90deg,{cpu_col},{cpu_col}aa); width:{min(cpu_bar,100)}%; height:5px; border-radius:4px; transition:width .3s ease;"></div>
         </div>
-        <div style="font-size:11px; color:#8b949e;">
-            CPU {m.cpu:.1f}% &nbsp;|&nbsp; Mem {m.memory:.1f}%
-            &nbsp;|&nbsp; Lat {m.latency_ms:.0f}ms &nbsp;|&nbsp; Loss {m.packet_loss_pct:.2f}%
+        <div style="font-size:10.5px; color:#4a617a; margin-bottom:4px; display:flex; justify-content:space-between;">
+            <span>MEM</span><span style="color:#8ba3c0;">{m.memory:.1f}%</span>
+        </div>
+        <div style="background:#0d1626; border-radius:4px; height:5px; margin-bottom:10px; overflow:hidden;">
+            <div style="background:linear-gradient(90deg,{mem_col},{mem_col}aa); width:{min(mem_bar,100)}%; height:5px; border-radius:4px;"></div>
+        </div>
+        <div style="font-size:10.5px; color:#4a617a; font-family:'JetBrains Mono',monospace; display:flex; gap:10px; flex-wrap:wrap;">
+            <span>⏱ {m.latency_ms:.0f}ms</span>
+            <span>📉 {m.packet_loss_pct:.2f}%</span>
         </div>
     </div>""", unsafe_allow_html=True)
 
@@ -516,16 +535,21 @@ def _render_approval_card(run_id: str, data: dict) -> None:
 
     st.markdown(f"""
     <div class="approval-card">
-        <div style="font-size:16px; font-weight:700; color:#cc8800;">
-            {sev_icon} APPROVAL REQUIRED — {run.anomaly_type.replace('_',' ').upper()}
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
+            <span style="background:rgba(255,179,0,.15);border:1px solid rgba(255,179,0,.4);
+                         border-radius:6px;padding:3px 10px;font-size:10px;font-weight:700;
+                         color:#ffb300;letter-spacing:.08em;font-family:'JetBrains Mono',monospace;">
+                ⚡ APPROVAL REQUIRED</span>
+            <span style="font-size:13px;font-weight:700;color:#e8f0fc;letter-spacing:-.01em;">
+                {run.anomaly_type.replace('_',' ').upper()}</span>
         </div>
-        <div style="font-size:13px; color:#cdd9e5; margin-top:6px;">
-            {a_desc}
+        <div style="font-size:14px;color:#c8d6e8;margin-top:6px;font-weight:500;">
+            {sev_icon} {a_desc}
         </div>
-        <div style="font-size:12px; color:#8b949e; margin-top:4px;">
-            Target: <b style="color:#cdd9e5;">{headline_target}</b> &nbsp;|&nbsp;
-            State: <b style="color:#cc8800;">{a_state or 'n/a'}</b> &nbsp;|&nbsp;
-            Incident: <b style="color:#cdd9e5;">{run.incident_id}</b>
+        <div style="font-size:11.5px;color:#4a617a;margin-top:8px;display:flex;gap:16px;flex-wrap:wrap;">
+            <span>🖧 Target: <b style="color:#e8f0fc;">{headline_target}</b></span>
+            <span>⚠️ State: <b style="color:#ffb300;">{a_state or 'n/a'}</b></span>
+            <span>🔖 Incident: <b style="color:#8ba3c0;">{run.incident_id}</b></span>
         </div>
     </div>""", unsafe_allow_html=True)
 
@@ -595,19 +619,43 @@ def _render_approval_card(run_id: str, data: dict) -> None:
 
 # ── SIDEBAR ───────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("## 🧠 NetBrain AI")
-    st.caption("Autonomous NOC Platform")
-    st.divider()
+    st.markdown(
+        """<div style="padding:16px 10px 12px;text-align:center;">
+             <div style="font-size:11px;letter-spacing:.25em;font-weight:700;color:#4d8fff;
+                         font-family:'JetBrains Mono',monospace;margin-bottom:4px;">◈ NETBRAIN</div>
+             <div style="font-size:22px;font-weight:900;letter-spacing:-.03em;
+                         background:linear-gradient(135deg,#00d4ff,#4d8fff);
+                         -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+                         background-clip:text;font-family:'Space Grotesk','Inter',sans-serif;">
+               Network AI</div>
+             <div style="font-size:9px;color:#4a617a;letter-spacing:.15em;font-weight:600;
+                         font-family:'JetBrains Mono',monospace;margin-top:3px;">
+               AUTONOMOUS NOC PLATFORM</div>
+           </div>
+           <div style="height:1px;background:linear-gradient(90deg,transparent,#4d8fff44,transparent);
+                       margin:0 -10px 14px;"></div>""",
+        unsafe_allow_html=True,
+    )
 
     # Health score ring
     op_summary = orchestrator.state.get_operational_summary()
     score = op_summary.get("operational_score", 100)
-    score_color = "#cc0000" if score < 60 else "#cc8800" if score < 80 else "#00aa44"
+    score_color = "#ff4560" if score < 60 else "#ffb300" if score < 80 else "#00e676"
+    _score_label = "CRITICAL" if score < 60 else "DEGRADED" if score < 80 else "HEALTHY"
     st.markdown(
-        f"""<div style="text-align:center; padding:12px; background:#161b22;
-                        border-radius:8px; border:2px solid {score_color}33; margin-bottom:8px;">
-                <div style="font-size:38px; font-weight:700; color:{score_color};">{score:.0f}</div>
-                <div style="font-size:11px; color:#8b949e; letter-spacing:1px;">HEALTH SCORE</div>
+        f"""<div style="text-align:center;padding:14px 10px;
+                        background:linear-gradient(145deg,#080e1a,#0d1626);
+                        border-radius:14px;border:1px solid {score_color}33;
+                        border-top:2px solid {score_color};margin-bottom:10px;
+                        box-shadow:0 4px 20px rgba(0,0,0,.3),0 0 30px {score_color}08;">
+                <div style="font-size:42px;font-weight:900;color:{score_color};
+                            letter-spacing:-.04em;line-height:1;
+                            font-family:'Space Grotesk','Inter',sans-serif;">{score:.0f}</div>
+                <div style="font-size:9px;color:{score_color}88;letter-spacing:.12em;
+                            font-weight:700;margin-top:4px;font-family:'JetBrains Mono',monospace;">
+                    {_score_label}</div>
+                <div style="font-size:9px;color:#4a617a;letter-spacing:.08em;
+                            margin-top:1px;font-family:'JetBrains Mono',monospace;">HEALTH SCORE</div>
             </div>""",
         unsafe_allow_html=True,
     )
@@ -619,19 +667,80 @@ with st.sidebar:
     active_wf        = len(tracker.get_active_runs())
     pending_approvals_count = len(getattr(monitor, "pending_approvals", {}))
 
-    c1, c2 = st.columns(2)
-    c1.metric("Incidents",  incidents_open)
-    c2.metric("Anomalies",  anomaly_count)
-    c1.metric("Workflows",  active_wf)
-    c2.metric("Approvals",  pending_approvals_count)
+    _inc_color  = "#ff4560" if incidents_open  > 0 else "#00e676"
+    _ano_color  = "#ffb300" if anomaly_count   > 0 else "#00e676"
+    _wf_color   = "#4d8fff"
+    _apr_color  = "#ff4560" if pending_approvals_count > 0 else "#4a617a"
+
+    st.markdown(
+        f"""
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:10px 0;">
+          <div style="background:linear-gradient(145deg,#080e1a,#0d1626);
+                      border:1px solid {_inc_color}44;border-top:2px solid {_inc_color};
+                      border-radius:10px;padding:12px 10px;text-align:center;">
+            <div style="font-size:26px;font-weight:900;color:{_inc_color};
+                        font-family:'Space Grotesk','Inter',sans-serif;line-height:1;">
+              {incidents_open}</div>
+            <div style="font-size:9px;color:#4a617a;letter-spacing:.1em;
+                        font-weight:700;margin-top:4px;font-family:'JetBrains Mono',monospace;">
+              INCIDENTS</div>
+          </div>
+          <div style="background:linear-gradient(145deg,#080e1a,#0d1626);
+                      border:1px solid {_ano_color}44;border-top:2px solid {_ano_color};
+                      border-radius:10px;padding:12px 10px;text-align:center;">
+            <div style="font-size:26px;font-weight:900;color:{_ano_color};
+                        font-family:'Space Grotesk','Inter',sans-serif;line-height:1;">
+              {anomaly_count}</div>
+            <div style="font-size:9px;color:#4a617a;letter-spacing:.1em;
+                        font-weight:700;margin-top:4px;font-family:'JetBrains Mono',monospace;">
+              ANOMALIES</div>
+          </div>
+          <div style="background:linear-gradient(145deg,#080e1a,#0d1626);
+                      border:1px solid {_wf_color}44;border-top:2px solid {_wf_color};
+                      border-radius:10px;padding:12px 10px;text-align:center;">
+            <div style="font-size:26px;font-weight:900;color:{_wf_color};
+                        font-family:'Space Grotesk','Inter',sans-serif;line-height:1;">
+              {active_wf}</div>
+            <div style="font-size:9px;color:#4a617a;letter-spacing:.1em;
+                        font-weight:700;margin-top:4px;font-family:'JetBrains Mono',monospace;">
+              WORKFLOWS</div>
+          </div>
+          <div style="background:linear-gradient(145deg,#080e1a,#0d1626);
+                      border:1px solid {_apr_color}44;border-top:2px solid {_apr_color};
+                      border-radius:10px;padding:12px 10px;text-align:center;">
+            <div style="font-size:26px;font-weight:900;color:{_apr_color};
+                        font-family:'Space Grotesk','Inter',sans-serif;line-height:1;">
+              {pending_approvals_count}</div>
+            <div style="font-size:9px;color:#4a617a;letter-spacing:.1em;
+                        font-weight:700;margin-top:4px;font-family:'JetBrains Mono',monospace;">
+              APPROVALS</div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     if pending_approvals_count:
-        st.warning(f"⚠️ {pending_approvals_count} fix(es) awaiting approval")
+        st.markdown(
+            f"""<div style="background:linear-gradient(135deg,#ff456022,#ff456008);
+                            border:1px solid #ff456066;border-left:3px solid #ff4560;
+                            border-radius:8px;padding:8px 12px;margin-top:4px;
+                            font-size:11px;color:#ff4560;font-weight:600;
+                            font-family:'JetBrains Mono',monospace;">
+                  ⚠ {pending_approvals_count} fix(es) awaiting approval
+                </div>""",
+            unsafe_allow_html=True,
+        )
 
     st.divider()
 
     # Navigation
-    st.markdown("**NAVIGATION**")
+    st.markdown(
+        "<div style='font-size:10px;font-weight:700;letter-spacing:.12em;color:#4a617a;"
+        "text-transform:uppercase;margin-bottom:6px;font-family:\"JetBrains Mono\",monospace;'>"
+        "Navigation</div>",
+        unsafe_allow_html=True,
+    )
     current_ws = st.session_state["workspace"]
     for ws_id, icon, label in WORKSPACES:
         badge = f" ({pending_approvals_count})" if ws_id == "Workflows" and pending_approvals_count else ""
@@ -642,7 +751,12 @@ with st.sidebar:
             st.rerun()
 
     st.divider()
-    st.markdown("**SYSTEM**")
+    st.markdown(
+        "<div style='font-size:10px;font-weight:700;letter-spacing:.12em;color:#4a617a;"
+        "text-transform:uppercase;margin-bottom:6px;font-family:\"JetBrains Mono\",monospace;'>"
+        "System</div>",
+        unsafe_allow_html=True,
+    )
     mode      = "🟢 LIVE" if orchestrator.telemetry.live_mode else "🔵 SIM"
     ai_status = "🟢 AI" if _resolve_api_key() else "🟡 AI"
     st.caption(f"{mode} | {ai_status}")
@@ -691,7 +805,12 @@ with st.sidebar:
 
     # ── Tunnel / GNS3 connection status ──────────────────────────────────────
     st.divider()
-    st.markdown("**GNS3 / TUNNEL**")
+    st.markdown(
+        "<div style='font-size:10px;font-weight:700;letter-spacing:.12em;color:#4a617a;"
+        "text-transform:uppercase;margin-bottom:6px;font-family:\"JetBrains Mono\",monospace;'>"
+        "GNS3 / Tunnel</div>",
+        unsafe_allow_html=True,
+    )
     gns3_engine = getattr(orchestrator, "gns3", None)
     gns3_host, gns3_port = _resolve_gns3_endpoint()
     tunnel_url = os.environ.get("GNS3_TUNNEL_URL", "") or ""
@@ -800,48 +919,56 @@ if workspace == "dashboard":
     anomalies   = orchestrator.telemetry.detect_anomalies()
 
     # ── Top status ribbon ─────────────────────────────────────────────────────
-    score_color = "#cc0000" if score < 60 else "#cc8800" if score < 80 else "#00aa44"
+    score_color = "#ff4560" if score < 60 else "#ffb300" if score < 80 else "#00e676"
     pending_cnt = len(getattr(monitor, "pending_approvals", {}))
+    _inc_color  = "#ff4560" if open_inc else "#1c2d44"
+    _anom_color = "#ffb300" if anomalies else "#1c2d44"
+    _pend_color = "#ffb300" if pending_cnt else "#1c2d44"
+
+    def _stat_card(value, label, accent, icon=""):
+        return f"""
+        <div style="flex:1;min-width:130px;background:linear-gradient(145deg,#080e1a,#0d1626);
+                    border:1px solid {accent}33;border-left:3px solid {accent};border-radius:14px;
+                    padding:16px 18px;position:relative;overflow:hidden;
+                    box-shadow:0 4px 20px rgba(0,0,0,.3),0 0 30px {accent}08;">
+            <div style="position:absolute;top:0;right:0;width:60px;height:60px;
+                        background:radial-gradient(circle at 80% 20%,{accent}10,transparent 70%);"></div>
+            <div style="font-size:30px;font-weight:900;color:{accent};letter-spacing:-.03em;
+                        font-family:'Space Grotesk','Inter',sans-serif;">{value}</div>
+            <div style="font-size:10px;color:#4a617a;letter-spacing:.1em;text-transform:uppercase;
+                        font-weight:700;margin-top:4px;font-family:'JetBrains Mono',monospace;">
+                {icon} {label}</div>
+        </div>"""
+
     st.markdown(f"""
-    <div style="display:flex; gap:10px; margin-bottom:16px; flex-wrap:wrap;">
-        <div style="flex:1; min-width:120px; background:#161b22; border:1px solid {score_color};
-                    border-radius:8px; padding:12px; text-align:center;">
-            <div style="font-size:28px; font-weight:700; color:{score_color};">{score:.0f}%</div>
-            <div style="font-size:11px; color:#8b949e;">HEALTH SCORE</div>
-        </div>
-        <div style="flex:1; min-width:120px; background:#161b22; border:1px solid {'#cc0000' if open_inc else '#30363d'};
-                    border-radius:8px; padding:12px; text-align:center;">
-            <div style="font-size:28px; font-weight:700; color:{'#cc0000' if open_inc else '#cdd9e5'};">{open_inc}</div>
-            <div style="font-size:11px; color:#8b949e;">OPEN INCIDENTS</div>
-        </div>
-        <div style="flex:1; min-width:120px; background:#161b22; border:1px solid {'#cc8800' if anomalies else '#30363d'};
-                    border-radius:8px; padding:12px; text-align:center;">
-            <div style="font-size:28px; font-weight:700; color:{'#cc8800' if anomalies else '#cdd9e5'};">{len(anomalies)}</div>
-            <div style="font-size:11px; color:#8b949e;">ANOMALIES</div>
-        </div>
-        <div style="flex:1; min-width:120px; background:#161b22; border:1px solid {'#cc8800' if pending_cnt else '#30363d'};
-                    border-radius:8px; padding:12px; text-align:center;">
-            <div style="font-size:28px; font-weight:700; color:{'#cc8800' if pending_cnt else '#cdd9e5'};">{pending_cnt}</div>
-            <div style="font-size:11px; color:#8b949e;">AWAITING APPROVAL</div>
-        </div>
-        <div style="flex:1; min-width:120px; background:#161b22; border:1px solid #30363d;
-                    border-radius:8px; padding:12px; text-align:center;">
-            <div style="font-size:28px; font-weight:700; color:#cdd9e5;">{st.session_state['total_fixes_executed']}</div>
-            <div style="font-size:11px; color:#8b949e;">FIXES APPLIED</div>
-        </div>
+    <div style="display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap;">
+        {_stat_card(f"{score:.0f}%", "Health Score", score_color, "❤")}
+        {_stat_card(open_inc, "Open Incidents", _inc_color, "🚨")}
+        {_stat_card(len(anomalies), "Anomalies", _anom_color, "⚡")}
+        {_stat_card(pending_cnt, "Awaiting Approval", _pend_color, "⏳")}
+        {_stat_card(st.session_state['total_fixes_executed'], "Fixes Applied", "#00e676", "✅")}
     </div>""", unsafe_allow_html=True)
 
     # ── Alert ticker ──────────────────────────────────────────────────────────
     live_alerts = st.session_state["live_alerts"]
     critical_alerts = [a for a in live_alerts if a["severity"] in ("critical", "high")]
     if critical_alerts:
-        msgs = "  &nbsp;|&nbsp;  ".join(
-            f"🔴 {a['message']} ({a['timestamp'][-8:]})" for a in critical_alerts[:4]
+        msgs = "  &nbsp;·&nbsp;  ".join(
+            f"🔴 {a['message']} <span style='color:#4a617a'>({a['timestamp'][-8:]})</span>"
+            for a in critical_alerts[:4]
         )
-        st.markdown(f"""<div style="background:#1a0000; border:1px solid #cc000066; border-radius:6px;
-            padding:8px 14px; font-size:12px; color:#ff6666; margin-bottom:12px;
-            white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
-            🚨 LIVE ALERTS &nbsp;|&nbsp; {msgs}</div>""", unsafe_allow_html=True)
+        st.markdown(f"""
+        <div style="background:linear-gradient(135deg,rgba(255,69,96,.12),rgba(255,69,96,.04));
+                    border:1px solid rgba(255,69,96,.3);border-radius:10px;
+                    padding:10px 16px;font-size:12px;color:#ff7a8a;margin-bottom:14px;
+                    display:flex;align-items:center;gap:10px;overflow:hidden;
+                    box-shadow:0 0 30px rgba(255,69,96,.06);">
+            <span style="background:rgba(255,69,96,.2);border:1px solid rgba(255,69,96,.4);
+                         border-radius:6px;padding:2px 8px;font-size:10px;font-weight:700;
+                         color:#ff4560;letter-spacing:.08em;white-space:nowrap;
+                         font-family:'JetBrains Mono',monospace;">🚨 LIVE</span>
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{msgs}</span>
+        </div>""", unsafe_allow_html=True)
 
     # ── Pending approvals banner ───────────────────────────────────────────────
     if pending_cnt:
@@ -1259,8 +1386,8 @@ elif workspace == "admin":
     st.markdown("## ⚙️ Administration")
     st.caption("Configure connection settings, credentials, thresholds, and system actions.")
 
-    tab_conn, tab_creds, tab_thresh, tab_actions, tab_aicfg, tab_devices = st.tabs(
-        ["Connection", "Credentials", "Thresholds", "System Actions", "🧠 AI Config", "🖧 Devices"]
+    tab_conn, tab_creds, tab_thresh, tab_actions, tab_aicfg, tab_devices, tab_topology = st.tabs(
+        ["Connection", "Credentials", "Thresholds", "System Actions", "🧠 AI Config", "🖧 Devices", "🗺️ Network Topology"]
     )
 
     # ── Connection tab ────────────────────────────────────────────────────────
@@ -1958,7 +2085,23 @@ GROQ_API_KEY = "your-key-here"
             </style>
             """, unsafe_allow_html=True)
 
-            # Robot icon overlay using a label trick
+            # ════════════════════════════════════════════════════════════════
+            # DEVICE INFO — collapsible, select devices to scope AI
+            # ════════════════════════════════════════════════════════════════
+            _di_approved = disc.get_approved() if DISC_OK else []
+
+            # Session-state for scope selection (persists across reruns)
+            _scope_key = "ai_scope_selected_ips"
+            if _scope_key not in st.session_state:
+                st.session_state[_scope_key] = set()
+
+            # Auto-clean: remove disapproved IPs from scope
+            _approved_ips_now = {d.ip for d in _di_approved}
+            st.session_state[_scope_key] = {
+                ip for ip in st.session_state[_scope_key] if ip in _approved_ips_now
+            }
+
+            # ── Robot icon overlay using a label trick ────────────────────
             _aic1, _aic2 = st.columns([20, 1])
             with _aic1:
                 st.markdown(
@@ -1972,31 +2115,89 @@ GROQ_API_KEY = "your-key-here"
                     key="devices_ai_input",
                 )
 
-            # Handle submission — Enter key submits automatically via Streamlit
+            # ── Scope indicator banner — always visible ───────────────────
+            _scope_ips = st.session_state[_scope_key]
+            _scope_count = len(_scope_ips)
+            if _scope_count == 0:
+                _scope_msg = (
+                    "🛑 **AI Scope:** No devices selected → AI is **disabled**.<br>"
+                    "<span style='color:#94a3b8;font-size:.78rem'>"
+                    "Open <b>📋 Device Info</b> below and check at least one device "
+                    "to enable the AI Assistant.</span>"
+                )
+                _scope_color = "#dc2626"
+            else:
+                _scope_names = ", ".join(
+                    (d.hostname or d.ip) for d in _di_approved if d.ip in _scope_ips
+                )
+                _scope_msg = (
+                    f"🎯 **AI Scope:** {_scope_count} device{'s' if _scope_count != 1 else ''} "
+                    f"selected → <code style='color:#22d3ee'>{_scope_names}</code><br>"
+                    f"<span style='color:#94a3b8;font-size:.78rem'>"
+                    f"AI will run commands ONLY on these devices. Other devices will not be touched.</span>"
+                )
+                _scope_color = "#16a34a"
+
+            st.markdown(
+                f"<div style='background:#0c1826;border-left:3px solid {_scope_color};"
+                f"border-radius:6px;padding:.55rem .9rem;margin:.5rem 0 .6rem 0;"
+                f"color:#cbd5e1;font-size:.85rem'>{_scope_msg}</div>",
+                unsafe_allow_html=True,
+            )
+
+            # ── AI submission — STAGE 1: Propose Plan ─────────────────────
             if _ai_q and _ai_q != st.session_state.get("devices_ai_last_q"):
                 st.session_state["devices_ai_last_q"] = _ai_q
-                # Build context from approved devices
-                try:
-                    _d_ctx = ""
-                    if DISC_OK:
-                        _devs = disc.get_approved()
-                        if _devs:
-                            _d_ctx = "Approved devices: " + ", ".join(
-                                f"{d.hostname or d.ip} ({d.ip}, {d.device_type})"
-                                for d in _devs
-                            ) + "\n\n"
-                except Exception:
-                    _d_ctx = ""
-                with st.spinner(""):
-                    _ai_ans = call_ai(
-                        "You are NetBrain AI — a senior network engineer. "
-                        "Be concise, technical, and use bullet points for lists.\n\n"
-                        + _d_ctx
-                        + f"Question: {_ai_q}"
-                    ) or "AI unavailable — check GROQ_API_KEY."
-                st.session_state["devices_ai_last_ans"] = _ai_ans
 
-            # Show answer
+                # ── HARD GATE: no selection = no AI action ─────────────────
+                if not _scope_ips:
+                    st.session_state["devices_ai_last_ans"] = (
+                        "🛑 **AI is disabled — no devices selected.**\n\n"
+                        "Open the **📋 Device Info** table below and check at least one "
+                        "device to scope the AI. AI will not run on any device until you "
+                        "explicitly select one."
+                    )
+                    st.session_state["devices_ai_last_result"] = {}
+                    st.session_state["devices_ai_plan"] = None
+                else:
+                    _targets = [d for d in _di_approved if d.ip in _scope_ips]
+                    try:
+                        _ie_scope = IntentEngine(
+                            ai_call=call_ai,
+                            approved_devices=_targets,
+                        )
+                        _scope_label = (
+                            ", ".join((d.hostname or d.ip) for d in _targets)
+                            if len(_targets) <= 5
+                            else f"{len(_targets)} devices"
+                        )
+                        with st.spinner(f"🧠 NetBrain AI thinking about {_scope_label}…"):
+                            _ie_res = _ie_scope.propose_plan(
+                                query=_ai_q,
+                                devices=_targets,
+                            )
+                        st.session_state["devices_ai_last_ans"] = (
+                            IntentEngine.format_for_chat(_ie_res, _scope_label)
+                        )
+                        # Save plan + result for stage 2
+                        st.session_state["devices_ai_plan"] = (
+                            _ie_res.plan if _ie_res.plan_pending else None
+                        )
+                        st.session_state["devices_ai_last_result"] = {
+                            "plan_pending":   _ie_res.plan_pending,
+                            "needs_approval": _ie_res.needs_approval,
+                            "fix_commands":   _ie_res.fix_commands,
+                            "target_ips":     [d.ip for d in _targets],
+                            "scope_label":    _scope_label,
+                        }
+                    except Exception as _ie_err:
+                        st.session_state["devices_ai_last_ans"] = (
+                            f"⚠️ Engine error: {_ie_err}"
+                        )
+                        st.session_state["devices_ai_last_result"] = {}
+                        st.session_state["devices_ai_plan"] = None
+
+            # ── Show answer ───────────────────────────────────────────────
             if st.session_state.get("devices_ai_last_ans") and st.session_state.get("devices_ai_last_q"):
                 _q_display = st.session_state["devices_ai_last_q"]
                 _a_display = st.session_state["devices_ai_last_ans"]
@@ -2009,6 +2210,255 @@ GROQ_API_KEY = "your-key-here"
                     f"</div>",
                     unsafe_allow_html=True
                 )
+
+                _ai_pend = st.session_state.get("devices_ai_last_result", {})
+
+                # ── STAGE 1 APPROVAL: Plan pending → Run Plan / Cancel ────
+                if _ai_pend.get("plan_pending") and st.session_state.get("devices_ai_plan"):
+                    _pcol1, _pcol2 = st.columns(2)
+                    with _pcol1:
+                        if st.button(
+                            f"✅ Run Plan on {_ai_pend.get('scope_label', 'devices')}",
+                            key="devices_ai_run_plan",
+                            type="primary",
+                            use_container_width=True,
+                        ):
+                            _plan = st.session_state["devices_ai_plan"]
+                            _ips = _ai_pend["target_ips"]
+                            _tdevs = [d for d in _di_approved if d.ip in _ips]
+                            try:
+                                _ie2 = IntentEngine(
+                                    ai_call=call_ai,
+                                    approved_devices=_tdevs,
+                                )
+                                with st.spinner(
+                                    f"🔌 Running plan on {_ai_pend['scope_label']} & analyzing…"
+                                ):
+                                    _ie_res2 = _ie2.execute_plan(
+                                        plan=_plan,
+                                        all_devices=_tdevs,
+                                    )
+                                st.session_state["devices_ai_last_ans"] = (
+                                    IntentEngine.format_for_chat(_ie_res2, _ai_pend["scope_label"])
+                                )
+                                st.session_state["devices_ai_last_result"] = {
+                                    "plan_pending":   False,
+                                    "needs_approval": _ie_res2.needs_approval,
+                                    "fix_commands":   _ie_res2.fix_commands,
+                                    "target_ips":     _ai_pend["target_ips"],
+                                    "scope_label":    _ai_pend["scope_label"],
+                                }
+                                st.session_state["devices_ai_plan"] = None
+                            except Exception as _ee:
+                                st.session_state["devices_ai_last_ans"] = (
+                                    f"⚠️ Execute error: {_ee}"
+                                )
+                            st.rerun()
+
+                    with _pcol2:
+                        if st.button(
+                            "❌ Cancel Plan",
+                            key="devices_ai_cancel_plan",
+                            use_container_width=True,
+                        ):
+                            st.session_state["devices_ai_last_ans"] = (
+                                "❌ Plan cancelled. No commands were run."
+                            )
+                            st.session_state["devices_ai_last_result"] = {}
+                            st.session_state["devices_ai_plan"] = None
+                            st.rerun()
+
+                # ── STAGE 2 APPROVAL: Config fix pending → Deploy / Discard ──
+                elif _ai_pend.get("needs_approval") and _ai_pend.get("fix_commands"):
+                    _pcol1, _pcol2 = st.columns(2)
+                    with _pcol1:
+                        if st.button(
+                            f"✅ Deploy Fix to {_ai_pend.get('scope_label', 'devices')}",
+                            key="devices_ai_deploy",
+                            type="primary",
+                            use_container_width=True,
+                        ):
+                            _ips = _ai_pend["target_ips"]
+                            _tdevs = [d for d in _di_approved if d.ip in _ips]
+                            _dep_log = []
+                            for _td in _tdevs:
+                                with st.spinner(f"⚙️ Deploying on {_td.hostname or _td.ip}…"):
+                                    try:
+                                        from netmiko import ConnectHandler as _DCH
+                                        _dcfg = dict(
+                                            device_type=_td.device_type or "cisco_ios",
+                                            host=_td.ip,
+                                            port=int(_td.ssh_port or 22),
+                                            username=os.environ.get("GNS3_SSH_USER", "admin"),
+                                            password=os.environ.get("GNS3_SSH_PASS", "admin"),
+                                            timeout=30, auth_timeout=30,
+                                            fast_cli=False, global_delay_factor=2,
+                                        )
+                                        _dsec = os.environ.get("GNS3_SSH_SECRET", "")
+                                        if _dsec:
+                                            _dcfg["secret"] = _dsec
+                                        _dconn = _DCH(**_dcfg)
+                                        try:
+                                            _dconn.enable()
+                                        except Exception:
+                                            pass
+                                        _cfgc = [c.replace("[CONFIG]", "").strip()
+                                                 for c in _ai_pend["fix_commands"] if "[CONFIG]" in c]
+                                        _execc = [c.replace("[EXEC]", "").strip()
+                                                  for c in _ai_pend["fix_commands"] if "[EXEC]" in c]
+                                        _logs = []
+                                        for _ec in _execc:
+                                            _o = _dconn.send_command(_ec, read_timeout=20)
+                                            _logs.append(f"$ {_ec}\n{_o}")
+                                        if _cfgc:
+                                            _o = _dconn.send_config_set(_cfgc)
+                                            _logs.append(f"[CONFIG]\n{_o}")
+                                        _dconn.disconnect()
+                                        _dep_log.append(
+                                            f"✅ **{_td.hostname or _td.ip}**\n```\n"
+                                            + "\n".join(_logs) + "\n```"
+                                        )
+                                    except Exception as _de:
+                                        _dep_log.append(
+                                            f"❌ **{_td.hostname or _td.ip}**: {_de}"
+                                        )
+                            st.session_state["devices_ai_last_ans"] = (
+                                "**✅ Deployment complete**\n\n" + "\n\n".join(_dep_log)
+                            )
+                            st.session_state["devices_ai_last_result"] = {}
+                            st.rerun()
+                    with _pcol2:
+                        if st.button(
+                            "❌ Discard Fix",
+                            key="devices_ai_discard",
+                            use_container_width=True,
+                        ):
+                            st.session_state["devices_ai_last_ans"] = (
+                                "❌ Fix discarded. No changes were made."
+                            )
+                            st.session_state["devices_ai_last_result"] = {}
+                            st.rerun()
+
+            # ════════════════════════════════════════════════════════════════
+            # DEVICE INFO — select devices to scope AI
+            # ════════════════════════════════════════════════════════════════
+            with st.expander(
+                f"📋 Device Info  ({len(_di_approved)} approved · "
+                f"{_scope_count} selected for AI scope)",
+                expanded=False,
+            ):
+                if not _di_approved:
+                    st.caption("No approved devices yet. Approve from the Pending section below.")
+                else:
+                    # ── Search + bulk actions row ──────────────────────────
+                    _di_sc1, _di_sc2, _di_sc3 = st.columns([3, 1, 1])
+                    with _di_sc1:
+                        _di_query = st.text_input(
+                            label="device_info_search",
+                            label_visibility="collapsed",
+                            placeholder="🔍  Search by hostname, IP, site, or city…",
+                            key="device_info_search_input",
+                        )
+                    with _di_sc2:
+                        if st.button("☑ Select All", key="di_select_all",
+                                     use_container_width=True):
+                            st.session_state[_scope_key] = set(_approved_ips_now)
+                            st.rerun()
+                    with _di_sc3:
+                        if st.button("✖ Clear", key="di_clear_all",
+                                     use_container_width=True):
+                            st.session_state[_scope_key] = set()
+                            st.rerun()
+
+                    _di_q = (_di_query or "").strip().lower()
+                    _di_filtered = [
+                        d for d in _di_approved
+                        if not _di_q
+                        or _di_q in (d.hostname or "").lower()
+                        or _di_q in d.ip.lower()
+                        or _di_q in (d.site_name or "").lower()
+                        or _di_q in (d.city or "").lower()
+                    ]
+
+                    if not _di_filtered:
+                        st.caption(f"No devices match '{_di_query}'.")
+                    else:
+                        # ── Table header ───────────────────────────────────
+                        _h0, _h1, _h2, _h3, _h4, _h5, _h6 = st.columns(
+                            [0.5, 1.7, 1.6, 1.2, 1.3, 1.7, 1.0]
+                        )
+                        _h0.markdown("<small style='color:#475569'><b>✓</b></small>", unsafe_allow_html=True)
+                        _h1.markdown("<small style='color:#475569'><b>HOSTNAME</b></small>", unsafe_allow_html=True)
+                        _h2.markdown("<small style='color:#475569'><b>IP ADDRESS</b></small>", unsafe_allow_html=True)
+                        _h3.markdown("<small style='color:#475569'><b>OEM</b></small>", unsafe_allow_html=True)
+                        _h4.markdown("<small style='color:#475569'><b>TYPE</b></small>", unsafe_allow_html=True)
+                        _h5.markdown("<small style='color:#475569'><b>SITE</b></small>", unsafe_allow_html=True)
+                        _h6.markdown("<small style='color:#475569'><b>STATUS</b></small>", unsafe_allow_html=True)
+                        st.markdown(
+                            "<hr style='margin:.2rem 0;border-color:#1e3a52'>",
+                            unsafe_allow_html=True,
+                        )
+
+                        # ── Table rows with checkboxes ─────────────────────
+                        for _d in _di_filtered:
+                            _sess = disc.get_session(_d.ip) if DISC_OK else None
+                            _live = bool(_sess and _sess.status in ("complete", "running"))
+                            _is_in_scope = _d.ip in st.session_state[_scope_key]
+                            _site_compact = (
+                                f"{_d.site_name} · {_d.city}"
+                                if _d.site_name else "—"
+                            )
+
+                            _c0, _c1, _c2, _c3, _c4, _c5, _c6 = st.columns(
+                                [0.5, 1.7, 1.6, 1.2, 1.3, 1.7, 1.0]
+                            )
+                            with _c0:
+                                _chk = st.checkbox(
+                                    _d.ip,
+                                    value=_is_in_scope,
+                                    key=f"di_chk_{_d.ip}",
+                                    label_visibility="collapsed",
+                                )
+                                if _chk and not _is_in_scope:
+                                    st.session_state[_scope_key].add(_d.ip)
+                                    st.rerun()
+                                elif not _chk and _is_in_scope:
+                                    st.session_state[_scope_key].discard(_d.ip)
+                                    st.rerun()
+                            _c1.markdown(
+                                f"<span style='color:#e2e8f0;font-weight:600;font-family:monospace;font-size:.85rem'>"
+                                f"{_d.hostname or '—'}</span>",
+                                unsafe_allow_html=True,
+                            )
+                            _c2.markdown(
+                                f"<span style='color:#94a3b8;font-family:monospace;font-size:.8rem'>{_d.ip}</span>",
+                                unsafe_allow_html=True,
+                            )
+                            _c3.markdown(
+                                f"<span style='color:#fbbf24;font-size:.8rem'>{_d.vendor or 'Unknown'}</span>",
+                                unsafe_allow_html=True,
+                            )
+                            _c4.markdown(
+                                f"<span style='color:#67e8f9;font-size:.78rem'>{_d.device_type or '—'}</span>",
+                                unsafe_allow_html=True,
+                            )
+                            _c5.markdown(
+                                f"<span style='color:#94a3b8;font-size:.78rem' "
+                                f"title='{_d.site_name}, {_d.city}, {_d.country}, {_d.region}'>"
+                                f"{_site_compact}</span>",
+                                unsafe_allow_html=True,
+                            )
+                            _c6.markdown(
+                                f"<span style='color:{'#4ade80' if _live else '#475569'};font-size:.78rem;font-weight:600'>"
+                                f"{'● Online' if _live else '○ Idle'}</span>",
+                                unsafe_allow_html=True,
+                            )
+
+                        st.caption(
+                            f"Showing {len(_di_filtered)} of {len(_di_approved)} approved devices · "
+                            f"{_scope_count} selected for AI scope. "
+                            "Devices disappear automatically when disapproved."
+                        )
 
             st.divider()
 
@@ -2069,10 +2519,13 @@ GROQ_API_KEY = "your-key-here"
                     "It will appear here within ~10 seconds."
                 )
             else:
+                from core.device_inventory_meta import REGIONS, countries_for_region
+
                 for dev in pending:
                     ports_str = ", ".join(str(p) for p in dev.open_ports) or "none detected"
                     _display_name = dev.hostname if dev.hostname else "Resolving name..."
                     _name_style = "color:#f1f5f9" if dev.hostname else "color:#94a3b8;font-style:italic"
+                    _vendor_str = dev.vendor or "Unknown"
                     with st.container():
                         st.markdown(f"""
                         <div class='dd-card dd-card-pending'>
@@ -2080,6 +2533,7 @@ GROQ_API_KEY = "your-key-here"
                           &nbsp;&nbsp;<span class='dd-ip'>{dev.ip}</span>
                           &nbsp;&nbsp;<span class='dd-badge dd-badge-pending'>⏳ PENDING</span>
                           <br><span class='dd-meta'>
+                            OEM: {_vendor_str} &nbsp;·&nbsp;
                             Type: {dev.device_type} &nbsp;·&nbsp;
                             Source: {dev.source} &nbsp;·&nbsp;
                             Open ports: {ports_str} &nbsp;·&nbsp;
@@ -2088,12 +2542,13 @@ GROQ_API_KEY = "your-key-here"
                         </div>
                         """, unsafe_allow_html=True)
 
+                        _form_open_key = f"approve_form_open_{dev.ip}"
+
                         btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 3])
                         with btn_col1:
                             if st.button(f"✅ Approve", key=f"approve_{dev.ip}",
                                          use_container_width=True, type="primary"):
-                                disc.approve_device(dev.ip, approved_by="admin")
-                                st.success(f"✅ {dev.ip} approved and added to inventory")
+                                st.session_state[_form_open_key] = True
                                 st.rerun()
                         with btn_col2:
                             if st.button(f"❌ Reject", key=f"reject_{dev.ip}",
@@ -2101,19 +2556,94 @@ GROQ_API_KEY = "your-key-here"
                                 disc.reject_device(dev.ip)
                                 st.rerun()
                         with btn_col3:
+                            _type_options = ["cisco_ios", "cisco_ios_xe", "cisco_nxos",
+                                              "juniper_junos", "arista_eos", "paloalto_panos",
+                                              "fortinet", "aruba_os", "linux", "cisco_ios_telnet"]
                             override_type = st.selectbox(
                                 "Override device type",
-                                ["cisco_ios", "cisco_iosxe", "cisco_nxos",
-                                 "juniper_junos", "arista_eos", "linux", "cisco_ios_telnet"],
+                                _type_options,
                                 key=f"dtype_{dev.ip}",
-                                index=["cisco_ios","cisco_iosxe","cisco_nxos",
-                                       "juniper_junos","arista_eos","linux",
-                                       "cisco_ios_telnet"].index(dev.device_type)
-                                       if dev.device_type in ["cisco_ios","cisco_iosxe","cisco_nxos",
-                                                               "juniper_junos","arista_eos","linux",
-                                                               "cisco_ios_telnet"] else 0,
+                                index=_type_options.index(dev.device_type)
+                                       if dev.device_type in _type_options else 0,
                             )
                             dev.device_type = override_type
+
+                        # ── Site metadata form — required before approval completes ──
+                        if st.session_state.get(_form_open_key):
+                            with st.container():
+                                st.markdown(
+                                    "<div style='background:#0c1826;border:1px solid #1e3a52;"
+                                    "border-radius:8px;padding:.75rem 1rem;margin:.4rem 0'>"
+                                    "<span style='color:#22d3ee;font-size:.78rem;font-weight:700;"
+                                    "text-transform:uppercase;letter-spacing:.04em'>"
+                                    "📍 Site Details Required to Approve</span></div>",
+                                    unsafe_allow_html=True,
+                                )
+                                _r1, _r2 = st.columns(2)
+                                with _r1:
+                                    _sel_region = st.selectbox(
+                                        "Region", REGIONS,
+                                        key=f"region_{dev.ip}",
+                                    )
+                                with _r2:
+                                    _country_opts = countries_for_region(_sel_region)
+                                    _sel_country = st.selectbox(
+                                        "Country", _country_opts,
+                                        key=f"country_{dev.ip}",
+                                    )
+                                _r3, _r4 = st.columns(2)
+                                with _r3:
+                                    _sel_city = st.text_input(
+                                        "City", key=f"city_{dev.ip}",
+                                        placeholder="e.g. Bengaluru",
+                                    )
+                                with _r4:
+                                    _sel_site = st.text_input(
+                                        "Site Name", key=f"site_{dev.ip}",
+                                        placeholder="e.g. DC-Blr-01",
+                                    )
+
+                                _fc1, _fc2 = st.columns(2)
+                                with _fc1:
+                                    if st.button(
+                                        "✅ Confirm Approval",
+                                        key=f"confirm_approve_{dev.ip}",
+                                        type="primary",
+                                        use_container_width=True,
+                                    ):
+                                        if not (_sel_region and _sel_country
+                                                and _sel_city.strip() and _sel_site.strip()):
+                                            st.error(
+                                                "All four fields (Region, Country, City, "
+                                                "Site Name) are required before approval."
+                                            )
+                                        else:
+                                            ok = disc.approve_device(
+                                                dev.ip,
+                                                approved_by="admin",
+                                                region=_sel_region,
+                                                country=_sel_country,
+                                                city=_sel_city.strip(),
+                                                site_name=_sel_site.strip(),
+                                            )
+                                            if ok:
+                                                st.session_state.pop(_form_open_key, None)
+                                                st.success(
+                                                    f"✅ {dev.ip} approved — "
+                                                    f"{_sel_site.strip()}, {_sel_city.strip()}, "
+                                                    f"{_sel_country}, {_sel_region}"
+                                                )
+                                                st.rerun()
+                                            else:
+                                                st.error("Approval failed — please retry.")
+                                with _fc2:
+                                    if st.button(
+                                        "✖ Cancel",
+                                        key=f"cancel_approve_{dev.ip}",
+                                        use_container_width=True,
+                                    ):
+                                        st.session_state.pop(_form_open_key, None)
+                                        st.rerun()
 
             st.divider()
 
@@ -2148,6 +2678,10 @@ GROQ_API_KEY = "your-key-here"
                         _health_cls  = {"CRITICAL":"health-critical","DEGRADED":"health-degraded","HEALTHY":"health-healthy"}.get(_health.upper(),"health-healthy")
 
                     _card_cls = "dd-card-trouble" if sess_status == "running" else "dd-card-approved"
+                    _site_str = (
+                        f"{dev.site_name}, {dev.city}, {dev.country} ({dev.region})"
+                        if dev.site_name else "Site: not set"
+                    )
 
                     st.markdown(f"""
                     <div class='dd-card {_card_cls}'>
@@ -2158,10 +2692,12 @@ GROQ_API_KEY = "your-key-here"
                       &nbsp;·&nbsp; Status: {sess_status or "idle"}
                       &nbsp;·&nbsp; Steps: {len(session.steps) if session else 0}</span>
                       <br><span class='dd-meta'>
+                        OEM: {dev.vendor or "Unknown"} &nbsp;·&nbsp;
                         Type: {dev.device_type} &nbsp;·&nbsp;
                         Ports: {", ".join(str(p) for p in dev.open_ports) or "—"} &nbsp;·&nbsp;
                         Added: {dev.first_seen}
                       </span>
+                      <br><span class='dd-meta'>📍 {_site_str}</span>
                     </div>
                     """, unsafe_allow_html=True)
 
@@ -2398,112 +2934,71 @@ GROQ_API_KEY = "your-key-here"
                                 )
 
                         else:
-                            # ── Normal AI chat — understand intent ────────────
-                            _dev_ctx = (
-                                f"Device: {dev.ip}  hostname={dev.hostname or dev.ip}  "
-                                f"type={dev.device_type}  ports={dev.open_ports}\n"
-                            )
-                            if session and session.output:
-                                _dev_ctx += f"\nLatest device output:\n{session.output[:2000]}"
-                            if session and session.ai_diagnosis:
-                                _dev_ctx += f"\nPrevious AI diagnosis:\n{session.ai_diagnosis[:1000]}"
-
-                            # AI is told to return commands in a structured way
-                            _nlp_sys = (
-                                "You are an AI network engineer embedded in NetBrain AI, "
-                                "with LIVE SSH access to the following device:\n"
-                                f"{_dev_ctx}\n\n"
-                                "When the operator asks you to CONFIGURE, DEPLOY, ADD, REMOVE, "
-                                "ENABLE, DISABLE or CHANGE anything on the router, you MUST:\n"
-                                "1. Explain what you will do in 1-2 sentences.\n"
-                                "2. List ALL required IOS commands, one per line, prefixed with "
-                                "[CONFIG] for config-mode commands or [EXEC] for exec-mode commands.\n"
-                                "3. End with exactly this line: APPROVAL_REQUIRED\n\n"
-                                "When the operator asks a READ-ONLY question (show, verify, explain, "
-                                "check, what is, why), just answer directly — no commands needed.\n\n"
-                                "Always be concise, use proper Cisco IOS format."
-                            )
-
-                            with st.spinner(f"🤖 AI Assistant thinking about {dev.ip}…"):
-                                try:
-                                    _raw_reply = call_ai(
-                                        _nlp_sys + f"\n\nOperator: {_ai_nlp_q}\nAI Assistant:"
+                            # ── Intent Engine — enterprise-grade NLP handler ──
+                            try:
+                                _ie = IntentEngine(
+                                    ai_call=call_ai,
+                                    approved_devices=disc.get_approved(),
+                                )
+                                with st.spinner(f"🧠 NetBrain AI working on {dev.ip}…"):
+                                    _ie_result: IntentResult = _ie.handle(
+                                        query=_ai_nlp_q,
+                                        primary_device=dev,
+                                        session_output=(session.output if session else ""),
+                                        session_diagnosis=(session.ai_diagnosis if session else ""),
                                     )
-                                except Exception as _nlp_err:
-                                    _raw_reply = f"AI unavailable: {_nlp_err}"
 
-                            if not _raw_reply:
-                                _raw_reply = "AI is unavailable. Please check your GROQ_API_KEY in Secrets."
+                                # If config change proposed — store for approval workflow
+                                if _ie_result.needs_approval and _ie_result.fix_commands:
+                                    st.session_state[_pending_key] = _ie_result.fix_commands
 
-                            # ── Parse AI response — extract commands if present ─
-                            if "APPROVAL_REQUIRED" in _raw_reply:
-                                _lines = _raw_reply.replace("APPROVAL_REQUIRED","").strip().splitlines()
-                                _cmds   = [l.strip() for l in _lines
-                                           if l.strip().startswith("[CONFIG]")
-                                           or l.strip().startswith("[EXEC]")]
-                                _explain = "\n".join(
-                                    l for l in _lines
-                                    if not l.strip().startswith("[CONFIG]")
-                                    and not l.strip().startswith("[EXEC]")
-                                ).strip()
-
-                                if _cmds:
-                                    # Store commands pending approval
-                                    st.session_state[_pending_key] = _cmds
-
-                                    # ── Take snapshot NOW before user approves ──
-                                    # Stored separately so it's ready the moment Deploy is clicked.
+                                    # Take pre-change snapshot
                                     _snap_key = f"ai_nlp_presnap_{dev.ip}"
-                                    _creds_snap = {
-                                        "username":      os.environ.get("GNS3_SSH_USER", "admin"),
-                                        "password":      os.environ.get("GNS3_SSH_PASS", "admin"),
-                                        "enable_secret": os.environ.get("GNS3_SSH_SECRET", ""),
-                                    }
                                     try:
                                         from netmiko import ConnectHandler as _CH
                                         _scfg = dict(
                                             device_type=dev.device_type or "cisco_ios",
                                             host=dev.ip,
                                             port=int(dev.ssh_port or 22),
-                                            username=_creds_snap["username"],
-                                            password=_creds_snap["password"],
+                                            username=os.environ.get("GNS3_SSH_USER", "admin"),
+                                            password=os.environ.get("GNS3_SSH_PASS", "admin"),
                                             timeout=60, auth_timeout=60,
                                             fast_cli=False, global_delay_factor=4,
                                         )
-                                        if _creds_snap["enable_secret"]:
-                                            _scfg["secret"] = _creds_snap["enable_secret"]
+                                        _sec = os.environ.get("GNS3_SSH_SECRET", "")
+                                        if _sec:
+                                            _scfg["secret"] = _sec
                                         _sc = _CH(**_scfg)
                                         try:
                                             _sc.enable()
                                         except Exception:
                                             pass
                                         _snap_raw = _sc.send_command(
-                                            "show running-config",
-                                            read_timeout=30, expect_string=r"#"
+                                            "show running-config", read_timeout=30, expect_string=r"#"
                                         )
                                         _sc.disconnect()
                                         st.session_state[_snap_key] = _snap_raw
-                                        _snap_status = "✅ Snapshot captured — " + str(len(_snap_raw.splitlines())) + " lines"
+                                        _snap_status = "✅ " + str(len(_snap_raw.splitlines())) + " lines captured"
                                     except Exception as _se:
                                         st.session_state[_snap_key] = ""
                                         _snap_status = "⚠️ Snapshot failed: " + str(_se)
 
-                                    _cmd_display = "\n".join(
-                                        c.replace("[CONFIG]","  ").replace("[EXEC]","  ")
-                                        for c in _cmds
-                                    )
-                                    _nlp_reply = (
-                                        f"{_explain}\n\n"
-                                        f"**Commands to be executed on {dev.hostname or dev.ip}:**\n"
-                                        f"```\n{_cmd_display}\n```\n\n"
-                                        f"📸 **Pre-change snapshot:** {_snap_status}\n\n"
-                                        "⚠️ **Click ✅ Deploy Now to apply or ❌ Cancel to abort.**"
-                                    )
-                                else:
-                                    _nlp_reply = _raw_reply.replace("APPROVAL_REQUIRED","").strip()
-                            else:
-                                # Read-only response — just show it
-                                _nlp_reply = _raw_reply
+                                    # Store rollback plan too
+                                    if _ie_result.rollback_commands:
+                                        st.session_state[f"ai_nlp_rollback_cmds_{dev.ip}"] = (
+                                            _ie_result.rollback_commands
+                                        )
+
+                                _nlp_reply = IntentEngine.format_for_chat(
+                                    _ie_result, dev.hostname or dev.ip
+                                )
+                                # Append snapshot status if config change
+                                if _ie_result.needs_approval and _ie_result.fix_commands:
+                                    _nlp_reply += f"\n\n📸 **Pre-change snapshot:** {_snap_status}"
+
+                            except Exception as _ie_err:
+                                logger.warning(f"IntentEngine failed: {_ie_err} — falling back")
+                                _nlp_reply = f"⚠️ Intent engine error: {_ie_err}"
 
                         # Store reply in session state to persist across reruns
                         if f"ai_nlp_history_{dev.ip}" not in st.session_state:
@@ -2590,8 +3085,8 @@ GROQ_API_KEY = "your-key-here"
                                         f"(will be restored on ↩️ Undo)",
                                         expanded=False
                                     ):
-                                        st.code(_snap_val[:3000] + ("\n... (truncated)" if len(_snap_val) > 3000 else ""),
-                                                language="text")
+                                        _trunc = _snap_val[:3000] + ("\n... (truncated)" if len(_snap_val)>3000 else "")
+                                        st.code(_trunc, language="text")
                                 else:
                                     st.warning("⚠️ No snapshot available — rollback will not be possible after deploy.")
 
@@ -3127,6 +3622,174 @@ GROQ_API_KEY = "your-key-here"
                 **Auth failed?** Open the **SSH Credentials** section above and click **Test SSH Login**.
                 """)
 
+    # ── Network Topology tab ─────────────────────────────────────────────────
+    with tab_topology:
+        st.markdown("### 🗺️ Network Topology")
+        st.caption(
+            "Site-wise automatic topology discovery via CDP/LLDP. Pick a site, "
+            "click Build, and NetBrain AI maps every router, switch, AP, and "
+            "firewall with their live uplink ports."
+        )
+
+        try:
+            from core.device_discovery import get_discovery_engine
+            from core.topology import (
+                build_topology_for_site, list_available_sites,
+                export_topology_to_pptx, export_topology_to_pdf, export_topology_to_vdx,
+                TopologyChatEngine,
+            )
+            from core.topology.plotly_view import build_topology_figure
+            TOPO_OK = True
+        except ImportError as _topo_imp_err:
+            TOPO_OK = False
+            st.error(f"Topology module unavailable: {_topo_imp_err}")
+
+        if TOPO_OK:
+            _topo_disc = get_discovery_engine()
+            _topo_devices = _topo_disc.get_approved()
+            _sites = list_available_sites(_topo_devices)
+
+            if not _sites:
+                st.info(
+                    "No sites yet. Approve devices in the **🖧 Devices** tab "
+                    "with Region/Country/City/Site Name set — they'll appear "
+                    "here automatically."
+                )
+            else:
+                _site_labels = [
+                    f"{s['site_name']} — {s['city']}, {s['country']} ({s['region']}) "
+                    f"· {s['device_count']} device(s)"
+                    for s in _sites
+                ]
+                _site_idx = st.selectbox(
+                    "Select a site",
+                    range(len(_sites)),
+                    format_func=lambda i: _site_labels[i],
+                    key="topo_site_select",
+                )
+                _picked = _sites[_site_idx]
+
+                _bcol1, _bcol2 = st.columns([1, 1])
+                with _bcol1:
+                    _build_clicked = st.button(
+                        "🔍 Build Topology", type="primary",
+                        use_container_width=True, key="topo_build_btn",
+                    )
+                with _bcol2:
+                    _force_refresh = st.checkbox(
+                        "Force refresh (ignore cache)", key="topo_force_refresh",
+                    )
+
+                _graph_key = f"topo_graph_{_picked['region']}_{_picked['country']}_{_picked['city']}_{_picked['site_name']}"
+
+                if _build_clicked:
+                    with st.spinner(f"Discovering topology for {_picked['site_name']} via CDP/LLDP…"):
+                        _graph = build_topology_for_site(
+                            site_name=_picked["site_name"], city=_picked["city"],
+                            country=_picked["country"], region=_picked["region"],
+                            all_approved_devices=_topo_devices,
+                            use_cache=not _force_refresh,
+                        )
+                        st.session_state[_graph_key] = _graph
+
+                _graph = st.session_state.get(_graph_key)
+
+                if _graph and _graph.node_count() > 0:
+                    st.success(
+                        f"✅ {_graph.node_count()} device(s), {_graph.link_count()} link(s) "
+                        f"· polled {_graph.devices_polled} device(s) · built {_graph.built_at[:19]} UTC"
+                    )
+                    if _graph.devices_failed:
+                        with st.expander(f"⚠️ {len(_graph.devices_failed)} device(s) failed discovery"):
+                            for f in _graph.devices_failed:
+                                st.caption(f"• {f}")
+
+                    _fig = build_topology_figure(_graph)
+                    if _fig:
+                        st.plotly_chart(_fig, use_container_width=True)
+
+                    with st.expander("🔌 Links table", expanded=False):
+                        _link_rows = [{
+                            "Device A": _graph.nodes[l.device_a_ip].label() if l.device_a_ip in _graph.nodes else l.device_a_ip,
+                            "Port A": l.device_a_port,
+                            "Device B": _graph.nodes[l.device_b_ip].label() if l.device_b_ip in _graph.nodes else l.device_b_ip,
+                            "Port B": l.device_b_port,
+                            "Protocol": l.protocol.upper(),
+                        } for l in _graph.links]
+                        if _link_rows:
+                            st.dataframe(_link_rows, use_container_width=True, hide_index=True)
+                        else:
+                            st.caption("No links discovered.")
+
+                    # ── Export buttons ──
+                    st.markdown("#### 📤 Export Diagram")
+                    st.caption(
+                        "PPTX and Visio (.vdx) produce real, movable shapes you can "
+                        "rearrange. PDF is a clean vector diagram but, like all PDFs, "
+                        "isn't shape-editable — that's a PDF format limitation, not "
+                        "an export limitation."
+                    )
+                    _e1, _e2, _e3 = st.columns(3)
+                    _fname_base = f"topology_{_picked['site_name'].replace(' ', '_')}"
+                    with _e1:
+                        _pptx_bytes = export_topology_to_pptx(_graph)
+                        if _pptx_bytes:
+                            st.download_button(
+                                "⬇️ PowerPoint (.pptx)", data=_pptx_bytes,
+                                file_name=f"{_fname_base}.pptx",
+                                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                                use_container_width=True,
+                            )
+                    with _e2:
+                        _pdf_bytes = export_topology_to_pdf(_graph)
+                        if _pdf_bytes:
+                            st.download_button(
+                                "⬇️ PDF", data=_pdf_bytes,
+                                file_name=f"{_fname_base}.pdf", mime="application/pdf",
+                                use_container_width=True,
+                            )
+                    with _e3:
+                        _vdx_bytes = export_topology_to_vdx(_graph)
+                        if _vdx_bytes:
+                            st.download_button(
+                                "⬇️ Visio (.vdx)", data=_vdx_bytes,
+                                file_name=f"{_fname_base}.vdx", mime="application/xml",
+                                use_container_width=True,
+                            )
+
+                    # ── AI chat over this topology ──
+                    st.markdown("#### 💬 Ask AI about this topology")
+                    _topo_chat_key = f"topo_chat_history_{_graph_key}"
+                    if _topo_chat_key not in st.session_state:
+                        st.session_state[_topo_chat_key] = []
+
+                    for _role, _msg in st.session_state[_topo_chat_key]:
+                        with st.chat_message(_role):
+                            st.markdown(_msg)
+
+                    _topo_q = st.chat_input(
+                        "e.g. what connects to R1? which devices are firewalls?",
+                        key="topo_chat_input",
+                    )
+                    if _topo_q:
+                        st.session_state[_topo_chat_key].append(("user", _topo_q))
+                        with st.chat_message("user"):
+                            st.markdown(_topo_q)
+                        with st.chat_message("assistant"):
+                            with st.spinner("Thinking…"):
+                                _chat_engine = TopologyChatEngine(ai_call=call_ai)
+                                _answer = _chat_engine.ask(_topo_q, _graph)
+                                st.markdown(_answer)
+                        st.session_state[_topo_chat_key].append(("assistant", _answer))
+
+                elif _graph is not None:
+                    st.warning(
+                        "No devices/links discovered for this site. Check that "
+                        "devices support CDP/LLDP and SSH credentials are correct."
+                    )
+                else:
+                    st.caption("Click **Build Topology** to discover this site's devices and connectivity.")
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # WORKSPACE: LOCAL ROUTER ACCESS
@@ -3331,3 +3994,692 @@ elif workspace == "nlp":
     c1.markdown("**🖥 Dashboard**\nLive NOC with device health cards and event feed")
     c2.markdown("**🔄 Workflows**\nApprove/reject fixes, watch 7-step pipeline")
     c3.markdown("**⚙️ Admin**\nConfigure tunnel, credentials, thresholds")
+
+
+# ── NETWORK COPILOT ───────────────────────────────────────────────────────────
+if workspace == "copilot":
+
+    # ── Copilot CSS ──────────────────────────────────────────────────────────
+    st.markdown("""
+    <style>
+    /* Hide default streamlit padding for clean canvas */
+    .copilot-canvas { background: transparent; }
+
+    /* ── Device Selector Table ── */
+    .device-table {
+        background: #0e151f;
+        border: 1px solid #1b2533;
+        border-radius: 14px;
+        overflow: hidden;
+        margin-bottom: 0;
+    }
+    .device-table-header {
+        display: grid;
+        grid-template-columns: 40px 1fr 1fr 90px;
+        padding: 10px 16px;
+        background: #141d2a;
+        border-bottom: 1px solid #1b2533;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: .08em;
+        text-transform: uppercase;
+        color: #5d6b7e;
+    }
+    .device-row {
+        display: grid;
+        grid-template-columns: 40px 1fr 1fr 90px;
+        padding: 10px 16px;
+        border-bottom: 1px solid #111827;
+        align-items: center;
+        font-size: 13px;
+        transition: background .15s;
+    }
+    .device-row:last-child { border-bottom: none; }
+    .device-row:hover { background: #141d2a; }
+    .device-status-dot {
+        width: 8px; height: 8px;
+        border-radius: 50%;
+        display: inline-block;
+        margin-right: 6px;
+    }
+
+    /* ── Chat Window ── */
+    .copilot-chat-window {
+        background: #0a0f18;
+        border: 1px solid #1b2533;
+        border-radius: 18px;
+        padding: 24px 28px 16px 28px;
+        min-height: 420px;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+        position: relative;
+    }
+    .copilot-msg-user {
+        align-self: flex-end;
+        background: linear-gradient(135deg, #2563eb, #4c8dff);
+        color: #fff;
+        border-radius: 18px 18px 4px 18px;
+        padding: 12px 18px;
+        max-width: 72%;
+        font-size: 14px;
+        line-height: 1.55;
+        box-shadow: 0 4px 20px rgba(76,141,255,.25);
+    }
+    .copilot-msg-ai {
+        align-self: flex-start;
+        background: #141d2a;
+        border: 1px solid #1b2533;
+        color: #c8d6e8;
+        border-radius: 18px 18px 18px 4px;
+        padding: 14px 18px;
+        max-width: 82%;
+        font-size: 14px;
+        line-height: 1.6;
+        box-shadow: 0 4px 16px rgba(0,0,0,.3);
+    }
+    .copilot-msg-ai code {
+        background: #0e151f;
+        border: 1px solid #243043;
+        border-radius: 6px;
+        padding: 1px 6px;
+        font-size: 12.5px;
+        color: #4c8dff;
+        font-family: 'JetBrains Mono', monospace;
+    }
+    .copilot-msg-ai pre {
+        background: #070b12;
+        border: 1px solid #243043;
+        border-radius: 10px;
+        padding: 12px 16px;
+        overflow-x: auto;
+        font-size: 12px;
+        color: #7dd3a8;
+        margin: 8px 0 0 0;
+        font-family: 'JetBrains Mono', monospace;
+    }
+    .copilot-label-user {
+        font-size: 10.5px;
+        font-weight: 700;
+        color: #4c8dff;
+        letter-spacing: .06em;
+        text-align: right;
+        margin-bottom: 4px;
+        margin-right: 2px;
+    }
+    .copilot-label-ai {
+        font-size: 10.5px;
+        font-weight: 700;
+        color: #3fd27a;
+        letter-spacing: .06em;
+        margin-bottom: 4px;
+        margin-left: 2px;
+    }
+    .copilot-empty {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        flex: 1;
+        gap: 12px;
+        padding: 60px 0 40px 0;
+        opacity: .55;
+    }
+    .copilot-empty-icon {
+        font-size: 48px;
+        filter: drop-shadow(0 0 20px rgba(76,141,255,.4));
+    }
+    .copilot-empty-text {
+        font-size: 15px;
+        color: #5d6b7e;
+        font-weight: 500;
+        text-align: center;
+        line-height: 1.5;
+    }
+
+    /* ── Input bar ── */
+    .copilot-input-wrap {
+        background: #0e151f;
+        border: 1px solid #243043;
+        border-radius: 16px;
+        padding: 4px 6px 4px 16px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 8px;
+        box-shadow: 0 0 0 0 rgba(76,141,255,0);
+        transition: box-shadow .2s;
+    }
+    .copilot-input-wrap:focus-within {
+        border-color: #4c8dff !important;
+        box-shadow: 0 0 0 3px rgba(76,141,255,.18) !important;
+    }
+    /* Selected device chip */
+    .copilot-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        background: rgba(76,141,255,.15);
+        border: 1px solid rgba(76,141,255,.3);
+        border-radius: 20px;
+        padding: 3px 10px 3px 8px;
+        font-size: 12px;
+        color: #7ab3ff;
+        font-weight: 600;
+        white-space: nowrap;
+    }
+    .copilot-no-device-warn {
+        background: rgba(245,185,66,.08);
+        border: 1px solid rgba(245,185,66,.25);
+        border-radius: 10px;
+        padding: 10px 14px;
+        font-size: 13px;
+        color: #f5b942;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+    .copilot-approval-box {
+        background: #0e151f;
+        border: 1px solid #243043;
+        border-left: 4px solid #f5b942;
+        border-radius: 12px;
+        padding: 14px 18px;
+        margin-top: 8px;
+    }
+    .copilot-title {
+        font-size: 26px;
+        font-weight: 800;
+        color: #f0f4fa;
+        letter-spacing: -.03em;
+        margin: 0;
+        line-height: 1.1;
+    }
+    .copilot-sub {
+        font-size: 13.5px;
+        color: #5d6b7e;
+        margin-top: 4px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    # ── Session state init ────────────────────────────────────────────────────
+    if "copilot_messages"       not in st.session_state: st.session_state["copilot_messages"]       = []
+    if "copilot_selected_devs"  not in st.session_state: st.session_state["copilot_selected_devs"]  = []
+    if "copilot_pending_cmds"   not in st.session_state: st.session_state["copilot_pending_cmds"]   = {}
+    if "copilot_snapshots"      not in st.session_state: st.session_state["copilot_snapshots"]      = {}
+    if "copilot_last_input"     not in st.session_state: st.session_state["copilot_last_input"]     = ""
+    if "copilot_rollback"       not in st.session_state: st.session_state["copilot_rollback"]       = {}
+
+    # ── Load approved devices ─────────────────────────────────────────────────
+    try:
+        from core.device_discovery import get_discovery_engine
+        _cp_disc   = get_discovery_engine()
+        _cp_devs   = _cp_disc.get_approved() or []
+    except Exception:
+        _cp_devs = []
+
+    # ── Page header ───────────────────────────────────────────────────────────
+    _hdr_l, _hdr_r = st.columns([3, 1])
+    with _hdr_l:
+        st.markdown("""
+        <div style="padding:8px 0 20px 0">
+          <div class="copilot-title">✨ Network Copilot</div>
+          <div class="copilot-sub">
+            Select devices, then talk to your network in plain English.
+          </div>
+        </div>""", unsafe_allow_html=True)
+    with _hdr_r:
+        _sel_count = len(st.session_state["copilot_selected_devs"])
+        if _sel_count:
+            st.markdown(f"""
+            <div style="text-align:right;padding-top:14px">
+              <span style="font-size:22px;font-weight:800;color:#4c8dff">{_sel_count}</span>
+              <span style="font-size:13px;color:#5d6b7e;margin-left:4px">device{"s" if _sel_count!=1 else ""} selected</span>
+            </div>""", unsafe_allow_html=True)
+
+    # ── Main layout: device panel + chat ─────────────────────────────────────
+    _left_col, _right_col = st.columns([1, 2], gap="large")
+
+    # ════════════════════════════════════════════
+    # LEFT — Device Selector
+    # ════════════════════════════════════════════
+    with _left_col:
+        st.markdown("""
+        <div style="font-size:11px;font-weight:700;letter-spacing:.1em;
+                    text-transform:uppercase;color:#5d6b7e;margin-bottom:10px">
+          🖧 Approved Devices — Select targets
+        </div>""", unsafe_allow_html=True)
+
+        if not _cp_devs:
+            st.markdown("""
+            <div style="background:#0e151f;border:1px dashed #1b2533;border-radius:12px;
+                        padding:24px;text-align:center;color:#5d6b7e;font-size:13px">
+              No approved devices yet.<br>
+              <span style="font-size:11px">Go to <b>Dashboard</b> → approve a device first.</span>
+            </div>""", unsafe_allow_html=True)
+        else:
+            # Select All / Clear All
+            _sa_col, _ca_col = st.columns(2)
+            with _sa_col:
+                if st.button("☑ Select All", key="cp_sel_all", use_container_width=True):
+                    st.session_state["copilot_selected_devs"] = [d.ip for d in _cp_devs]
+                    st.rerun()
+            with _ca_col:
+                if st.button("✕ Clear All", key="cp_clr_all", use_container_width=True):
+                    st.session_state["copilot_selected_devs"] = []
+                    st.rerun()
+
+            st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+            # Device rows — drag-and-drop-style checklist
+            for _cpd in _cp_devs:
+                _is_sel = _cpd.ip in st.session_state["copilot_selected_devs"]
+                _hn     = getattr(_cpd, "hostname", None) or _cpd.ip
+                _dtype  = getattr(_cpd, "device_type", "cisco_ios") or "cisco_ios"
+                _sess   = _cp_disc.get_session(_cpd.ip)
+                _online = _sess is not None and getattr(_sess, "status", "") == "complete"
+                _dot_color = "#3fd27a" if _online else "#5d6b7e"
+                _bg     = "rgba(76,141,255,.08)" if _is_sel else "transparent"
+                _border = "rgba(76,141,255,.35)" if _is_sel else "#1b2533"
+
+                st.markdown(f"""
+                <div style="background:{_bg};border:1px solid {_border};border-radius:10px;
+                            padding:10px 14px;margin-bottom:6px;transition:all .15s">
+                  <div style="display:flex;align-items:center;justify-content:space-between">
+                    <div>
+                      <span style="color:#f0f4fa;font-weight:700;font-size:13px">{_hn}</span>
+                      <span style="display:block;font-size:11px;color:#5d6b7e;
+                                   font-family:'JetBrains Mono',monospace;margin-top:2px">
+                        <span style="display:inline-block;width:8px;height:8px;
+                                     border-radius:50%;background:{_dot_color};
+                                     margin-right:5px;vertical-align:middle"></span>
+                        {_cpd.ip} · {_dtype}
+                      </span>
+                    </div>
+                  </div>
+                </div>""", unsafe_allow_html=True)
+
+                _tog_label = "✓ Selected" if _is_sel else "+ Select"
+                _tog_type  = "primary" if _is_sel else "secondary"
+                if st.button(_tog_label, key=f"cp_tog_{_cpd.ip}", use_container_width=True):
+                    _sel = st.session_state["copilot_selected_devs"]
+                    if _cpd.ip in _sel:
+                        _sel.remove(_cpd.ip)
+                    else:
+                        _sel.append(_cpd.ip)
+                    st.session_state["copilot_selected_devs"] = _sel
+                    st.rerun()
+
+        # Rollback section in left panel
+        _rb_devs = [ip for ip, snap in st.session_state["copilot_rollback"].items() if snap]
+        if _rb_devs:
+            st.markdown("<hr style='border-color:#1b2533;margin:16px 0'>", unsafe_allow_html=True)
+            st.markdown("""
+            <div style="font-size:11px;font-weight:700;letter-spacing:.1em;
+                        text-transform:uppercase;color:#f5b942;margin-bottom:8px">
+              ↩️ Rollback Available
+            </div>""", unsafe_allow_html=True)
+            for _rb_ip in _rb_devs:
+                _rb_hn = next((getattr(d,"hostname",d.ip) for d in _cp_devs if d.ip == _rb_ip), _rb_ip)
+                st.markdown(f"""
+                <div style="font-size:12px;color:#9aa9bd;margin-bottom:6px">
+                  📸 {_rb_hn} ({_rb_ip})
+                </div>""", unsafe_allow_html=True)
+                _rb1, _rb2 = st.columns(2)
+                with _rb1:
+                    if st.button("↩️ Undo", key=f"cp_rb_{_rb_ip}", use_container_width=True):
+                        _snap = st.session_state["copilot_rollback"].get(_rb_ip, "")
+                        if _snap:
+                            _rb_creds = {
+                                "username":      os.environ.get("GNS3_SSH_USER","admin"),
+                                "password":      os.environ.get("GNS3_SSH_PASS","admin"),
+                                "enable_secret": os.environ.get("GNS3_SSH_SECRET",""),
+                            }
+                            _rb_dev_obj = next((d for d in _cp_devs if d.ip == _rb_ip), None)
+                            try:
+                                from netmiko import ConnectHandler
+                                _rb_cfg = dict(
+                                    device_type=getattr(_rb_dev_obj,"device_type","cisco_ios"),
+                                    host=_rb_ip,
+                                    port=22, username=_rb_creds["username"],
+                                    password=_rb_creds["password"],
+                                    timeout=60, auth_timeout=60,
+                                    fast_cli=False, global_delay_factor=4,
+                                )
+                                if _rb_creds["enable_secret"]:
+                                    _rb_cfg["secret"] = _rb_creds["enable_secret"]
+                                with st.spinner(f"↩️ Restoring {_rb_ip}…"):
+                                    _rb_conn = ConnectHandler(**_rb_cfg)
+                                    try: _rb_conn.enable()
+                                    except: pass
+                                    _skip = ("!","Building configuration","Current configuration",
+                                             "version ","boot-","no service","service ",
+                                             "hostname ","logging ","enable secret","enable password",
+                                             "username ","aaa ","crypto ","spanning-tree ","end")
+                                    _rb_lines = [l.strip() for l in _snap.splitlines()
+                                                 if l.strip() and not any(l.strip().startswith(s) for s in _skip)]
+                                    if _rb_lines:
+                                        _rb_conn.send_config_set(_rb_lines, read_timeout=60)
+                                        try: _rb_conn.save_config()
+                                        except: pass
+                                    _rb_conn.disconnect()
+                                st.session_state["copilot_rollback"].pop(_rb_ip, None)
+                                st.session_state["copilot_messages"].append({
+                                    "role": "assistant",
+                                    "content": f"↩️ **Rollback completed on {_rb_hn} ({_rb_ip})** — pre-change config restored.",
+                                    "devices": [_rb_ip],
+                                })
+                                st.rerun()
+                            except Exception as _rbe:
+                                st.error(f"Rollback failed: {_rbe}")
+                with _rb2:
+                    if st.button("🗑 Discard", key=f"cp_rb_dis_{_rb_ip}", use_container_width=True):
+                        st.session_state["copilot_rollback"].pop(_rb_ip, None)
+                        st.rerun()
+
+    # ════════════════════════════════════════════
+    # RIGHT — Chat Window
+    # ════════════════════════════════════════════
+    with _right_col:
+        # ── Chat messages ─────────────────────────────────────────────────
+        _msgs = st.session_state["copilot_messages"]
+
+        if not _msgs:
+            # Empty state
+            st.markdown("""
+            <div style="background:#0a0f18;border:1px solid #1b2533;border-radius:18px;
+                        padding:0 28px;min-height:420px;display:flex;flex-direction:column;
+                        align-items:center;justify-content:center;gap:12px">
+              <div style="font-size:52px;filter:drop-shadow(0 0 24px rgba(76,141,255,.45))">✨</div>
+              <div style="font-size:17px;font-weight:700;color:#f0f4fa;text-align:center;
+                          letter-spacing:-.01em">What do you want to do today in your network?</div>
+              <div style="font-size:13px;color:#5d6b7e;text-align:center;max-width:340px;
+                          line-height:1.6">
+                Select devices on the left, then type a question or command below.<br>
+                AI will plan, show you the commands, and wait for your approval.
+              </div>
+              <div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:8px">
+                <span style="background:#0e151f;border:1px solid #1b2533;border-radius:20px;
+                             padding:6px 14px;font-size:12px;color:#5d6b7e">configure OSPF</span>
+                <span style="background:#0e151f;border:1px solid #1b2533;border-radius:20px;
+                             padding:6px 14px;font-size:12px;color:#5d6b7e">check BGP neighbors</span>
+                <span style="background:#0e151f;border:1px solid #1b2533;border-radius:20px;
+                             padding:6px 14px;font-size:12px;color:#5d6b7e">add loopback interface</span>
+                <span style="background:#0e151f;border:1px solid #1b2533;border-radius:20px;
+                             padding:6px 14px;font-size:12px;color:#5d6b7e">show routing table</span>
+              </div>
+            </div>""", unsafe_allow_html=True)
+        else:
+            # Messages
+            st.markdown('<div class="copilot-chat-window">', unsafe_allow_html=True)
+            import html as _html_mod
+            for _cm in _msgs[-20:]:
+                _cr  = _cm["role"]
+                _ctxt = _cm.get("content","")
+                _cdevs = _cm.get("devices", [])
+                _dev_chips = ""
+                if _cdevs:
+                    _dev_chips = "".join(
+                        f'<span class="copilot-chip">🖧 {next((getattr(d,"hostname",d.ip) for d in _cp_devs if d.ip==ip), ip)}</span>'
+                        for ip in _cdevs
+                    )
+                if _cr == "user":
+                    st.markdown(f"""
+                    <div style="display:flex;flex-direction:column;align-items:flex-end;margin-bottom:4px">
+                      <div class="copilot-label-user">👤 You</div>
+                      {"<div style='display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;margin-bottom:6px'>" + _dev_chips + "</div>" if _dev_chips else ""}
+                      <div class="copilot-msg-user">{_html_mod.escape(_ctxt)}</div>
+                    </div>""", unsafe_allow_html=True)
+                else:
+                    st.markdown(f'<div class="copilot-label-ai">✨ Network Copilot</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="copilot-msg-ai">', unsafe_allow_html=True)
+                    st.markdown(_ctxt)
+                    st.markdown("</div>", unsafe_allow_html=True)
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        # ── Pending approval boxes ─────────────────────────────────────────
+        _cp_pending = st.session_state.get("copilot_pending_cmds", {})
+        if _cp_pending:
+            st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+            for _pdev_ip, _pcmds in list(_cp_pending.items()):
+                _pdev_hn = next((getattr(d,"hostname",d.ip) for d in _cp_devs if d.ip==_pdev_ip), _pdev_ip)
+                _strip_c = {"end","exit","write memory","wr","wr mem"}
+                _cfg_c   = [c.replace("[CONFIG]","").strip() for c in _pcmds
+                            if "[CONFIG]" in c and c.replace("[CONFIG]","").strip().lower() not in _strip_c]
+                _exec_c  = [c.replace("[EXEC]","").strip() for c in _pcmds if "[EXEC]" in c]
+                _all_display = _cfg_c + _exec_c
+
+                st.markdown(f"""
+                <div class="copilot-approval-box">
+                  <div style="font-size:12px;font-weight:700;color:#f5b942;margin-bottom:8px">
+                    ⚠️ Ready to deploy on <span style="color:#f0f4fa">{_pdev_hn}</span>
+                    <span style="color:#5d6b7e;font-weight:400"> ({_pdev_ip})</span>
+                  </div>
+                  <pre style="background:#070b12;border:1px solid #243043;border-radius:8px;
+                              padding:10px 14px;font-size:12px;color:#7dd3a8;
+                              font-family:'JetBrains Mono',monospace;margin:0 0 12px 0;
+                              overflow-x:auto">{chr(10).join(_all_display)}</pre>
+                </div>""", unsafe_allow_html=True)
+
+                # Show snapshot info
+                _snap_val = st.session_state.get("copilot_snapshots", {}).get(_pdev_ip, "")
+                if _snap_val:
+                    with st.expander(f"📸 Pre-change snapshot — {len(_snap_val.splitlines())} lines (click to review)", expanded=False):
+                        _trunc = _snap_val[:3000] + ("\n... (truncated)" if len(_snap_val)>3000 else "")
+                        st.code(_trunc, language="text")
+
+                _ap_col, _ca_col2 = st.columns(2)
+                with _ap_col:
+                    if st.button(f"✅ Deploy on {_pdev_hn}", key=f"cp_deploy_{_pdev_ip}", type="primary", use_container_width=True):
+                        _d_creds = {
+                            "username":      os.environ.get("GNS3_SSH_USER","admin"),
+                            "password":      os.environ.get("GNS3_SSH_PASS","admin"),
+                            "enable_secret": os.environ.get("GNS3_SSH_SECRET",""),
+                        }
+                        _d_dev = next((d for d in _cp_devs if d.ip==_pdev_ip), None)
+                        _d_log = []
+                        try:
+                            from netmiko import ConnectHandler
+                            _dcfg = dict(
+                                device_type=getattr(_d_dev,"device_type","cisco_ios"),
+                                host=_pdev_ip, port=22,
+                                username=_d_creds["username"], password=_d_creds["password"],
+                                timeout=60, auth_timeout=60, fast_cli=False, global_delay_factor=4,
+                            )
+                            if _d_creds["enable_secret"]: _dcfg["secret"] = _d_creds["enable_secret"]
+                            with st.spinner(f"⚙️ Deploying on {_pdev_hn}…"):
+                                _dconn = ConnectHandler(**_dcfg)
+                                try: _dconn.enable()
+                                except: pass
+                                if _exec_c:
+                                    for _ec in _exec_c:
+                                        _o = _dconn.send_command(_ec, read_timeout=30, expect_string=r"#")
+                                        _d_log.append(f"$ {_ec}\n{_o}")
+                                if _cfg_c:
+                                    _o = _dconn.send_config_set(_cfg_c, read_timeout=30)
+                                    _d_log.append(f"[CONFIG MODE]\n{_o}")
+                                    try: _dconn.save_config()
+                                    except: pass
+                                _dconn.disconnect()
+                            _d_result = (
+                                f"✅ **Deployed successfully on {_pdev_hn} ({_pdev_ip})**\n\n"
+                                f"```\n" + "\n".join(_d_log) + "\n```"
+                            )
+                            if _snap_val:
+                                st.session_state["copilot_rollback"][_pdev_ip] = _snap_val
+                                _d_result += "\n\n🔄 **Rollback available** — click ↩️ Undo in the left panel."
+                        except Exception as _de:
+                            _d_result = f"❌ Deployment failed on {_pdev_hn}: {_de}"
+                        st.session_state["copilot_pending_cmds"].pop(_pdev_ip, None)
+                        st.session_state["copilot_snapshots"].pop(_pdev_ip, None)
+                        st.session_state["copilot_messages"].append({
+                            "role": "assistant", "content": _d_result, "devices": [_pdev_ip],
+                        })
+                        st.rerun()
+                with _ca_col2:
+                    if st.button(f"❌ Cancel", key=f"cp_cancel_{_pdev_ip}", use_container_width=True):
+                        st.session_state["copilot_pending_cmds"].pop(_pdev_ip, None)
+                        st.session_state["copilot_snapshots"].pop(_pdev_ip, None)
+                        st.session_state["copilot_messages"].append({
+                            "role": "assistant",
+                            "content": f"❌ Cancelled — no changes made to **{_pdev_hn}** ({_pdev_ip}).",
+                            "devices": [_pdev_ip],
+                        })
+                        st.rerun()
+
+        # ── Input bar ─────────────────────────────────────────────────────
+        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+        # Show selected device chips above input
+        _sel_ips = st.session_state["copilot_selected_devs"]
+        if _sel_ips:
+            _chips_html = "".join(
+                f'<span class="copilot-chip">🖧 {next((getattr(d,"hostname",d.ip) for d in _cp_devs if d.ip==ip), ip)}</span>'
+                for ip in _sel_ips
+            )
+            st.markdown(f"""
+            <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;
+                        padding:8px 12px;background:#0e151f;border:1px solid #1b2533;
+                        border-radius:10px">
+              <span style="font-size:11px;color:#5d6b7e;margin-right:4px;align-self:center">Targeting:</span>
+              {_chips_html}
+            </div>""", unsafe_allow_html=True)
+        else:
+            st.markdown("""
+            <div class="copilot-no-device-warn">
+              ⚠️ No devices selected — select at least one device on the left before sending a command.
+            </div>""", unsafe_allow_html=True)
+
+        # Input + send
+        _inp_col, _btn_col2 = st.columns([5, 1])
+        with _inp_col:
+            _cp_input = st.text_input(
+                label="copilot_input",
+                label_visibility="collapsed",
+                placeholder="What do you want to do today in your network?",
+                key="copilot_text_input",
+                disabled=len(_sel_ips) == 0,
+            )
+        with _btn_col2:
+            _cp_send = st.button("Send ➤", key="copilot_send", type="primary",
+                                 use_container_width=True, disabled=len(_sel_ips)==0)
+
+        # Clear chat
+        if _msgs:
+            if st.button("🗑 Clear conversation", key="cp_clear", use_container_width=False):
+                st.session_state["copilot_messages"]     = []
+                st.session_state["copilot_pending_cmds"] = {}
+                st.session_state["copilot_snapshots"]    = {}
+                st.rerun()
+
+        # ── Process input ──────────────────────────────────────────────────
+        if _cp_send and _cp_input and _cp_input.strip():
+            _q = _cp_input.strip()
+
+            # Guard: must have devices selected
+            if not _sel_ips:
+                st.warning("⚠️ Please select at least one device first.")
+                st.stop()
+
+            # Add user message
+            st.session_state["copilot_messages"].append({
+                "role": "user", "content": _q, "devices": list(_sel_ips),
+            })
+
+            # Build device context for AI
+            _dev_ctx_parts = []
+            for _dip in _sel_ips:
+                _dd = next((d for d in _cp_devs if d.ip==_dip), None)
+                if _dd:
+                    _dhn = getattr(_dd,"hostname",_dip) or _dip
+                    _dty = getattr(_dd,"device_type","cisco_ios")
+                    _dev_ctx_parts.append(f"- {_dhn} ({_dip})  type={_dty}")
+            _dev_ctx = "\n".join(_dev_ctx_parts)
+
+            _cp_sys = f"""You are Network Copilot — an expert AI network engineer with LIVE SSH access.
+
+SELECTED DEVICES (you can ONLY act on these):
+{_dev_ctx}
+
+RULES:
+1. For READ-ONLY queries (show, check, verify, explain, what is, why) — answer directly. No commands needed.
+2. For CONFIGURATION requests — for each device separately:
+   a. Explain what you will do in 1-2 sentences.
+   b. List commands prefixed with [CONFIG] for config-mode or [EXEC] for exec-mode.
+   c. End the command block for each device with: DEPLOY_DEVICE:<ip>
+3. NEVER act on any device not in the selected list above.
+4. NEVER generate: reload, erase, write erase, no ip routing, no router (destructive commands).
+5. Be concise and technically precise."""
+
+            with st.spinner("✨ Network Copilot is thinking…"):
+                try:
+                    _cp_reply = call_ai(_cp_sys + f"\n\nOperator: {_q}\nNetwork Copilot:")
+                except Exception as _cpe:
+                    _cp_reply = f"AI Error: {_cpe}"
+
+            if not _cp_reply:
+                _cp_reply = "AI is unavailable. Please check your GROQ_API_KEY in .streamlit/secrets.toml"
+
+            # Parse response for per-device deploy blocks
+            _cp_final_msg = _cp_reply
+            _has_deploy   = "DEPLOY_DEVICE:" in _cp_reply
+
+            if _has_deploy:
+                import re as _re_cp
+                # Split by DEPLOY_DEVICE markers
+                _cp_blocks = _re_cp.split(r"DEPLOY_DEVICE:(\S+)", _cp_reply)
+                # _cp_blocks = [text_before, ip, text_after, ip2, text_after2, ...]
+                _cp_clean_msg = _cp_blocks[0].strip()
+
+                for _bi in range(1, len(_cp_blocks)-1, 2):
+                    _block_ip  = _cp_blocks[_bi].strip()
+                    _block_txt = _cp_blocks[_bi+1] if _bi+1 < len(_cp_blocks) else ""
+
+                    # Only act on selected devices
+                    if _block_ip not in _sel_ips:
+                        continue
+
+                    # Extract commands
+                    _b_cmds = [l.strip() for l in (_cp_blocks[0] + _block_txt).splitlines()
+                               if l.strip().startswith("[CONFIG]") or l.strip().startswith("[EXEC]")]
+
+                    if _b_cmds:
+                        # Take snapshot before storing pending
+                        _snap_creds = {
+                            "username":      os.environ.get("GNS3_SSH_USER","admin"),
+                            "password":      os.environ.get("GNS3_SSH_PASS","admin"),
+                            "enable_secret": os.environ.get("GNS3_SSH_SECRET",""),
+                        }
+                        _snap_dev = next((d for d in _cp_devs if d.ip==_block_ip), None)
+                        try:
+                            from netmiko import ConnectHandler
+                            _scfg2 = dict(
+                                device_type=getattr(_snap_dev,"device_type","cisco_ios"),
+                                host=_block_ip, port=22,
+                                username=_snap_creds["username"],
+                                password=_snap_creds["password"],
+                                timeout=60, auth_timeout=60,
+                                fast_cli=False, global_delay_factor=4,
+                            )
+                            if _snap_creds["enable_secret"]: _scfg2["secret"] = _snap_creds["enable_secret"]
+                            _sc2 = ConnectHandler(**_scfg2)
+                            try: _sc2.enable()
+                            except: pass
+                            _snap2 = _sc2.send_command("show running-config", read_timeout=30, expect_string=r"#")
+                            _sc2.disconnect()
+                            st.session_state["copilot_snapshots"][_block_ip] = _snap2
+                        except Exception:
+                            st.session_state["copilot_snapshots"][_block_ip] = ""
+
+                        st.session_state["copilot_pending_cmds"][_block_ip] = _b_cmds
+
+                # Clean up the message shown to user
+                _cp_final_msg = _re_cp.sub(r"DEPLOY_DEVICE:\S+", "", _cp_clean_msg).strip()
+                if st.session_state["copilot_pending_cmds"]:
+                    _cp_final_msg += "\n\n⚠️ **Review the commands above and click Deploy to apply.**"
+
+            st.session_state["copilot_messages"].append({
+                "role": "assistant", "content": _cp_final_msg, "devices": list(_sel_ips),
+            })
+            st.rerun()
