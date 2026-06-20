@@ -222,8 +222,9 @@ class DeviceDiscoveryEngine:
                     self._known[ip].ping_rtt_ms = ping_rtt_ms
                 return
 
+            verify_method = "icmp ok" if source != "range_scan" else "tcp-connect ok"
             logger.info(
-                f"New device discovered: {ip} (via {source}, icmp ok, "
+                f"New device discovered: {ip} (via {source}, {verify_method}, "
                 f"{ping_rtt_ms:.0f}ms)"
             )
 
@@ -268,6 +269,39 @@ class DeviceDiscoveryEngine:
                     )
         t = threading.Thread(target=_scan, daemon=True)
         t.start()
+
+    def scan_ranges(
+        self,
+        cidrs: List[str],
+        concurrency: int = 300,
+        timeout_sec: float = 0.4,
+        exclude_cidrs: Optional[List[str]] = None,
+    ) -> str:
+        """
+        Scan one or more CIDR ranges (RFC 1918 presets, auto-detected local
+        subnets, or custom CIDRs) using the bounded-concurrency TCP-probe
+        scanner in core/discovery/. Found hosts feed into the same
+        approval pipeline as every other discovery path.
+
+        Returns a job_id — poll progress via
+        `core.discovery.get_range_scanner().get_progress(job_id)`.
+        """
+        from core.discovery import get_range_scanner
+
+        def _on_found(ip: str):
+            # TCP-alive confirmed; register without re-requiring ICMP
+            # (require_ping=False — the TCP connect IS the liveness proof).
+            self._register_ip(ip, source="range_scan", require_ping=False,
+                               ping_rtt_ms=0.0)
+
+        scanner = get_range_scanner()
+        return scanner.start_scan(
+            cidrs=cidrs,
+            on_found=_on_found,
+            concurrency=concurrency,
+            timeout_sec=timeout_sec,
+            exclude_cidrs=exclude_cidrs,
+        )
 
     # - Approval workflow -
 
