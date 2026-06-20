@@ -2463,20 +2463,10 @@ GROQ_API_KEY = "your-key-here"
             st.divider()
 
             # ── Top action bar ────────────────────────────────────────────────
-            col_scan, col_ping, col_refresh = st.columns([2, 2, 1])
-            with col_scan:
-                subnet_prefix = st.text_input(
-                    "Scan subnet (first 3 octets)",
-                    value="192.168.0", key="dd_subnet",
-                    placeholder="192.168.1",
-                )
-                if st.button("🔍 Scan Subnet", width='stretch', key="dd_scan"):
-                    disc.scan_subnet(subnet_prefix)
-                    st.toast(f"Scanning {subnet_prefix}.1–254 in background… check back in ~30s")
-
+            col_ping, col_refresh = st.columns([3, 1])
             with col_ping:
                 manual_ip = st.text_input(
-                    "Or ping a specific IP",
+                    "Ping a specific IP",
                     key="dd_manual_ip", placeholder="10.0.0.1"
                 )
                 if st.button("📡 Ping & Discover", width='stretch', key="dd_ping"):
@@ -2489,11 +2479,134 @@ GROQ_API_KEY = "your-key-here"
                             st.error(f"❌ {manual_ip} did not respond")
                     else:
                         st.warning("Enter an IP address first.")
-
             with col_refresh:
                 st.markdown("<br>", unsafe_allow_html=True)
                 if st.button("🔄 Refresh", width='stretch', key="dd_refresh"):
                     st.rerun()
+
+            # ── Range Scan (RFC 1918) ───────────────────────────────────────────
+            with st.expander("🌐 Range Scan — RFC 1918 private space", expanded=False):
+                from core.discovery import (
+                    RFC1918_RANGES, get_local_subnets, host_count,
+                    estimate_scan_seconds, format_duration, parse_cidr,
+                    get_range_scanner,
+                )
+
+                st.caption(
+                    "Discovers devices by TCP-probing SSH/Telnet/HTTP/HTTPS "
+                    "ports — no ICMP subprocess per host, so this scales to "
+                    "large ranges without requiring sudo."
+                )
+
+                _selected_cidrs: List[str] = []
+
+                # — Auto-detected local subnets —
+                _local_subnets = get_local_subnets()
+                if _local_subnets:
+                    st.markdown("**Your machine's connected subnets** (auto-detected)")
+                    _local_opts = {
+                        f"{s.interface}: {s.cidr} ({s.host_count:,} hosts)": s.cidr
+                        for s in _local_subnets
+                    }
+                    _picked_local = st.multiselect(
+                        "local_subnets", list(_local_opts.keys()),
+                        default=list(_local_opts.keys()),
+                        label_visibility="collapsed", key="dd_local_subnets",
+                    )
+                    _selected_cidrs += [_local_opts[k] for k in _picked_local]
+                else:
+                    st.caption(
+                        "Local subnet auto-detection unavailable "
+                        "(install `psutil` to enable)."
+                    )
+
+                # — RFC 1918 presets —
+                st.markdown("**RFC 1918 private ranges**")
+                for preset in RFC1918_RANGES:
+                    _secs = estimate_scan_seconds(preset.host_count, concurrency=300, timeout_sec=0.4)
+                    _eta = format_duration(_secs)
+                    _label = f"{preset.label} — {preset.host_count:,} hosts, {_eta}"
+                    if preset.recommended:
+                        _chk = st.checkbox(_label, key=f"dd_rfc_{preset.cidr}")
+                        if _chk:
+                            _selected_cidrs.append(preset.cidr)
+                    else:
+                        _c1, _c2 = st.columns([3, 2])
+                        with _c1:
+                            _chk = st.checkbox(_label, key=f"dd_rfc_{preset.cidr}")
+                        with _c2:
+                            _confirm = st.checkbox(
+                                "I accept the multi-hour scan time",
+                                key=f"dd_rfc_confirm_{preset.cidr}",
+                            )
+                        if _chk and _confirm:
+                            _selected_cidrs.append(preset.cidr)
+                        elif _chk and not _confirm:
+                            st.caption("⚠️ Confirm the time tradeoff to include this range.")
+
+                # — Custom CIDR —
+                st.markdown("**Custom range**")
+                _custom_cidr = st.text_input(
+                    "custom_cidr", placeholder="192.168.96.0/24",
+                    label_visibility="collapsed", key="dd_custom_cidr",
+                )
+                if _custom_cidr.strip():
+                    if parse_cidr(_custom_cidr.strip()):
+                        _selected_cidrs.append(_custom_cidr.strip())
+                    else:
+                        st.error(f"'{_custom_cidr}' isn't a valid CIDR (e.g. 192.168.96.0/24).")
+
+                # — Summary + start —
+                _total_hosts = sum(host_count(c) for c in _selected_cidrs)
+                if _selected_cidrs:
+                    _total_secs = estimate_scan_seconds(_total_hosts, concurrency=300, timeout_sec=0.4)
+                    st.info(
+                        f"**{len(_selected_cidrs)} range(s) selected** · "
+                        f"{_total_hosts:,} addresses · est. {format_duration(_total_secs)}"
+                    )
+
+                _active_job_key = "dd_range_scan_job_id"
+                _scan_running = False
+                if st.session_state.get(_active_job_key):
+                    _prog = get_range_scanner().get_progress(st.session_state[_active_job_key])
+                    _scan_running = bool(_prog and _prog.status == "running")
+
+                _s1, _s2 = st.columns(2)
+                with _s1:
+                    if st.button(
+                        "🚀 Start Range Scan", type="primary", width='stretch',
+                        disabled=(not _selected_cidrs or _scan_running),
+                        key="dd_start_range_scan",
+                    ):
+                        job_id = disc.scan_ranges(_selected_cidrs)
+                        st.session_state[_active_job_key] = job_id
+                        st.rerun()
+                with _s2:
+                    if st.button(
+                        "⏹ Cancel Scan", width='stretch',
+                        disabled=not _scan_running, key="dd_cancel_range_scan",
+                    ):
+                        get_range_scanner().cancel(st.session_state[_active_job_key])
+                        st.rerun()
+
+                # — Live progress —
+                if st.session_state.get(_active_job_key):
+                    _prog = get_range_scanner().get_progress(st.session_state[_active_job_key])
+                    if _prog:
+                        st.progress(_prog.percent() / 100.0)
+                        _status_icon = {"running": "🔵", "done": "✅",
+                                         "cancelled": "⏹", "error": "🔴"}.get(_prog.status, "•")
+                        st.caption(
+                            f"{_status_icon} {_prog.status.upper()} · "
+                            f"{_prog.scanned:,} / {_prog.total_addresses:,} scanned · "
+                            f"{len(_prog.found)} found · {_prog.elapsed_sec():.0f}s elapsed"
+                        )
+                        if _prog.status == "running":
+                            st.caption("Click **🔄 Refresh** above to update progress.")
+                        elif _prog.status == "done":
+                            st.success(f"Scan complete — {len(_prog.found)} device(s) added to pending queue.")
+                        elif _prog.error:
+                            st.error(f"Scan error: {_prog.error}")
 
             st.divider()
 
@@ -3615,7 +3728,7 @@ GROQ_API_KEY = "your-key-here"
                 5. Click **🤖 AI Network Troubleshooting** to SSH in, run diagnostics, and get an AI-generated fix plan
                 6. Review the fix commands, then click **APPROVE & APPLY FIXES** to execute them
 
-                **Subnet Scan:** Use the scanner above to discover all live devices on a /24 subnet at once.
+                **Range Scan:** Open the **🌐 Range Scan (RFC 1918)** panel above — it auto-detects your machine's connected subnets, lets you pick RFC 1918 presets (192.168.0.0/16, 172.16.0.0/12, 10.0.0.0/8) or enter a custom CIDR, then scans all of them in one cancellable, progress-tracked job.
 
                 **Manual Add:** Enter any IP in the "Ping & Discover" box to check reachability and add it directly.
 
