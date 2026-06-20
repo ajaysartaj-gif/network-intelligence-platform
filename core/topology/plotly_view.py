@@ -35,7 +35,7 @@ def build_topology_figure(graph: TopologyGraph) -> Optional["go.Figure"]:
 
     # ── Edge lines (drawn first, behind markers) ──
     edge_x, edge_y = [], []
-    edge_label_x, edge_label_y, edge_label_text = [], [], []
+    edge_annotations = []
     for link in graph.links:
         a = graph.nodes.get(link.device_a_ip)
         b = graph.nodes.get(link.device_b_ip)
@@ -43,20 +43,23 @@ def build_topology_figure(graph: TopologyGraph) -> Optional["go.Figure"]:
             continue
         edge_x += [a.x, b.x, None]
         edge_y += [a.y, b.y, None]
-        edge_label_x.append((a.x + b.x) / 2)
-        edge_label_y.append((a.y + b.y) / 2)
-        edge_label_text.append(f"{link.device_a_port} ↔ {link.device_b_port} ({link.protocol})")
+        mid_x = (a.x + b.x) / 2
+        mid_y = (a.y + b.y) / 2
+        # Visible, always-on port label at the link midpoint (not hover-only) —
+        # this is what shows "Fa0/0 <-> Fa0/0" directly on the canvas.
+        edge_annotations.append(dict(
+            x=mid_x, y=mid_y,
+            text=f"{link.device_a_port} ↔ {link.device_b_port}",
+            showarrow=False,
+            font=dict(size=10, color="#475569"),
+            bgcolor="rgba(255,255,255,0.85)",
+            borderpad=1,
+        ))
 
     fig.add_trace(go.Scatter(
         x=edge_x, y=edge_y, mode="lines",
         line=dict(color="#64748b", width=1.5),
         hoverinfo="skip", showlegend=False,
-    ))
-
-    fig.add_trace(go.Scatter(
-        x=edge_label_x, y=edge_label_y, mode="markers",
-        marker=dict(size=1, color="rgba(0,0,0,0)"),
-        text=edge_label_text, hoverinfo="text", showlegend=False,
     ))
 
     # ── Node markers, grouped by role for a clean legend ──
@@ -83,6 +86,14 @@ def build_topology_figure(graph: TopologyGraph) -> Optional["go.Figure"]:
             name=role.value.replace("_", " ").title(),
         ))
 
+    # Dynamic height — scales with how many distinct rows the layout
+    # actually produced (role tiers + any wrapped sub-rows), so a
+    # 4-device lab and a 70-device site each get a sensibly sized chart
+    # instead of a fixed 520px box. Plotly's own zoom/pan handles
+    # anything beyond what fits on first render.
+    num_row_bands = len(set(n.y for n in graph.nodes.values())) or 1
+    height = max(420, min(900, 380 + num_row_bands * 85))
+
     fig.update_layout(
         showlegend=True,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
@@ -91,6 +102,7 @@ def build_topology_figure(graph: TopologyGraph) -> Optional["go.Figure"]:
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
         margin=dict(l=20, r=20, t=40, b=20),
-        height=520,
+        height=height,
+        annotations=edge_annotations,
     )
     return fig
