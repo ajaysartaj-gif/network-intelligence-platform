@@ -33,6 +33,7 @@ from typing import Optional
 from core.topology.topology_models import TopologyGraph, DeviceRole
 from core.topology.export.coords import compute_canvas_positions
 from core.topology.layout import recommended_canvas_size
+from core.topology.interface_naming import abbreviate_interface
 
 logger = logging.getLogger("NetBrain.Topology.Export.VDX")
 
@@ -112,7 +113,7 @@ def export_topology_to_vdx(graph: TopologyGraph) -> Optional[bytes]:
         shape_id += 1
 
         # Port-label text shape near the link midpoint
-        label_text = f"{link.device_a_port} - {link.device_b_port}".replace("&", "and")
+        label_text = f"{abbreviate_interface(link.device_a_port)} - {abbreviate_interface(link.device_b_port)}".replace("&", "and")
         xml_parts.append(f"""
         <Shape ID="{shape_id}" Type="Shape">
           <XForm>

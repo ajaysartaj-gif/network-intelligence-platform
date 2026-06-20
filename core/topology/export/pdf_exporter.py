@@ -23,6 +23,7 @@ from typing import Optional
 from core.topology.topology_models import TopologyGraph, DeviceRole
 from core.topology.export.coords import compute_canvas_positions
 from core.topology.layout import recommended_canvas_size
+from core.topology.interface_naming import abbreviate_interface
 
 logger = logging.getLogger("NetBrain.Topology.Export.PDF")
 
@@ -94,7 +95,7 @@ def export_topology_to_pdf(graph: TopologyGraph) -> Optional[bytes]:
         c.setFont("Helvetica", 7)
         c.drawCentredString(
             mid_x * inch, mid_y * inch,
-            f"{link.device_a_port} ↔ {link.device_b_port}",
+            f"{abbreviate_interface(link.device_a_port)} ↔ {abbreviate_interface(link.device_b_port)}",
         )
 
     # -- Nodes --

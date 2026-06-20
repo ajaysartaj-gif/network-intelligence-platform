@@ -20,6 +20,7 @@ from typing import Optional
 from core.topology.topology_models import TopologyGraph, DeviceRole
 from core.topology.export.coords import compute_canvas_positions
 from core.topology.layout import recommended_canvas_size
+from core.topology.interface_naming import abbreviate_interface
 
 logger = logging.getLogger("NetBrain.Topology.Export.PPTX")
 
@@ -104,7 +105,7 @@ def export_topology_to_pptx(graph: TopologyGraph) -> Optional[bytes]:
             Inches(mid_x - 0.6), Inches(mid_y - 0.15), Inches(1.2), Inches(0.3)
         )
         label_tf = label_tb.text_frame
-        label_tf.text = f"{link.device_a_port} ↔ {link.device_b_port}"
+        label_tf.text = f"{abbreviate_interface(link.device_a_port)} ↔ {abbreviate_interface(link.device_b_port)}"
         label_tf.paragraphs[0].font.size = Pt(8)
         label_tf.paragraphs[0].font.color.rgb = RGBColor(0x47, 0x55, 0x69)
         label_tf.paragraphs[0].alignment = PP_ALIGN.CENTER
