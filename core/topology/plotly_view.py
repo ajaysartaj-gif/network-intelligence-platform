@@ -16,6 +16,7 @@ import logging
 from typing import Optional
 
 from core.topology.topology_models import TopologyGraph, DeviceRole
+from core.topology.interface_naming import abbreviate_interface
 
 logger = logging.getLogger("NetBrain.Topology.PlotlyView")
 
@@ -49,7 +50,7 @@ def build_topology_figure(graph: TopologyGraph) -> Optional["go.Figure"]:
         # this is what shows "Fa0/0 <-> Fa0/0" directly on the canvas.
         edge_annotations.append(dict(
             x=mid_x, y=mid_y,
-            text=f"{link.device_a_port} ↔ {link.device_b_port}",
+            text=f"{abbreviate_interface(link.device_a_port)} ↔ {abbreviate_interface(link.device_b_port)}",
             showarrow=False,
             font=dict(size=10, color="#475569"),
             bgcolor="rgba(255,255,255,0.85)",

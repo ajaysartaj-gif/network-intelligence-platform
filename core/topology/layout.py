@@ -2,46 +2,100 @@
 core/topology/layout.py
 ========================
 Computes (x, y) coordinates for every node in a TopologyGraph so it can
-be drawn — by the interactive Plotly view, and reused as-is for the
+be drawn -- by the interactive Plotly view, and reused as-is for the
 PPTX/PDF/Visio exporters (one layout, every output format stays in sync).
 
-Strategy: hierarchical-by-role layout with parent-anchored ordering and
-row-wrapping, so it scales from a 2-device lab to a 100+ device site
-(e.g. 2 core switches -> 20 distribution switches -> 50 APs) without
-nodes overlapping or the canvas becoming an unreadably long single row.
+Strategy: graph-structure-driven hierarchical layout. Earlier versions
+of this module assigned each node's vertical tier purely from its
+DEVICE ROLE (firewall > router > switch > AP). That works for a clean
+enterprise hierarchy, but breaks down completely the moment multiple
+devices share the same role -- e.g. an all-router lab, a flat ISP
+backbone, a mesh of switches -- because every node lands in the SAME
+role-tier and the algorithm has no signal left except alphabetical
+order, producing a straight line that reflects nothing about how the
+devices are actually connected.
 
-  - Firewalls at the top (layer 0), routers next, switches next,
-    access points/phones at the bottom -- same role-based tiers as before.
-  - WITHIN a layer, each node's preferred horizontal position is the
-    average x of the parent(s) it's linked to in the layer above --
-    so a distribution switch's APs visually cluster under that switch
-    instead of being scattered in arbitrary order. A left-to-right
-    sweep then enforces minimum spacing so nothing overlaps.
-  - If a layer has more nodes than fit in one readable row (default
-    cap: 14), it wraps into multiple sub-rows within that layer's
-    vertical band -- same idea as wrapping text, applied to a tier of
-    same-role devices, so 50 APs become a compact grid instead of one
-    10,000-unit-wide line.
-  - recommended_canvas_size() reports back how big a canvas (in inches)
-    is needed to fit the computed layout without compressing nodes --
-    used by every exporter so a small lab and a 100-device site each
-    get an appropriately sized diagram, not a fixed one-size box.
+Fixed by deriving the tier from ACTUAL graph connectivity instead:
+  - Each connected component gets a root -- the node with the lowest
+    role.layer (firewall/router are conventionally "most core"),
+    tie-broken by highest degree (most links) when role doesn't
+    differentiate, which is how a real engineer would identify the
+    core of an all-router topology too.
+  - A breadth-first search from that root assigns every other node a
+    tier equal to its real hop-distance, so a star/hub topology fans
+    out visibly, a mesh lays out by actual shortest-path structure,
+    and a genuine chain still renders as a line -- because at that
+    point it IS one, not because of incidental name sorting.
+  - WITHIN a tier, each node's preferred horizontal position is the
+    average x of the parent(s) it's linked to one tier up, and a
+    left-to-right sweep enforces minimum spacing so nothing overlaps.
+  - A tier with more nodes than fit in one readable row (default cap:
+    14) wraps into multiple sub-rows, so 50 APs become a compact grid
+    instead of one extremely wide line.
+  - recommended_canvas_size() reports how big a canvas (in inches) is
+    needed to fit the computed layout without compressing nodes -- used
+    by every exporter so a small lab and a 100-device site each render
+    at an appropriate scale instead of one fixed-size box.
 """
 from __future__ import annotations
 
 import logging
 import math
-from typing import Dict, List, Tuple
+from collections import deque
+from typing import Dict, List, Set, Tuple
 
 from core.topology.topology_models import TopologyGraph, DeviceRole
 
 logger = logging.getLogger("NetBrain.Topology.Layout")
 
 
-LAYER_HEIGHT = 200       # vertical spacing between role tiers (router/switch/AP)
+LAYER_HEIGHT = 200       # vertical spacing between tiers
 ROW_HEIGHT = 110         # vertical spacing between wrapped sub-rows within ONE tier
 NODE_SPACING = 220       # horizontal spacing between adjacent nodes in a row
 MAX_NODES_PER_ROW = 14   # wrap threshold -- keeps a single row readable at any scale
+
+
+def _build_neighbor_map(graph: TopologyGraph) -> Dict[str, Set[str]]:
+    neighbors: Dict[str, Set[str]] = {}
+    for link in graph.links:
+        if link.device_a_ip in graph.nodes and link.device_b_ip in graph.nodes:
+            neighbors.setdefault(link.device_a_ip, set()).add(link.device_b_ip)
+            neighbors.setdefault(link.device_b_ip, set()).add(link.device_a_ip)
+    return neighbors
+
+
+def _assign_graph_tiers(graph: TopologyGraph, neighbors: Dict[str, Set[str]]) -> Dict[str, int]:
+    """
+    BFS-based tiering driven by ACTUAL connectivity, not assumed role
+    hierarchy. Handles disconnected components (each gets its own root)
+    and cycles/redundant links (standard BFS visited-tracking) without
+    special-casing. Role is used only to pick which node starts each
+    component's BFS -- firewalls/routers are conventionally "most core"
+    when multiple candidates are otherwise equal, with node DEGREE as
+    the tie-break once role no longer differentiates (e.g. a lab where
+    every device is a router) -- the same way an engineer would eyeball
+    "which device is the hub here" from the topology itself.
+    """
+    tier_of: Dict[str, int] = {}
+    remaining: Set[str] = set(graph.nodes.keys())
+
+    while remaining:
+        root = min(
+            remaining,
+            key=lambda ip: (graph.nodes[ip].role.layer, -len(neighbors.get(ip, ())))
+        )
+        tier_of[root] = 0
+        remaining.discard(root)
+        q = deque([root])
+        while q:
+            cur = q.popleft()
+            for nb in sorted(neighbors.get(cur, ())):
+                if nb in remaining:
+                    tier_of[nb] = tier_of[cur] + 1
+                    remaining.discard(nb)
+                    q.append(nb)
+
+    return tier_of
 
 
 def compute_layout(graph: TopologyGraph) -> None:
@@ -51,38 +105,31 @@ def compute_layout(graph: TopologyGraph) -> None:
     if not graph.nodes:
         return
 
-    # Group nodes by role layer (0=firewall ... bottom=AP/phone)
+    neighbors = _build_neighbor_map(graph)
+    tier_of = _assign_graph_tiers(graph, neighbors)
+
     layers: Dict[int, List[str]] = {}
-    for ip, node in graph.nodes.items():
-        layers.setdefault(node.role.layer, []).append(ip)
+    for ip in graph.nodes:
+        layers.setdefault(tier_of[ip], []).append(ip)
 
-    # Adjacency map for parent-lookup (undirected -- a node's "parent" is
-    # whichever neighbor already has a position, found while we process
-    # layers top-to-bottom).
-    neighbors: Dict[str, List[str]] = {}
-    for link in graph.links:
-        if link.device_a_ip in graph.nodes and link.device_b_ip in graph.nodes:
-            neighbors.setdefault(link.device_a_ip, []).append(link.device_b_ip)
-            neighbors.setdefault(link.device_b_ip, []).append(link.device_a_ip)
-
-    positions: Dict[str, float] = {}     # ip -> x (filled in as we go, top-down)
-    node_layer_row: Dict[str, Tuple[int, int]] = {}  # ip -> (layer_idx, row_idx)
+    positions: Dict[str, float] = {}
+    node_layer_row: Dict[str, Tuple[int, int]] = {}
 
     for layer_idx in sorted(layers.keys()):
         ips_in_layer = layers[layer_idx]
 
         if not positions:
-            # Top tier -- no parent context yet, just use a stable order.
+            # Top tier(s) -- no parent context yet, stable alphabetical order.
             ips_in_layer.sort(key=lambda ip: graph.nodes[ip].label())
         else:
             def preferred_x(ip: str) -> float:
-                parent_xs = [positions[n] for n in neighbors.get(ip, []) if n in positions]
+                parent_xs = [positions[n] for n in neighbors.get(ip, ()) if n in positions]
                 return sum(parent_xs) / len(parent_xs) if parent_xs else 0.0
             ips_in_layer.sort(key=preferred_x)
 
         # Wrap into multiple rows if this tier has too many nodes for one
-        # readable row (e.g. 50 APs), preserving the parent-clustered order
-        # so adjacent items in the same row are still related devices.
+        # readable row, preserving the parent-clustered order so adjacent
+        # items in the same row are still related devices.
         n = len(ips_in_layer)
         num_rows = max(1, math.ceil(n / MAX_NODES_PER_ROW))
         per_row = math.ceil(n / num_rows)
@@ -92,15 +139,11 @@ def compute_layout(graph: TopologyGraph) -> None:
             if not row_ips:
                 continue
 
-            # Anchor the row's center on the average preferred x of its
-            # members (when available) so wrapped rows still drift toward
-            # their actual parents left-to-right, rather than every row
-            # re-centering at 0 and losing that alignment.
             if positions:
                 anchors = [
-                    sum(positions[n] for n in neighbors.get(ip, []) if n in positions)
-                    / max(1, len([n for n in neighbors.get(ip, []) if n in positions]))
-                    for ip in row_ips if any(n in positions for n in neighbors.get(ip, []))
+                    sum(positions[n] for n in neighbors.get(ip, ()) if n in positions)
+                    / max(1, len([n for n in neighbors.get(ip, ()) if n in positions]))
+                    for ip in row_ips if any(n in positions for n in neighbors.get(ip, ()))
                 ]
                 row_center = sum(anchors) / len(anchors) if anchors else 0.0
             else:
@@ -143,12 +186,10 @@ def recommended_canvas_size(
     span_x = max(xs) - min(xs)
     span_y = max(ys) - min(ys)
 
-    # Layout units -> inches: NODE_SPACING units should map to roughly
-    # 2 inches of real spacing (node box width + a visible gap).
     units_to_inches = 2.0 / NODE_SPACING
 
-    width_in = max(13.0, span_x * units_to_inches + 3.0)    # +margins
-    height_in = max(7.5, span_y * units_to_inches + 3.5)    # +margins/title
+    width_in = max(13.0, span_x * units_to_inches + 3.0)
+    height_in = max(7.5, span_y * units_to_inches + 3.5)
 
     width_in = min(width_in, max_dimension_in)
     height_in = min(height_in, max_dimension_in)
