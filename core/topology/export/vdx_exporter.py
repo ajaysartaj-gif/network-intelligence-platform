@@ -6,7 +6,7 @@ Exports a TopologyGraph as a Visio-compatible .vdx file.
 Format note: this generates the legacy VDX (flat single-file XML)
 format rather than the modern .vsdx (zipped OOXML) format. Modern
 Visio (2013/2016/2019/365) still opens .vdx files directly via
-File → Open — it's long-standing documented backward compatibility,
+File -> Open -- it's long-standing documented backward compatibility,
 not a hack. The reason for choosing VDX over hand-rolling a .vsdx:
 .vsdx is a multi-part zip archive with several interdependent XML
 relationship files, and there is no actively-maintained pure-Python
@@ -15,8 +15,13 @@ can only edit an existing .vsdx template file). VDX is a single,
 much simpler XML schema that can be generated reliably.
 
 Shapes (router/switch/AP/firewall boxes) and links (connector lines)
-are both real Visio shapes — fully selectable, movable, and editable
+are both real Visio shapes -- fully selectable, movable, and editable
 once opened, not a flattened image.
+
+Page size is computed per-topology via recommended_canvas_size() --
+a small lab diagram gets a normal 13x7.5in page, a 70+ device site
+gets a proportionally larger page (capped at 50in), kept consistent
+with the PPTX/PDF exporters.
 """
 from __future__ import annotations
 
@@ -27,11 +32,10 @@ from typing import Optional
 
 from core.topology.topology_models import TopologyGraph, DeviceRole
 from core.topology.export.coords import compute_canvas_positions
+from core.topology.layout import recommended_canvas_size
 
 logger = logging.getLogger("NetBrain.Topology.Export.VDX")
 
-PAGE_W_IN = 13.0
-PAGE_H_IN = 7.5
 NODE_W_IN = 1.7
 NODE_H_IN = 0.65
 
@@ -49,21 +53,23 @@ def export_topology_to_vdx(graph: TopologyGraph) -> Optional[bytes]:
     if not graph.nodes:
         return None
 
+    page_w_in, page_h_in = recommended_canvas_size(graph)
+
     positions = compute_canvas_positions(
         graph,
-        canvas_width_in=PAGE_W_IN,
-        canvas_height_in=PAGE_H_IN - 0.9,
+        canvas_width_in=page_w_in,
+        canvas_height_in=page_h_in - 0.9,
         margin_in=0.9,
     )
 
     def flip_y(top_left_y: float) -> float:
-        """VDX page origin is bottom-left, y increases upward — flip from our top-left convention."""
-        return PAGE_H_IN - 0.9 - top_left_y
+        """VDX page origin is bottom-left, y increases upward -- flip from our top-left convention."""
+        return page_h_in - 0.9 - top_left_y
 
     shape_id = 1
     xml_parts = []
 
-    # ── Link shapes first (drawn behind nodes visually, doesn't matter in VDX z-order much) ──
+    # -- Link shapes first (drawn behind nodes visually, doesn't matter in VDX z-order much) --
     for link in graph.links:
         if link.device_a_ip not in positions or link.device_b_ip not in positions:
             continue
@@ -123,7 +129,7 @@ def export_topology_to_vdx(graph: TopologyGraph) -> Optional[bytes]:
         </Shape>""")
         shape_id += 1
 
-    # ── Node shapes ──
+    # -- Node shapes --
     for ip, node in graph.nodes.items():
         if ip not in positions:
             continue
@@ -164,7 +170,7 @@ def export_topology_to_vdx(graph: TopologyGraph) -> Optional[bytes]:
         </Shape>""")
         shape_id += 1
 
-    # ── Legend entries (small colored squares + text, bottom-left of page) ──
+    # -- Legend entries (small colored squares + text, bottom-left of page) --
     legend_x = 0.4
     legend_y = 0.35
     for role in (DeviceRole.ROUTER, DeviceRole.SWITCH, DeviceRole.ACCESS_POINT, DeviceRole.FIREWALL):
@@ -209,13 +215,13 @@ def export_topology_to_vdx(graph: TopologyGraph) -> Optional[bytes]:
     <Page ID="0" NameU="Page-1" Name="Page-1">
       <PageSheet>
         <PageProps>
-          <PageWidth>{PAGE_W_IN}</PageWidth>
-          <PageHeight>{PAGE_H_IN}</PageHeight>
+          <PageWidth>{page_w_in}</PageWidth>
+          <PageHeight>{page_h_in}</PageHeight>
         </PageProps>
       </PageSheet>
       <Shapes>
         <Shape ID="0" Type="Shape">
-          <XForm><PinX>{PAGE_W_IN/2:.4f}</PinX><PinY>{PAGE_H_IN - 0.3:.4f}</PinY><Width>{PAGE_W_IN - 0.8}</Width><Height>0.4</Height></XForm>
+          <XForm><PinX>{page_w_in/2:.4f}</PinX><PinY>{page_h_in - 0.3:.4f}</PinY><Width>{page_w_in - 0.8}</Width><Height>0.4</Height></XForm>
           <Line><LineWeight>0</LineWeight><LinePattern>0</LinePattern></Line>
           <Fill><FillPattern>0</FillPattern></Fill>
           <Char IX="0"><Size>0.22</Size><Color>RGB(30,41,59)</Color><Style>17</Style></Char>
@@ -228,7 +234,7 @@ def export_topology_to_vdx(graph: TopologyGraph) -> Optional[bytes]:
   </Pages>
 </VisioDocument>"""
 
-    # Self-validate as well-formed XML before returning — catch any
+    # Self-validate as well-formed XML before returning -- catch any
     # generation bugs here rather than handing the operator a broken file.
     try:
         ET.fromstring(full_xml)

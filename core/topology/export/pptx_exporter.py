@@ -1,10 +1,15 @@
 """
 core/topology/export/pptx_exporter.py
 ======================================
-Exports a TopologyGraph as a fully editable PowerPoint diagram —
+Exports a TopologyGraph as a fully editable PowerPoint diagram --
 every device is a real movable shape, every link a real connector,
 not a flattened image. Opens in PowerPoint/Keynote/Google Slides with
 all shapes selectable and re-positionable.
+
+Slide size is computed per-topology via recommended_canvas_size() --
+a small lab diagram gets a normal 13.33x7.5 slide, while a 70+ device
+site gets a proportionally larger slide (capped at 50", safely under
+PowerPoint's hard 56" limit) so nodes never overlap at scale.
 """
 from __future__ import annotations
 
@@ -14,6 +19,7 @@ from typing import Optional
 
 from core.topology.topology_models import TopologyGraph, DeviceRole
 from core.topology.export.coords import compute_canvas_positions
+from core.topology.layout import recommended_canvas_size
 
 logger = logging.getLogger("NetBrain.Topology.Export.PPTX")
 
@@ -28,8 +34,6 @@ except ImportError:
     PPTX_OK = False
 
 
-SLIDE_W_IN = 13.33
-SLIDE_H_IN = 7.5
 NODE_W_IN  = 1.7
 NODE_H_IN  = 0.65
 
@@ -45,25 +49,27 @@ def export_topology_to_pptx(graph: TopologyGraph) -> Optional[bytes]:
     python-pptx library isn't available.
     """
     if not PPTX_OK:
-        logger.warning("python-pptx not installed — PPTX export unavailable")
+        logger.warning("python-pptx not installed -- PPTX export unavailable")
         return None
     if not graph.nodes:
         return None
 
+    slide_w_in, slide_h_in = recommended_canvas_size(graph)
+
     positions = compute_canvas_positions(
         graph,
-        canvas_width_in=SLIDE_W_IN,
-        canvas_height_in=SLIDE_H_IN - 0.9,   # leave room for title
+        canvas_width_in=slide_w_in,
+        canvas_height_in=slide_h_in - 0.9,   # leave room for title
         margin_in=0.9,
     )
 
     prs = Presentation()
-    prs.slide_width = Inches(SLIDE_W_IN)
-    prs.slide_height = Inches(SLIDE_H_IN)
+    prs.slide_width = Inches(slide_w_in)
+    prs.slide_height = Inches(slide_h_in)
     slide = prs.slides.add_slide(prs.slide_layouts[6])  # blank layout
 
-    # ── Title ──
-    title_box = slide.shapes.add_textbox(Inches(0.4), Inches(0.15), Inches(SLIDE_W_IN - 0.8), Inches(0.6))
+    # -- Title --
+    title_box = slide.shapes.add_textbox(Inches(0.4), Inches(0.15), Inches(slide_w_in - 0.8), Inches(0.6))
     tf = title_box.text_frame
     tf.text = f"Network Topology — {graph.site_name} ({graph.city}, {graph.country})"
     tf.paragraphs[0].font.size = Pt(22)
@@ -72,7 +78,7 @@ def export_topology_to_pptx(graph: TopologyGraph) -> Optional[bytes]:
 
     y_offset = 0.9  # push everything below the title
 
-    # ── Links (draw first so they sit behind node shapes) ──
+    # -- Links (draw first so they sit behind node shapes) --
     for link in graph.links:
         if link.device_a_ip not in positions or link.device_b_ip not in positions:
             continue
@@ -103,7 +109,7 @@ def export_topology_to_pptx(graph: TopologyGraph) -> Optional[bytes]:
         label_tf.paragraphs[0].font.color.rgb = RGBColor(0x47, 0x55, 0x69)
         label_tf.paragraphs[0].alignment = PP_ALIGN.CENTER
 
-    # ── Nodes ──
+    # -- Nodes --
     for ip, node in graph.nodes.items():
         if ip not in positions:
             continue
@@ -132,8 +138,8 @@ def export_topology_to_pptx(graph: TopologyGraph) -> Optional[bytes]:
         p2.font.color.rgb = RGBColor(0xF0, 0xF0, 0xF0)
         p2.alignment = PP_ALIGN.CENTER
 
-    # ── Legend ──
-    legend_y = SLIDE_H_IN - 0.5
+    # -- Legend --
+    legend_y = slide_h_in - 0.5
     legend_x = 0.4
     for role in (DeviceRole.ROUTER, DeviceRole.SWITCH, DeviceRole.ACCESS_POINT, DeviceRole.FIREWALL):
         dot = slide.shapes.add_shape(

@@ -5,9 +5,14 @@ Exports a TopologyGraph as a vector PDF diagram (reportlab).
 
 Note on "editable": PDF shapes are vector graphics (crisp at any zoom,
 text stays selectable/searchable) but PDF does NOT support movable
-shape objects the way PPTX/Visio do — that's an inherent limitation of
+shape objects the way PPTX/Visio do -- that's an inherent limitation of
 the PDF format itself, not of this exporter. For a diagram operators
 can rearrange, use the PPTX or Visio export instead.
+
+Page size is computed per-topology via recommended_canvas_size() --
+a small lab diagram gets a normal 13x7.5in page, a 70+ device site
+gets a proportionally larger page (capped at 50in) so nodes never
+overlap at scale, kept consistent with the PPTX/VDX exporters.
 """
 from __future__ import annotations
 
@@ -17,6 +22,7 @@ from typing import Optional
 
 from core.topology.topology_models import TopologyGraph, DeviceRole
 from core.topology.export.coords import compute_canvas_positions
+from core.topology.layout import recommended_canvas_size
 
 logger = logging.getLogger("NetBrain.Topology.Export.PDF")
 
@@ -29,8 +35,6 @@ except ImportError:
     REPORTLAB_OK = False
 
 
-PAGE_W_IN = 13.0
-PAGE_H_IN = 7.5
 NODE_W_IN = 1.7
 NODE_H_IN = 0.65
 
@@ -38,26 +42,28 @@ NODE_H_IN = 0.65
 def export_topology_to_pdf(graph: TopologyGraph) -> Optional[bytes]:
     """Build a vector PDF diagram in memory and return its bytes."""
     if not REPORTLAB_OK:
-        logger.warning("reportlab not installed — PDF export unavailable")
+        logger.warning("reportlab not installed -- PDF export unavailable")
         return None
     if not graph.nodes:
         return None
 
+    page_w_in, page_h_in = recommended_canvas_size(graph)
+
     positions = compute_canvas_positions(
         graph,
-        canvas_width_in=PAGE_W_IN,
-        canvas_height_in=PAGE_H_IN - 0.9,
+        canvas_width_in=page_w_in,
+        canvas_height_in=page_h_in - 0.9,
         margin_in=0.9,
     )
 
     buf = io.BytesIO()
-    c = rl_canvas.Canvas(buf, pagesize=(PAGE_W_IN * inch, PAGE_H_IN * inch))
+    c = rl_canvas.Canvas(buf, pagesize=(page_w_in * inch, page_h_in * inch))
 
-    # ── Title ──
+    # -- Title --
     c.setFillColor(HexColor("#1e293b"))
     c.setFont("Helvetica-Bold", 18)
     c.drawString(
-        0.4 * inch, (PAGE_H_IN - 0.5) * inch,
+        0.4 * inch, (page_h_in - 0.5) * inch,
         f"Network Topology — {graph.site_name} ({graph.city}, {graph.country})",
     )
 
@@ -67,10 +73,10 @@ def export_topology_to_pdf(graph: TopologyGraph) -> Optional[bytes]:
         bottom-left-origin coordinate system.
         """
         page_x = px_in
-        page_y = PAGE_H_IN - 0.9 - py_in   # flip vertically, account for title space
+        page_y = page_h_in - 0.9 - py_in   # flip vertically, account for title space
         return page_x, page_y
 
-    # ── Links (drawn first, behind nodes) ──
+    # -- Links (drawn first, behind nodes) --
     c.setStrokeColor(HexColor("#64748b"))
     c.setLineWidth(1.5)
     for link in graph.links:
@@ -91,7 +97,7 @@ def export_topology_to_pdf(graph: TopologyGraph) -> Optional[bytes]:
             f"{link.device_a_port} ↔ {link.device_b_port}",
         )
 
-    # ── Nodes ──
+    # -- Nodes --
     for ip, node in graph.nodes.items():
         if ip not in positions:
             continue
@@ -122,7 +128,7 @@ def export_topology_to_pdf(graph: TopologyGraph) -> Optional[bytes]:
             ip_display,
         )
 
-    # ── Legend ──
+    # -- Legend --
     legend_y = 0.4
     legend_x = 0.4
     c.setFont("Helvetica", 10)
