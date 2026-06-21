@@ -21,6 +21,14 @@ logger = logging.getLogger("NetBrain.Topology.Cache")
 
 _CACHE_FILE = ".netbrain_topology_cache.json"
 _DEFAULT_TTL_MINUTES = 60   # consider a cached topology "fresh" for 1 hour
+# Bump whenever a change to discovery/reconciliation alters the SHAPE of the
+# stored graph (which nodes/links exist), so a graph cached on disk by older
+# logic is auto-treated as stale instead of being served silently. Without
+# this, a code fix that changes graph structure shows "no improvement" on a
+# cache hit because the OLD graph is returned and discovery never re-runs.
+# v2: hostname-based node-identity reconciliation (collapses split-identity
+# duplicate nodes, e.g. "192.168.96.133" + "R2" -> one node).
+_SCHEMA_VERSION = 2
 
 
 def _site_key(site_name: str, city: str, country: str, region: str) -> str:
@@ -71,11 +79,24 @@ class TopologyCache:
         site_name: str, city: str, country: str, region: str,
         ttl_minutes: int = _DEFAULT_TTL_MINUTES,
     ) -> bool:
-        graph = self.get(site_name, city, country, region)
-        if not graph or not graph.built_at:
+        key = _site_key(site_name, city, country, region)
+        with self._lock:
+            raw = self._data.get(key)
+        if not raw:
+            return False
+        # A graph cached by older discovery logic must NOT be served -- treat
+        # it as stale so the next Build runs a fresh poll with current logic.
+        if raw.get("_schema_version") != _SCHEMA_VERSION:
+            logger.info(
+                f"Cached topology for {key} is schema v{raw.get('_schema_version')} "
+                f"(current v{_SCHEMA_VERSION}) -- treating as stale, will re-discover."
+            )
+            return False
+        built_at = raw.get("built_at")
+        if not built_at:
             return False
         try:
-            built = datetime.fromisoformat(graph.built_at)
+            built = datetime.fromisoformat(built_at)
             return (datetime.utcnow() - built) < timedelta(minutes=ttl_minutes)
         except Exception:
             return False
@@ -83,7 +104,7 @@ class TopologyCache:
     def set(self, graph: TopologyGraph) -> None:
         key = _site_key(graph.site_name, graph.city, graph.country, graph.region)
         with self._lock:
-            self._data[key] = graph.to_dict()
+            self._data[key] = {**graph.to_dict(), "_schema_version": _SCHEMA_VERSION}
             self._save()
 
     def clear(
