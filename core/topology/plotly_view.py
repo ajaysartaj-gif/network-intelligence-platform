@@ -17,7 +17,9 @@ from typing import Optional
 
 from core.topology.topology_models import TopologyGraph, DeviceRole
 from core.topology.interface_naming import abbreviate_interface
-from core.topology.layout import elbow_path, endpoint_label_positions, compute_link_anchor_points
+from core.topology.layout import (
+    elbow_path, endpoint_label_positions, compute_link_anchor_points, compute_bend_fractions,
+)
 from core.topology.l3_topology import compute_l3_status
 
 logger = logging.getLogger("NetBrain.Topology.PlotlyView")
@@ -69,6 +71,7 @@ def build_topology_figure(graph: TopologyGraph, view_mode: str = "physical") -> 
     # so a hub with several connections doesn't have every link's near-
     # node label collide at the device's exact center coordinate.
     anchors = compute_link_anchor_points(graph)
+    bend_fractions = compute_bend_fractions(graph)
     l3_status = compute_l3_status(graph) if is_logical else {}
 
     # Edges are grouped into separate traces by L3 status (logical mode)
@@ -86,7 +89,8 @@ def build_topology_figure(graph: TopologyGraph, view_mode: str = "physical") -> 
         if not a or not b or idx not in anchors:
             continue
         (ax, ay), (bx, by) = anchors[idx]
-        path = elbow_path(ax, ay, bx, by)
+        bend = bend_fractions.get(idx, 0.5)
+        path = elbow_path(ax, ay, bx, by, bend_fraction=bend)
 
         group_key = "_physical"
         status_obj = None
@@ -100,7 +104,7 @@ def build_topology_figure(graph: TopologyGraph, view_mode: str = "physical") -> 
         gx.append(None)
         gy.append(None)
 
-        (a_lx, a_ly), (b_lx, b_ly) = endpoint_label_positions(ax, ay, bx, by)
+        (a_lx, a_ly), (b_lx, b_ly) = endpoint_label_positions(ax, ay, bx, by, bend_fraction=bend)
         if is_logical:
             a_text = status_obj.a_subnet if status_obj and status_obj.a_subnet else "no L3 data"
             b_text = status_obj.b_subnet if status_obj and status_obj.b_subnet else "no L3 data"

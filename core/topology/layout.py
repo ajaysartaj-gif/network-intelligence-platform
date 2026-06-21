@@ -283,7 +283,52 @@ def compute_link_slot_fractions(graph: TopologyGraph) -> Dict[int, Tuple[float, 
     return result
 
 
-def elbow_path(ax: float, ay: float, bx: float, by: float) -> List[Tuple[float, float]]:
+def compute_bend_fractions(graph: TopologyGraph) -> Dict[int, float]:
+    """
+    For each link, the fraction (0..1) along its vertical span where
+    the elbow should bend. Siblings sharing the same "uphill" parent
+    (the endpoint closer to tier 0, i.e. smaller y) are staggered
+    across a band instead of all bending at the exact midpoint.
+
+    Without this, every link from one parent shares the identical
+    midpoint Y (since mid_y depends only on ay/by, which are the same
+    for all siblings spanning the same tier gap), collapsing into one
+    visually shared horizontal "trunk". A child positioned directly
+    below its parent then has NO horizontal segment at all (a pure
+    vertical line), making it visually indistinguishable from a line
+    that merely crosses that trunk without actually connecting to it
+    -- confirmed as a real user-reported clarity issue on a 4-device
+    hub topology (R2 hub with a child positioned dead-center below it,
+    whose straight-through line read as ambiguous against the other
+    two siblings' shared bend row), not just a theoretical concern.
+
+    Only counts DOWNWARD sibling links (to children) when grouping --
+    a node's own upward link to ITS parent is excluded, so staggering
+    reflects sibling fan-out specifically rather than being thrown off
+    by an unrelated uplink sharing the same node.
+    """
+    BAND_LOW, BAND_HIGH = 0.32, 0.68   # stay clear of either endpoint
+
+    children_of: Dict[str, List[int]] = {}
+    for idx, link in enumerate(graph.links):
+        a = graph.nodes.get(link.device_a_ip)
+        b = graph.nodes.get(link.device_b_ip)
+        if not a or not b or a.y == b.y:
+            continue   # peer link -- elbow_path draws these straight across, no bend
+        parent_ip = link.device_a_ip if a.y < b.y else link.device_b_ip
+        children_of.setdefault(parent_ip, []).append(idx)
+
+    fractions: Dict[int, float] = {}
+    for parent_ip, idxs in children_of.items():
+        n = len(idxs)
+        for i, idx in enumerate(idxs):
+            fractions[idx] = 0.5 if n <= 1 else BAND_LOW + (i / (n - 1)) * (BAND_HIGH - BAND_LOW)
+    return fractions
+
+
+def elbow_path(
+    ax: float, ay: float, bx: float, by: float, bend_fraction: float = 0.5,
+) -> List[Tuple[float, float]]:
     """
     Right-angled (orthogonal) connector waypoints from A to B -- the
     standard tree/org-chart routing convention used in professional
@@ -291,19 +336,26 @@ def elbow_path(ax: float, ay: float, bx: float, by: float) -> List[Tuple[float, 
     than a direct diagonal line. Shared by the interactive view and
     all three exporters so the routing looks identical everywhere.
 
+    bend_fraction (0..1) controls where along the vertical span the
+    horizontal segment sits -- defaults to the midpoint (0.5) for
+    backward compatibility, but callers should pass the staggered
+    value from compute_bend_fractions() so sibling links spread across
+    a band instead of collapsing onto one shared row (see that
+    function's docstring for why this matters).
+
     Same-tier links (ay == by, e.g. a peer connection between two
     same-rank devices) just draw straight across -- there's no
     meaningful "down/across/down" for a horizontal peer link.
     """
     if ay == by:
         return [(ax, ay), (bx, by)]
-    mid_y = (ay + by) / 2
+    mid_y = ay + (by - ay) * bend_fraction
     return [(ax, ay), (ax, mid_y), (bx, mid_y), (bx, by)]
 
 
 def endpoint_label_positions(
     ax: float, ay: float, bx: float, by: float,
-    offset_fraction: float = 0.25,
+    offset_fraction: float = 0.25, bend_fraction: float = 0.5,
 ) -> Tuple[Tuple[float, float], Tuple[float, float]]:
     """
     Returns ((label_a_x, label_a_y), (label_b_x, label_b_y)) -- a point
@@ -311,8 +363,12 @@ def endpoint_label_positions(
     of the elbow path. Matches the convention of labeling each side's
     own interface right where its cable leaves that device, rather
     than one combined label floating at the link's midpoint.
+
+    bend_fraction must match whatever was passed to elbow_path() for
+    this same link, or the label position won't align with the
+    actually-drawn line.
     """
-    path = elbow_path(ax, ay, bx, by)
+    path = elbow_path(ax, ay, bx, by, bend_fraction=bend_fraction)
     # Point near A: a fraction of the way along the FIRST segment.
     a_seg_x = path[0][0] + (path[1][0] - path[0][0]) * offset_fraction
     a_seg_y = path[0][1] + (path[1][1] - path[0][1]) * offset_fraction
