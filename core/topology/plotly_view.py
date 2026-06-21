@@ -18,6 +18,7 @@ from typing import Optional
 from core.topology.topology_models import TopologyGraph, DeviceRole
 from core.topology.interface_naming import abbreviate_interface
 from core.topology.layout import elbow_path, endpoint_label_positions, compute_link_anchor_points
+from core.topology.l3_topology import compute_l3_status
 
 logger = logging.getLogger("NetBrain.Topology.PlotlyView")
 
@@ -27,11 +28,35 @@ try:
 except ImportError:
     PLOTLY_OK = False
 
+# Logical (L3) view edge styling by match status -- solid/dashed/dotted
+# kept distinct (not just color) so the difference reads even without
+# relying on color perception.
+_L3_STYLE = {
+    "matched":    dict(color="#22c55e", dash="solid", width=1.5),
+    "mismatched": dict(color="#ef4444", dash="dash",  width=2.0),
+    "unknown":    dict(color="#94a3b8", dash="dot",   width=1.5),
+}
+_L3_LEGEND_LABEL = {
+    "matched": "L3 matched", "mismatched": "L3 mismatched ⚠️", "unknown": "L3 unknown",
+}
 
-def build_topology_figure(graph: TopologyGraph) -> Optional["go.Figure"]:
-    """Return a Plotly Figure for the given TopologyGraph, or None if empty/unavailable."""
+
+def build_topology_figure(graph: TopologyGraph, view_mode: str = "physical") -> Optional["go.Figure"]:
+    """
+    Return a Plotly Figure for the given TopologyGraph, or None if
+    empty/unavailable.
+
+    view_mode:
+      "physical" (default) -- unchanged from the original behavior:
+        single-color edges, per-endpoint PORT labels.
+      "logical" -- edges colored/dashed by L3 (IP subnet) match status
+        per compute_l3_status, per-endpoint SUBNET labels instead of
+        port names. Node positions and elbow routing are identical to
+        physical mode; only edge styling and labels differ.
+    """
     if not PLOTLY_OK or not graph.nodes:
         return None
+    is_logical = view_mode == "logical"
 
     fig = go.Figure()
 
@@ -44,8 +69,17 @@ def build_topology_figure(graph: TopologyGraph) -> Optional["go.Figure"]:
     # so a hub with several connections doesn't have every link's near-
     # node label collide at the device's exact center coordinate.
     anchors = compute_link_anchor_points(graph)
-    edge_x, edge_y = [], []
+    l3_status = compute_l3_status(graph) if is_logical else {}
+
+    # Edges are grouped into separate traces by L3 status (logical mode)
+    # or a single trace (physical mode, unchanged) -- mirrors the by_role
+    # grouping already used for node markers below, keeping trace count
+    # low regardless of device count.
+    edge_groups: dict = {"_physical": ([], [])} if not is_logical else {
+        "matched": ([], []), "mismatched": ([], []), "unknown": ([], []),
+    }
     edge_annotations = []
+
     for idx, link in enumerate(graph.links):
         a = graph.nodes.get(link.device_a_ip)
         b = graph.nodes.get(link.device_b_ip)
@@ -53,31 +87,54 @@ def build_topology_figure(graph: TopologyGraph) -> Optional["go.Figure"]:
             continue
         (ax, ay), (bx, by) = anchors[idx]
         path = elbow_path(ax, ay, bx, by)
+
+        group_key = "_physical"
+        status_obj = None
+        if is_logical:
+            status_obj = l3_status.get(idx)
+            group_key = status_obj.status if status_obj else "unknown"
+        gx, gy = edge_groups[group_key]
         for px, py in path:
-            edge_x.append(px)
-            edge_y.append(py)
-        edge_x.append(None)
-        edge_y.append(None)
+            gx.append(px)
+            gy.append(py)
+        gx.append(None)
+        gy.append(None)
 
         (a_lx, a_ly), (b_lx, b_ly) = endpoint_label_positions(ax, ay, bx, by)
-        for (lx, ly), port in (
-            ((a_lx, a_ly), link.device_a_port),
-            ((b_lx, b_ly), link.device_b_port),
-        ):
+        if is_logical:
+            a_text = status_obj.a_subnet if status_obj and status_obj.a_subnet else "no L3 data"
+            b_text = status_obj.b_subnet if status_obj and status_obj.b_subnet else "no L3 data"
+        else:
+            a_text = abbreviate_interface(link.device_a_port)
+            b_text = abbreviate_interface(link.device_b_port)
+        for (lx, ly), text in (((a_lx, a_ly), a_text), ((b_lx, b_ly), b_text)):
             edge_annotations.append(dict(
                 x=lx, y=ly,
-                text=abbreviate_interface(port),
+                text=text,
                 showarrow=False,
                 font=dict(size=9, color="#475569"),
                 bgcolor="rgba(255,255,255,0.85)",
                 borderpad=1,
             ))
 
-    fig.add_trace(go.Scatter(
-        x=edge_x, y=edge_y, mode="lines",
-        line=dict(color="#64748b", width=1.5),
-        hoverinfo="skip", showlegend=False,
-    ))
+    if is_logical:
+        for status_key in ("matched", "mismatched", "unknown"):
+            gx, gy = edge_groups[status_key]
+            if not gx:
+                continue
+            style = _L3_STYLE[status_key]
+            fig.add_trace(go.Scatter(
+                x=gx, y=gy, mode="lines",
+                line=dict(color=style["color"], width=style["width"], dash=style["dash"]),
+                hoverinfo="skip", showlegend=True, name=_L3_LEGEND_LABEL[status_key],
+            ))
+    else:
+        gx, gy = edge_groups["_physical"]
+        fig.add_trace(go.Scatter(
+            x=gx, y=gy, mode="lines",
+            line=dict(color="#64748b", width=1.5),
+            hoverinfo="skip", showlegend=False,
+        ))
 
     # ── Node markers, grouped by role for a clean legend ──
     by_role: dict = {}

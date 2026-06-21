@@ -74,6 +74,12 @@ class TopologyNode:
     x: float = 0.0
     y: float = 0.0
     discovered_only: bool = False  # True if found via CDP/LLDP but not in our approved inventory
+    interface_subnets: Dict[str, str] = field(default_factory=dict)
+    # normalized interface name -> subnet CIDR, e.g. {"Fa0/0": "192.168.96.0/24"}.
+    # Populated by L3 discovery (show ip route connected), separate from the
+    # CDP/LLDP physical discovery above -- empty for devices/vendors where L3
+    # discovery hasn't run or isn't supported yet, which is a valid state,
+    # not an error (renders as "L3 status unknown" rather than "mismatched").
 
     def label(self) -> str:
         return self.hostname or self.ip

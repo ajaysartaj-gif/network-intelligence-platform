@@ -22,6 +22,7 @@ from typing import Any, List, Optional
 
 from core.topology.topology_models import TopologyGraph, TopologyNode, TopologyLink, DeviceRole
 from core.topology.discovery import discover_neighbors, normalize_interface_name
+from core.topology.l3_discovery import discover_ip_subnets
 from core.topology.role_classifier import classify_role
 from core.topology.layout import compute_layout
 from core.topology.topology_cache import get_topology_cache
@@ -143,6 +144,33 @@ def build_topology_for_site(
                     device_b_port=nb.neighbor_interface or nb.local_interface,
                     protocol=nb.protocol,
                 ))
+
+    # L3 (IP subnet) discovery -- separate pass from CDP/LLDP above, kept
+    # modular since it's a genuinely different concern (interface_subnets
+    # for the Logical view vs. physical adjacency for the Physical view).
+    # Scoped only to site_devices (our approved inventory) -- NOT to
+    # discovered_only neighbors picked up via CDP/LLDP above, since we
+    # only have SSH credentials/trust for devices we've actually approved.
+    # A discovered_only neighbor with no L3 data simply renders as
+    # "unknown" status on its links in the Logical view rather than
+    # "mismatched", which is the correct, honest state for a device we
+    # haven't polled.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = {ex.submit(discover_ip_subnets, dev): dev for dev in site_devices}
+        for fut in concurrent.futures.as_completed(futures, timeout=120):
+            dev = futures[fut]
+            try:
+                l3_result = fut.result()
+            except Exception as exc:
+                logger.debug(f"L3 discovery failed for {dev.hostname or dev.ip}: {exc}")
+                continue
+
+            if not l3_result.success or dev.ip not in graph.nodes:
+                continue
+
+            node = graph.nodes[dev.ip]
+            for rec in l3_result.subnets:
+                node.interface_subnets[rec.interface] = rec.subnet
 
     compute_layout(graph)
     cache.set(graph)
