@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""
+probe_ssh.py
+============
+Pinpoints WHY netmiko can't connect to the GNS3 routers even though
+`nc -zv <ip> 22` succeeds. Run from the repo root:
+
+    python3 probe_ssh.py 192.168.96.133
+
+(or with no arg, it probes both .132 and .133.)
+
+Unlike the topology diagnostic, this:
+  * loads your REAL SSH creds from .streamlit/secrets.toml (the way the app
+    does), so we're not silently testing admin/admin
+  * reads the raw SSH banner straight off the socket (tells us if the SSH
+    server is even alive and what version string it presents)
+  * tries netmiko AND raw paramiko, printing the EXACT exception + traceback
+  * retries paramiko with LEGACY key-exchange / host-key algorithms enabled
+    -- the classic failure with old Cisco IOS images in GNS3 vs modern
+    paramiko, which disables those algorithms by default
+
+The combination tells us, with no guessing, whether this is: a dead SSH
+server, an algorithm-negotiation mismatch, a credential problem, or telnet.
+"""
+import sys
+import os
+import socket
+import traceback
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+
+def load_secrets():
+    """Read SSH creds from .streamlit/secrets.toml the way the app's bridge does."""
+    creds = {"user": "admin", "pass": "admin", "secret": "", "device_type": "cisco_ios", "port": 22}
+    path = os.path.join(".streamlit", "secrets.toml")
+    if not os.path.exists(path):
+        print(f"  (no {path} found -- falling back to admin/admin defaults)")
+        return creds
+    try:
+        try:
+            import tomllib
+            with open(path, "rb") as f:
+                data = tomllib.load(f)
+        except ImportError:
+            import toml
+            data = toml.load(path)
+        creds["user"] = data.get("GNS3_SSH_USER", creds["user"])
+        creds["pass"] = data.get("GNS3_SSH_PASS", creds["pass"])
+        creds["secret"] = data.get("GNS3_SSH_SECRET", creds["secret"])
+        creds["device_type"] = data.get("GNS3_DEVICE_TYPE", creds["device_type"])
+        try:
+            creds["port"] = int(data.get("GNS3_ROUTER_PORT", creds["port"]) or creds["port"])
+        except Exception:
+            pass
+        print(f"  loaded creds from {path}: user={creds['user']!r}, "
+              f"device_type={creds['device_type']!r}, port={creds['port']}")
+    except Exception as exc:
+        print(f"  could not parse {path}: {exc} -- using admin/admin")
+    return creds
+
+
+def probe_banner(ip, port):
+    print(f"\n[1] RAW SOCKET -- read SSH banner from {ip}:{port}")
+    try:
+        s = socket.create_connection((ip, port), timeout=10)
+        s.settimeout(8)
+        banner = s.recv(256)
+        s.close()
+        text = banner.decode(errors="replace").strip()
+        print(f"    BANNER RECEIVED: {text!r}")
+        if text.startswith("SSH-"):
+            print("    -> SSH server is alive and presenting a banner. "
+                  "So the failure is AFTER this: key-exchange, cipher, or auth.")
+        else:
+            print("    -> Not an SSH banner. This port may be telnet/console, not SSH.")
+    except socket.timeout:
+        print("    TIMEOUT waiting for banner. TCP opened but server sent nothing "
+              "(common with telnet consoles, which wait for input, or a hung vty).")
+    except Exception as exc:
+        print(f"    ERROR: {type(exc).__name__}: {exc}")
+
+
+def probe_netmiko(ip, port, creds):
+    print(f"\n[2] NETMIKO connect to {ip}:{port} (device_type={creds['device_type']})")
+    try:
+        from netmiko import ConnectHandler
+        import netmiko, paramiko
+        print(f"    netmiko {netmiko.__version__}, paramiko {paramiko.__version__}")
+        cfg = dict(
+            device_type=creds["device_type"] or "cisco_ios",
+            host=ip, port=port,
+            username=creds["user"], password=creds["pass"],
+            timeout=25, auth_timeout=25, banner_timeout=25,
+            fast_cli=False, global_delay_factor=2,
+        )
+        if creds["secret"]:
+            cfg["secret"] = creds["secret"]
+        conn = ConnectHandler(**cfg)
+        prompt = conn.find_prompt()
+        print(f"    SUCCESS. Prompt: {prompt!r}")
+        conn.disconnect()
+    except Exception as exc:
+        print(f"    FAILED: {type(exc).__name__}: {exc}")
+
+
+def probe_paramiko_legacy(ip, port, creds):
+    print(f"\n[3] RAW PARAMIKO with LEGACY algorithms enabled to {ip}:{port}")
+    try:
+        import paramiko
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        # Re-enable the old algorithms modern paramiko disables by default,
+        # which old Cisco IOS images in GNS3 typically still require.
+        client.connect(
+            ip, port=port, username=creds["user"], password=creds["pass"],
+            timeout=20, banner_timeout=25, auth_timeout=25,
+            look_for_keys=False, allow_agent=False,
+            disabled_algorithms={},  # clear paramiko's default disables
+        )
+        stdin, stdout, stderr = client.exec_command("show clock", timeout=15)
+        out = stdout.read().decode(errors="replace")
+        print(f"    SUCCESS with legacy algos. Output starts: {out[:60]!r}")
+        client.close()
+    except Exception as exc:
+        print(f"    FAILED: {type(exc).__name__}: {exc}")
+        # Show the deepest cause -- paramiko nests the real reason
+        tb = traceback.format_exc()
+        for line in tb.splitlines():
+            if "kex" in line.lower() or "algorithm" in line.lower() or "banner" in line.lower():
+                print(f"    >> {line.strip()}")
+
+
+def main():
+    targets = sys.argv[1:] or ["192.168.96.133", "192.168.96.132"]
+    print("=" * 70)
+    print("SSH CONNECTION PROBE")
+    print("=" * 70)
+    creds = load_secrets()
+    for ip in targets:
+        port = creds["port"] if creds["port"] != 22 else 22
+        print("\n" + "#" * 70)
+        print(f"# TARGET: {ip}")
+        print("#" * 70)
+        probe_banner(ip, 22)
+        probe_netmiko(ip, 22, creds)
+        probe_paramiko_legacy(ip, 22, creds)
+    print("\n" + "=" * 70)
+    print("END PROBE -- paste this whole output back.")
+    print("=" * 70)
+
+
+if __name__ == "__main__":
+    main()
