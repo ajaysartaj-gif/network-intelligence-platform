@@ -17,6 +17,7 @@ from typing import Optional
 
 from core.topology.topology_models import TopologyGraph, DeviceRole
 from core.topology.interface_naming import abbreviate_interface
+from core.topology.layout import elbow_path, endpoint_label_positions, compute_link_anchor_points
 
 logger = logging.getLogger("NetBrain.Topology.PlotlyView")
 
@@ -35,27 +36,42 @@ def build_topology_figure(graph: TopologyGraph) -> Optional["go.Figure"]:
     fig = go.Figure()
 
     # ── Edge lines (drawn first, behind markers) ──
+    # Orthogonal "elbow" routing (down/across/down) and per-endpoint port
+    # labels -- matches the standard tree-style Visio network diagram
+    # convention (each side's own interface labeled where its cable
+    # leaves that device), not a single combined midpoint label.
+    # Anchor points are slotted per-device (compute_link_anchor_points)
+    # so a hub with several connections doesn't have every link's near-
+    # node label collide at the device's exact center coordinate.
+    anchors = compute_link_anchor_points(graph)
     edge_x, edge_y = [], []
     edge_annotations = []
-    for link in graph.links:
+    for idx, link in enumerate(graph.links):
         a = graph.nodes.get(link.device_a_ip)
         b = graph.nodes.get(link.device_b_ip)
-        if not a or not b:
+        if not a or not b or idx not in anchors:
             continue
-        edge_x += [a.x, b.x, None]
-        edge_y += [a.y, b.y, None]
-        mid_x = (a.x + b.x) / 2
-        mid_y = (a.y + b.y) / 2
-        # Visible, always-on port label at the link midpoint (not hover-only) —
-        # this is what shows "Fa0/0 <-> Fa0/0" directly on the canvas.
-        edge_annotations.append(dict(
-            x=mid_x, y=mid_y,
-            text=f"{abbreviate_interface(link.device_a_port)} ↔ {abbreviate_interface(link.device_b_port)}",
-            showarrow=False,
-            font=dict(size=10, color="#475569"),
-            bgcolor="rgba(255,255,255,0.85)",
-            borderpad=1,
-        ))
+        (ax, ay), (bx, by) = anchors[idx]
+        path = elbow_path(ax, ay, bx, by)
+        for px, py in path:
+            edge_x.append(px)
+            edge_y.append(py)
+        edge_x.append(None)
+        edge_y.append(None)
+
+        (a_lx, a_ly), (b_lx, b_ly) = endpoint_label_positions(ax, ay, bx, by)
+        for (lx, ly), port in (
+            ((a_lx, a_ly), link.device_a_port),
+            ((b_lx, b_ly), link.device_b_port),
+        ):
+            edge_annotations.append(dict(
+                x=lx, y=ly,
+                text=abbreviate_interface(port),
+                showarrow=False,
+                font=dict(size=9, color="#475569"),
+                bgcolor="rgba(255,255,255,0.85)",
+                borderpad=1,
+            ))
 
     fig.add_trace(go.Scatter(
         x=edge_x, y=edge_y, mode="lines",

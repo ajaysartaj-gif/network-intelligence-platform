@@ -50,7 +50,14 @@ def build_topology_for_site(
     if use_cache and cache.is_fresh(site_name, city, country, region, cache_ttl_minutes):
         cached = cache.get(site_name, city, country, region)
         if cached:
-            logger.info(f"Using cached topology for site '{site_name}'")
+            logger.info(f"Using cached discovery data for site '{site_name}' (recomputing layout fresh)")
+            # Layout is cheap pure-math, unlike CDP/LLDP polling -- recompute
+            # it every time even on a cache hit, so improvements to the
+            # layout algorithm show up immediately without requiring a full
+            # (expensive, network-polling) Force Refresh. Only the discovery
+            # data itself (which devices exist, what they're linked to) is
+            # what's actually worth caching.
+            compute_layout(cached)
             return cached
 
     site_devices = [

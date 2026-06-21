@@ -194,3 +194,129 @@ def recommended_canvas_size(
     width_in = min(width_in, max_dimension_in)
     height_in = min(height_in, max_dimension_in)
     return width_in, height_in
+
+
+def _compute_slot_indices(graph: TopologyGraph) -> Dict[Tuple[str, int], Tuple[int, int]]:
+    """
+    Coordinate-space-independent: for every (device_ip, link_index)
+    pair, returns (slot_index, total_links_on_this_device) -- pure
+    indexing, no units. Each renderer turns this into an actual offset
+    using its own sense of spacing (layout units for the interactive
+    view, a fraction of node width for the PPTX/PDF/VDX exporters).
+    """
+    touches: Dict[str, List[int]] = {}
+    for idx, link in enumerate(graph.links):
+        if link.device_a_ip in graph.nodes:
+            touches.setdefault(link.device_a_ip, []).append(idx)
+        if link.device_b_ip in graph.nodes:
+            touches.setdefault(link.device_b_ip, []).append(idx)
+
+    slots: Dict[Tuple[str, int], Tuple[int, int]] = {}
+    for ip, link_idxs in touches.items():
+        n = len(link_idxs)
+        for i, idx in enumerate(link_idxs):
+            slots[(ip, idx)] = (i, n)
+    return slots
+
+
+def compute_link_anchor_points(
+    graph: TopologyGraph,
+) -> Dict[int, Tuple[Tuple[float, float], Tuple[float, float]]]:
+    """
+    Layout-unit version (matches node.x/node.y directly) -- for every
+    link, returns ((ax, ay), (bx, by)), the actual anchor point on each
+    device accounting for multiple links sharing that device, so a
+    hub's per-link port labels don't all collide at the device's exact
+    center. Used by the interactive Plotly view. A real device has each
+    cable plugged into a distinct physical port, not every link
+    converging on one point.
+    """
+    MAX_SPREAD = 180.0   # total width the slots can fan out across, in layout units
+    slots = _compute_slot_indices(graph)
+
+    def _offset(ip: str, idx: int) -> float:
+        i, n = slots.get((ip, idx), (0, 1))
+        if n <= 1:
+            return 0.0
+        spacing = min(40.0, MAX_SPREAD / (n - 1))
+        return (i - (n - 1) / 2) * spacing
+
+    result: Dict[int, Tuple[Tuple[float, float], Tuple[float, float]]] = {}
+    for idx, link in enumerate(graph.links):
+        a = graph.nodes.get(link.device_a_ip)
+        b = graph.nodes.get(link.device_b_ip)
+        if not a or not b:
+            continue
+        result[idx] = (
+            (a.x + _offset(link.device_a_ip, idx), a.y),
+            (b.x + _offset(link.device_b_ip, idx), b.y),
+        )
+    return result
+
+
+def compute_link_slot_fractions(graph: TopologyGraph) -> Dict[int, Tuple[float, float]]:
+    """
+    Inch-space-ready version -- for every link, returns
+    (a_slot_fraction, b_slot_fraction), each device's own anchor offset
+    as a fraction of ITS node-box width (multiply by NODE_W_IN in the
+    calling exporter). Same underlying slot assignment as
+    compute_link_anchor_points, just expressed relative to node width
+    instead of an absolute layout-unit offset, since the PPTX/PDF/VDX
+    exporters work in inches after compute_canvas_positions normalizes
+    node.x/node.y into a physical page size.
+    """
+    MAX_SPREAD_FRACTION = 1.6   # total spread, in units of node width
+    slots = _compute_slot_indices(graph)
+
+    def _fraction(ip: str, idx: int) -> float:
+        i, n = slots.get((ip, idx), (0, 1))
+        if n <= 1:
+            return 0.0
+        step = min(0.35, MAX_SPREAD_FRACTION / (n - 1))
+        return (i - (n - 1) / 2) * step
+
+    result: Dict[int, Tuple[float, float]] = {}
+    for idx, link in enumerate(graph.links):
+        if link.device_a_ip not in graph.nodes or link.device_b_ip not in graph.nodes:
+            continue
+        result[idx] = (_fraction(link.device_a_ip, idx), _fraction(link.device_b_ip, idx))
+    return result
+
+
+def elbow_path(ax: float, ay: float, bx: float, by: float) -> List[Tuple[float, float]]:
+    """
+    Right-angled (orthogonal) connector waypoints from A to B -- the
+    standard tree/org-chart routing convention used in professional
+    Visio network diagrams (down from A, across, down into B), rather
+    than a direct diagonal line. Shared by the interactive view and
+    all three exporters so the routing looks identical everywhere.
+
+    Same-tier links (ay == by, e.g. a peer connection between two
+    same-rank devices) just draw straight across -- there's no
+    meaningful "down/across/down" for a horizontal peer link.
+    """
+    if ay == by:
+        return [(ax, ay), (bx, by)]
+    mid_y = (ay + by) / 2
+    return [(ax, ay), (ax, mid_y), (bx, mid_y), (bx, by)]
+
+
+def endpoint_label_positions(
+    ax: float, ay: float, bx: float, by: float,
+    offset_fraction: float = 0.25,
+) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+    """
+    Returns ((label_a_x, label_a_y), (label_b_x, label_b_y)) -- a point
+    near EACH end of the link, positioned along that end's own segment
+    of the elbow path. Matches the convention of labeling each side's
+    own interface right where its cable leaves that device, rather
+    than one combined label floating at the link's midpoint.
+    """
+    path = elbow_path(ax, ay, bx, by)
+    # Point near A: a fraction of the way along the FIRST segment.
+    a_seg_x = path[0][0] + (path[1][0] - path[0][0]) * offset_fraction
+    a_seg_y = path[0][1] + (path[1][1] - path[0][1]) * offset_fraction
+    # Point near B: a fraction of the way along the LAST segment, from B's end.
+    b_seg_x = path[-1][0] + (path[-2][0] - path[-1][0]) * offset_fraction
+    b_seg_y = path[-1][1] + (path[-2][1] - path[-1][1]) * offset_fraction
+    return (a_seg_x, a_seg_y), (b_seg_x, b_seg_y)
