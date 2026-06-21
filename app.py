@@ -2565,6 +2565,18 @@ GROQ_API_KEY = "your-key-here"
                         f"{_total_hosts:,} addresses · est. {format_duration(_total_secs)}"
                     )
 
+                _net_eq_only = st.checkbox(
+                    "🛡️ Networking equipment only",
+                    value=True, key="dd_net_eq_only",
+                    help="In an enterprise network, a range scan finds servers, "
+                         "CCTV, printers, etc. alongside real network gear. With "
+                         "this on, a device is only added to the pending queue if "
+                         "its banner positively matches a known network vendor "
+                         "(Cisco, Juniper, Arista, Palo Alto, Fortinet, Aruba, "
+                         "Huawei, Check Point, and others). Everything else shows "
+                         "up below as filtered, not silently dropped.",
+                )
+
                 _active_job_key = "dd_range_scan_job_id"
                 _scan_running = False
                 if st.session_state.get(_active_job_key):
@@ -2578,7 +2590,7 @@ GROQ_API_KEY = "your-key-here"
                         disabled=(not _selected_cidrs or _scan_running),
                         key="dd_start_range_scan",
                     ):
-                        job_id = disc.scan_ranges(_selected_cidrs)
+                        job_id = disc.scan_ranges(_selected_cidrs, network_equipment_only=_net_eq_only)
                         st.session_state[_active_job_key] = job_id
                         st.rerun()
                 with _s2:
@@ -2607,6 +2619,23 @@ GROQ_API_KEY = "your-key-here"
                             st.success(f"Scan complete — {len(_prog.found)} device(s) added to pending queue.")
                         elif _prog.error:
                             st.error(f"Scan error: {_prog.error}")
+
+                # — Filtered non-network devices (transparency, not a silent drop) —
+                _filtered = disc.get_filtered_non_network()
+                if _filtered:
+                    with st.expander(f"🚫 Filtered — {len(_filtered)} non-network device(s)", expanded=False):
+                        st.caption(
+                            "These answered a TCP probe but didn't match a known "
+                            "network-vendor banner signature — likely servers, "
+                            "CCTV, printers, or other non-networking devices. If "
+                            "one of these IS real network gear, tell me the IP "
+                            "and banner text below and I'll add its signature."
+                        )
+                        for f in _filtered[-50:]:
+                            st.caption(f"`{f['ip']}` — {f['banner']}")
+                        if st.button("Clear filtered list", key="dd_clear_filtered"):
+                            disc.clear_filtered_non_network()
+                            st.rerun()
 
             st.divider()
 
@@ -3817,9 +3846,43 @@ GROQ_API_KEY = "your-key-here"
                             for f in _graph.devices_failed:
                                 st.caption(f"• {f}")
 
-                    _fig = build_topology_figure(_graph)
+                    _view_mode_label = st.radio(
+                        "View",
+                        ["🔌 Physical", "🌐 Logical (L3)"],
+                        horizontal=True, key="topo_view_mode",
+                        help=(
+                            "Physical: actual CDP/LLDP cabling, port-to-port. "
+                            "Logical (L3): same links, colored by whether the IP "
+                            "subnet on each end actually matches — catches cables "
+                            "that are physically connected but not really talking at L3."
+                        ),
+                    )
+                    _view_mode = "logical" if "Logical" in _view_mode_label else "physical"
+
+                    _fig = build_topology_figure(_graph, view_mode=_view_mode)
                     if _fig:
-                        st.plotly_chart(_fig, use_container_width=True)
+                        st.plotly_chart(
+                            _fig, use_container_width=True,
+                            config={
+                                "toImageButtonOptions": {
+                                    "format": "png",
+                                    "filename": f"topology_{_graph.site_name or 'export'}",
+                                    "scale": 3,   # renders at 3x pixel density -- fixes the blurry default
+                                },
+                                "displaylogo": False,
+                            },
+                        )
+                        if _view_mode == "logical":
+                            st.caption(
+                                "🟢 solid = subnets match · 🔴 dashed = subnets differ on a "
+                                "physically-connected link (likely misconfiguration) · "
+                                "⚪ dotted = no L3 data for that device/vendor yet."
+                            )
+                        st.caption(
+                            "📷 uses the camera icon above for a quick PNG. For a crisp, "
+                            "fully editable diagram, use the PPTX/PDF/Visio downloads below instead — "
+                            "those are vector formats, not an exported screenshot."
+                        )
 
                     with st.expander("🔌 Links table", expanded=False):
                         _link_rows = [{
