@@ -12,6 +12,7 @@ Works on: macOS · Linux · GitHub Codespaces · Windows (with Npcap)
 from __future__ import annotations
 
 import os, re, socket, subprocess, threading, time, logging
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Optional, Any
@@ -109,6 +110,11 @@ class DeviceDiscoveryEngine:
                                           "172.16.0.0/24"]
         self.poll_interval_sec = 10
         self._seen_ips_this_cycle: set = set()
+        # Range-scan "network equipment only" filtering — devices that
+        # answered a TCP probe but didn't match a known network-vendor
+        # banner signature land here instead of the pending queue.
+        self._filtered_non_network: List[Dict[str, Any]] = []
+        self._classification_pool: Optional[ThreadPoolExecutor] = None
 
     # - Start / Stop -
 
@@ -276,6 +282,7 @@ class DeviceDiscoveryEngine:
         concurrency: int = 300,
         timeout_sec: float = 0.4,
         exclude_cidrs: Optional[List[str]] = None,
+        network_equipment_only: bool = True,
     ) -> str:
         """
         Scan one or more CIDR ranges (RFC 1918 presets, auto-detected local
@@ -283,16 +290,66 @@ class DeviceDiscoveryEngine:
         scanner in core/discovery/. Found hosts feed into the same
         approval pipeline as every other discovery path.
 
+        network_equipment_only (default True): in an enterprise network,
+        a broad range scan will find servers, CCTV, printers, and other
+        non-networking devices alongside real routers/switches/firewalls.
+        When True, a host that answers a TCP probe is NOT registered
+        immediately — it's handed to a SEPARATE classification pool that
+        does an unauthenticated banner grab and only registers it if the
+        banner positively matches a known network-vendor signature
+        (see core/device_inventory_meta.py OEM_SIGNATURES). Everything
+        else is tracked in get_filtered_non_network() for visibility
+        instead of silently disappearing.
+
+        Classification deliberately does NOT attempt an authenticated SSH
+        login (even if GNS3_SSH_USER/PASS are set) — for a broad scan of
+        devices you may not have credentials or explicit authorization
+        for, only a no-login banner read is appropriate. That's separate
+        from your own lab devices, where Approve-time SSH access still
+        uses your configured credentials as normal.
+
         Returns a job_id — poll progress via
         `core.discovery.get_range_scanner().get_progress(job_id)`.
         """
         from core.discovery import get_range_scanner
 
-        def _on_found(ip: str):
-            # TCP-alive confirmed; register without re-requiring ICMP
-            # (require_ping=False — the TCP connect IS the liveness proof).
+        if network_equipment_only and self._classification_pool is None:
+            self._classification_pool = ThreadPoolExecutor(
+                max_workers=25, thread_name_prefix="NetEqClassify"
+            )
+
+        def _register_found(ip: str):
             self._register_ip(ip, source="range_scan", require_ping=False,
                                ping_rtt_ms=0.0)
+
+        def _classify_then_maybe_register(ip: str):
+            try:
+                from core.device_inventory_meta import (
+                    detect_oem_and_type, is_recognized_network_vendor,
+                )
+                vendor, dtype, banner = detect_oem_and_type(
+                    ip, username="", password="", timeout=4,
+                )
+                if is_recognized_network_vendor(dtype):
+                    _register_found(ip)
+                else:
+                    with self._lock:
+                        self._filtered_non_network.append({
+                            "ip": ip,
+                            "banner": banner[:200] if banner else "(no banner captured)",
+                            "filtered_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        })
+            except Exception as exc:
+                logger.debug(f"Classification failed for {ip}, skipping: {exc}")
+
+        def _on_found(ip: str):
+            if network_equipment_only:
+                # Fast dispatch — do NOT block the scanner's main loop
+                # with a multi-second banner-grab; that would serialize
+                # against every other host the TCP sweep is finding.
+                self._classification_pool.submit(_classify_then_maybe_register, ip)
+            else:
+                _register_found(ip)
 
         scanner = get_range_scanner()
         return scanner.start_scan(
@@ -302,6 +359,15 @@ class DeviceDiscoveryEngine:
             timeout_sec=timeout_sec,
             exclude_cidrs=exclude_cidrs,
         )
+
+    def get_filtered_non_network(self) -> List[Dict[str, Any]]:
+        """Devices found alive during a range scan but excluded as non-network equipment."""
+        with self._lock:
+            return list(self._filtered_non_network)
+
+    def clear_filtered_non_network(self) -> None:
+        with self._lock:
+            self._filtered_non_network.clear()
 
     # - Approval workflow -
 
