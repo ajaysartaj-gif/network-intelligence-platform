@@ -22,7 +22,7 @@ from typing import Optional
 
 from core.topology.topology_models import TopologyGraph, DeviceRole
 from core.topology.export.coords import compute_canvas_positions
-from core.topology.layout import recommended_canvas_size
+from core.topology.layout import recommended_canvas_size, elbow_path, compute_link_slot_fractions
 from core.topology.interface_naming import abbreviate_interface
 
 logger = logging.getLogger("NetBrain.Topology.Export.PDF")
@@ -78,25 +78,38 @@ def export_topology_to_pdf(graph: TopologyGraph) -> Optional[bytes]:
         return page_x, page_y
 
     # -- Links (drawn first, behind nodes) --
+    # Orthogonal elbow routing + per-endpoint port labels, slotted per
+    # device so multiple links sharing one device don't have their
+    # labels collide -- matches the convention used by the interactive
+    # view and the PPTX/Visio exports.
     c.setStrokeColor(HexColor("#64748b"))
     c.setLineWidth(1.5)
-    for link in graph.links:
+    slot_fractions = compute_link_slot_fractions(graph)
+    for idx, link in enumerate(graph.links):
         if link.device_a_ip not in positions or link.device_b_ip not in positions:
             continue
         ax, ay = positions[link.device_a_ip]
         bx, by = positions[link.device_b_ip]
-        ax_c, ay_c = to_page_xy(ax + NODE_W_IN / 2, ay + NODE_H_IN / 2)
-        bx_c, by_c = to_page_xy(bx + NODE_W_IN / 2, by + NODE_H_IN / 2)
-        c.line(ax_c * inch, ay_c * inch, bx_c * inch, by_c * inch)
 
-        mid_x = (ax_c + bx_c) / 2
-        mid_y = (ay_c + by_c) / 2
+        a_frac, b_frac = slot_fractions.get(idx, (0.0, 0.0))
+        ax_c, ay_c = to_page_xy(ax + NODE_W_IN / 2 + a_frac * NODE_W_IN, ay + NODE_H_IN / 2)
+        bx_c, by_c = to_page_xy(bx + NODE_W_IN / 2 + b_frac * NODE_W_IN, by + NODE_H_IN / 2)
+
+        path = elbow_path(ax_c, ay_c, bx_c, by_c)
+        p = c.beginPath()
+        p.moveTo(path[0][0] * inch, path[0][1] * inch)
+        for px, py in path[1:]:
+            p.lineTo(px * inch, py * inch)
+        c.drawPath(p, fill=0, stroke=1)
+
         c.setFillColor(HexColor("#475569"))
         c.setFont("Helvetica", 7)
-        c.drawCentredString(
-            mid_x * inch, mid_y * inch,
-            f"{abbreviate_interface(link.device_a_port)} ↔ {abbreviate_interface(link.device_b_port)}",
-        )
+        a_lx = path[0][0] + (path[1][0] - path[0][0]) * 0.3
+        a_ly = path[0][1] + (path[1][1] - path[0][1]) * 0.3
+        b_lx = path[-1][0] + (path[-2][0] - path[-1][0]) * 0.3
+        b_ly = path[-1][1] + (path[-2][1] - path[-1][1]) * 0.3
+        c.drawCentredString(a_lx * inch, a_ly * inch, abbreviate_interface(link.device_a_port))
+        c.drawCentredString(b_lx * inch, b_ly * inch, abbreviate_interface(link.device_b_port))
 
     # -- Nodes --
     for ip, node in graph.nodes.items():

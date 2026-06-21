@@ -32,7 +32,7 @@ from typing import Optional
 
 from core.topology.topology_models import TopologyGraph, DeviceRole
 from core.topology.export.coords import compute_canvas_positions
-from core.topology.layout import recommended_canvas_size
+from core.topology.layout import recommended_canvas_size, elbow_path, compute_link_slot_fractions, endpoint_label_positions
 from core.topology.interface_naming import abbreviate_interface
 
 logger = logging.getLogger("NetBrain.Topology.Export.VDX")
@@ -71,25 +71,42 @@ def export_topology_to_vdx(graph: TopologyGraph) -> Optional[bytes]:
     xml_parts = []
 
     # -- Link shapes first (drawn behind nodes visually, doesn't matter in VDX z-order much) --
-    for link in graph.links:
+    # Orthogonal elbow routing + per-endpoint port labels, slotted per
+    # device so multiple links sharing one device don't have their
+    # labels collide -- matches the convention used by the interactive
+    # view and the PPTX/PDF exports.
+    slot_fractions = compute_link_slot_fractions(graph)
+    for idx, link in enumerate(graph.links):
         if link.device_a_ip not in positions or link.device_b_ip not in positions:
             continue
         ax, ay = positions[link.device_a_ip]
         bx, by = positions[link.device_b_ip]
-        ax_c = ax + NODE_W_IN / 2
+
+        a_frac, b_frac = slot_fractions.get(idx, (0.0, 0.0))
+        ax_c = ax + NODE_W_IN / 2 + a_frac * NODE_W_IN
         ay_c = flip_y(ay + NODE_H_IN / 2)
-        bx_c = bx + NODE_W_IN / 2
+        bx_c = bx + NODE_W_IN / 2 + b_frac * NODE_W_IN
         by_c = flip_y(by + NODE_H_IN / 2)
 
-        pin_x = (ax_c + bx_c) / 2
-        pin_y = (ay_c + by_c) / 2
-        width = max(abs(bx_c - ax_c), 0.01)
-        height = max(abs(by_c - ay_c), 0.01)
-        # Local geometry: start/end relative to box bottom-left (0,0)..(width,height)
-        local_start_x = 0 if ax_c <= bx_c else width
-        local_start_y = 0 if ay_c <= by_c else height
-        local_end_x = width if ax_c <= bx_c else 0
-        local_end_y = height if ay_c <= by_c else 0
+        path = elbow_path(ax_c, ay_c, bx_c, by_c)
+        xs = [p[0] for p in path]
+        ys = [p[1] for p in path]
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+        width = max(max_x - min_x, 0.01)
+        height = max(max_y - min_y, 0.01)
+        pin_x = (min_x + max_x) / 2
+        pin_y = (min_y + max_y) / 2
+
+        # Geom coordinates are local to the shape's bounding box (origin
+        # at bottom-left), so every absolute waypoint needs to be
+        # re-expressed relative to (min_x, min_y).
+        local_pts = [(px - min_x, py - min_y) for px, py in path]
+        move_to = local_pts[0]
+        line_segments = "".join(
+            f'<LineTo IX="{i+2}"><X>{lx:.4f}</X><Y>{ly:.4f}</Y></LineTo>'
+            for i, (lx, ly) in enumerate(local_pts[1:])
+        )
 
         xml_parts.append(f"""
         <Shape ID="{shape_id}" Type="Shape">
@@ -106,29 +123,36 @@ def export_topology_to_vdx(graph: TopologyGraph) -> Optional[bytes]:
           <Geom IX="0">
             <NoFill>1</NoFill>
             <NoLine>0</NoLine>
-            <MoveTo IX="1"><X>{local_start_x:.4f}</X><Y>{local_start_y:.4f}</Y></MoveTo>
-            <LineTo IX="2"><X>{local_end_x:.4f}</X><Y>{local_end_y:.4f}</Y></LineTo>
+            <MoveTo IX="1"><X>{move_to[0]:.4f}</X><Y>{move_to[1]:.4f}</Y></MoveTo>
+            {line_segments}
           </Geom>
         </Shape>""")
         shape_id += 1
 
-        # Port-label text shape near the link midpoint
-        label_text = f"{abbreviate_interface(link.device_a_port)} - {abbreviate_interface(link.device_b_port)}".replace("&", "and")
-        xml_parts.append(f"""
+        # Per-endpoint port labels, positioned a short distance along
+        # each end's own segment of the path -- not a single combined
+        # label at the midpoint.
+        (a_lx, a_ly), (b_lx, b_ly) = endpoint_label_positions(ax_c, ay_c, bx_c, by_c)
+        for lx, ly, port in (
+            (a_lx, a_ly, link.device_a_port),
+            (b_lx, b_ly, link.device_b_port),
+        ):
+            label_text = abbreviate_interface(port).replace("&", "and")
+            xml_parts.append(f"""
         <Shape ID="{shape_id}" Type="Shape">
           <XForm>
-            <PinX>{pin_x:.4f}</PinX>
-            <PinY>{pin_y + 0.12:.4f}</PinY>
-            <Width>1.4</Width>
-            <Height>0.2</Height>
+            <PinX>{lx:.4f}</PinX>
+            <PinY>{ly + 0.1:.4f}</PinY>
+            <Width>0.7</Width>
+            <Height>0.18</Height>
           </XForm>
           <Line><LineWeight>0</LineWeight><LinePattern>0</LinePattern></Line>
           <Fill><FillPattern>0</FillPattern></Fill>
-          <Char IX="0"><Size>0.09</Size><Color>RGB(71,85,105)</Color></Char>
+          <Char IX="0"><Size>0.08</Size><Color>RGB(71,85,105)</Color></Char>
           <Para IX="0"><HorzAlign>1</HorzAlign></Para>
           <Text>{_xml_escape(label_text)}</Text>
         </Shape>""")
-        shape_id += 1
+            shape_id += 1
 
     # -- Node shapes --
     for ip, node in graph.nodes.items():

@@ -19,7 +19,7 @@ from typing import Optional
 
 from core.topology.topology_models import TopologyGraph, DeviceRole
 from core.topology.export.coords import compute_canvas_positions
-from core.topology.layout import recommended_canvas_size
+from core.topology.layout import recommended_canvas_size, elbow_path, compute_link_slot_fractions
 from core.topology.interface_naming import abbreviate_interface
 
 logger = logging.getLogger("NetBrain.Topology.Export.PPTX")
@@ -27,7 +27,7 @@ logger = logging.getLogger("NetBrain.Topology.Export.PPTX")
 try:
     from pptx import Presentation
     from pptx.util import Inches, Pt
-    from pptx.enum.shapes import MSO_SHAPE, MSO_CONNECTOR
+    from pptx.enum.shapes import MSO_SHAPE
     from pptx.dml.color import RGBColor
     from pptx.enum.text import PP_ALIGN
     PPTX_OK = True
@@ -80,35 +80,52 @@ def export_topology_to_pptx(graph: TopologyGraph) -> Optional[bytes]:
     y_offset = 0.9  # push everything below the title
 
     # -- Links (draw first so they sit behind node shapes) --
-    for link in graph.links:
+    # Orthogonal elbow routing + per-endpoint port labels, slotted per
+    # device so multiple links sharing one device don't have their
+    # labels collide -- same convention used by the interactive view
+    # and the PDF/Visio exports, matching standard tree-style Visio
+    # network diagrams.
+    slot_fractions = compute_link_slot_fractions(graph)
+    for idx, link in enumerate(graph.links):
         if link.device_a_ip not in positions or link.device_b_ip not in positions:
             continue
         ax, ay = positions[link.device_a_ip]
         bx, by = positions[link.device_b_ip]
-        ax_center = ax + NODE_W_IN / 2
-        bx_center = bx + NODE_W_IN / 2
-        ay_center = ay + y_offset + NODE_H_IN / 2
-        by_center = by + y_offset + NODE_H_IN / 2
 
-        conn = slide.shapes.add_connector(
-            MSO_CONNECTOR.STRAIGHT,
-            Inches(ax_center), Inches(ay_center),
-            Inches(bx_center), Inches(by_center),
-        )
+        a_frac, b_frac = slot_fractions.get(idx, (0.0, 0.0))
+        ax_anchor = ax + NODE_W_IN / 2 + a_frac * NODE_W_IN
+        bx_anchor = bx + NODE_W_IN / 2 + b_frac * NODE_W_IN
+        ay_anchor = ay + y_offset + NODE_H_IN / 2
+        by_anchor = by + y_offset + NODE_H_IN / 2
+
+        path = elbow_path(ax_anchor, ay_anchor, bx_anchor, by_anchor)
+        fb = slide.shapes.build_freeform(start_x=path[0][0], start_y=path[0][1], scale=914400)
+        fb.add_line_segments(path[1:], close=False)
+        conn = fb.convert_to_shape()
         conn.line.color.rgb = RGBColor(0x64, 0x74, 0x8b)
         conn.line.width = Pt(1.5)
+        conn.fill.background()
 
-        # Port labels at each end, small text near the node
-        mid_x = (ax_center + bx_center) / 2
-        mid_y = (ay_center + by_center) / 2
-        label_tb = slide.shapes.add_textbox(
-            Inches(mid_x - 0.6), Inches(mid_y - 0.15), Inches(1.2), Inches(0.3)
-        )
-        label_tf = label_tb.text_frame
-        label_tf.text = f"{abbreviate_interface(link.device_a_port)} ↔ {abbreviate_interface(link.device_b_port)}"
-        label_tf.paragraphs[0].font.size = Pt(8)
-        label_tf.paragraphs[0].font.color.rgb = RGBColor(0x47, 0x55, 0x69)
-        label_tf.paragraphs[0].alignment = PP_ALIGN.CENTER
+        # Per-endpoint port labels, positioned a short distance along
+        # each end's own segment of the path -- not a single combined
+        # label at the midpoint.
+        a_lx = path[0][0] + (path[1][0] - path[0][0]) * 0.3
+        a_ly = path[0][1] + (path[1][1] - path[0][1]) * 0.3
+        b_lx = path[-1][0] + (path[-2][0] - path[-1][0]) * 0.3
+        b_ly = path[-1][1] + (path[-2][1] - path[-1][1]) * 0.3
+
+        for lx, ly, port in (
+            (a_lx, a_ly, link.device_a_port),
+            (b_lx, b_ly, link.device_b_port),
+        ):
+            label_tb = slide.shapes.add_textbox(
+                Inches(lx - 0.4), Inches(ly - 0.1), Inches(0.8), Inches(0.2)
+            )
+            label_tf = label_tb.text_frame
+            label_tf.text = abbreviate_interface(port)
+            label_tf.paragraphs[0].font.size = Pt(7)
+            label_tf.paragraphs[0].font.color.rgb = RGBColor(0x47, 0x55, 0x69)
+            label_tf.paragraphs[0].alignment = PP_ALIGN.CENTER
 
     # -- Nodes --
     for ip, node in graph.nodes.items():
