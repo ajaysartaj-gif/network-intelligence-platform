@@ -3811,6 +3811,19 @@ GROQ_API_KEY = "your-key-here"
                 )
                 _picked = _sites[_site_idx]
 
+                _view_mode_label = st.radio(
+                    "View",
+                    ["🔌 Physical", "🌐 Logical (L3)"],
+                    horizontal=True, key="topo_view_mode",
+                    help=(
+                        "Physical: actual CDP/LLDP cabling, port-to-port. "
+                        "Logical (L3): same links, colored by whether the IP "
+                        "subnet on each end actually matches — catches cables "
+                        "that are physically connected but not really talking at L3."
+                    ),
+                )
+                _view_mode = "logical" if "Logical" in _view_mode_label else "physical"
+
                 _bcol1, _bcol2 = st.columns([1, 1])
                 with _bcol1:
                     _build_clicked = st.button(
@@ -3845,19 +3858,6 @@ GROQ_API_KEY = "your-key-here"
                         with st.expander(f"⚠️ {len(_graph.devices_failed)} device(s) failed discovery"):
                             for f in _graph.devices_failed:
                                 st.caption(f"• {f}")
-
-                    _view_mode_label = st.radio(
-                        "View",
-                        ["🔌 Physical", "🌐 Logical (L3)"],
-                        horizontal=True, key="topo_view_mode",
-                        help=(
-                            "Physical: actual CDP/LLDP cabling, port-to-port. "
-                            "Logical (L3): same links, colored by whether the IP "
-                            "subnet on each end actually matches — catches cables "
-                            "that are physically connected but not really talking at L3."
-                        ),
-                    )
-                    _view_mode = "logical" if "Logical" in _view_mode_label else "physical"
 
                     _fig = build_topology_figure(_graph, view_mode=_view_mode)
                     if _fig:
