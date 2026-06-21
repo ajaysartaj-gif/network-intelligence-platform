@@ -22,7 +22,9 @@ from typing import Optional
 
 from core.topology.topology_models import TopologyGraph, DeviceRole
 from core.topology.export.coords import compute_canvas_positions
-from core.topology.layout import recommended_canvas_size, elbow_path, compute_link_slot_fractions
+from core.topology.layout import (
+    recommended_canvas_size, elbow_path, compute_link_slot_fractions, compute_bend_fractions,
+)
 from core.topology.interface_naming import abbreviate_interface
 
 logger = logging.getLogger("NetBrain.Topology.Export.PDF")
@@ -85,6 +87,7 @@ def export_topology_to_pdf(graph: TopologyGraph) -> Optional[bytes]:
     c.setStrokeColor(HexColor("#64748b"))
     c.setLineWidth(1.5)
     slot_fractions = compute_link_slot_fractions(graph)
+    bend_fractions = compute_bend_fractions(graph)
     for idx, link in enumerate(graph.links):
         if link.device_a_ip not in positions or link.device_b_ip not in positions:
             continue
@@ -95,7 +98,7 @@ def export_topology_to_pdf(graph: TopologyGraph) -> Optional[bytes]:
         ax_c, ay_c = to_page_xy(ax + NODE_W_IN / 2 + a_frac * NODE_W_IN, ay + NODE_H_IN / 2)
         bx_c, by_c = to_page_xy(bx + NODE_W_IN / 2 + b_frac * NODE_W_IN, by + NODE_H_IN / 2)
 
-        path = elbow_path(ax_c, ay_c, bx_c, by_c)
+        path = elbow_path(ax_c, ay_c, bx_c, by_c, bend_fraction=bend_fractions.get(idx, 0.5))
         p = c.beginPath()
         p.moveTo(path[0][0] * inch, path[0][1] * inch)
         for px, py in path[1:]:

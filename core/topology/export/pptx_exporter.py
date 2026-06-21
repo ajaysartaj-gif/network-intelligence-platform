@@ -19,7 +19,9 @@ from typing import Optional
 
 from core.topology.topology_models import TopologyGraph, DeviceRole
 from core.topology.export.coords import compute_canvas_positions
-from core.topology.layout import recommended_canvas_size, elbow_path, compute_link_slot_fractions
+from core.topology.layout import (
+    recommended_canvas_size, elbow_path, compute_link_slot_fractions, compute_bend_fractions,
+)
 from core.topology.interface_naming import abbreviate_interface
 
 logger = logging.getLogger("NetBrain.Topology.Export.PPTX")
@@ -86,6 +88,7 @@ def export_topology_to_pptx(graph: TopologyGraph) -> Optional[bytes]:
     # and the PDF/Visio exports, matching standard tree-style Visio
     # network diagrams.
     slot_fractions = compute_link_slot_fractions(graph)
+    bend_fractions = compute_bend_fractions(graph)
     for idx, link in enumerate(graph.links):
         if link.device_a_ip not in positions or link.device_b_ip not in positions:
             continue
@@ -98,7 +101,7 @@ def export_topology_to_pptx(graph: TopologyGraph) -> Optional[bytes]:
         ay_anchor = ay + y_offset + NODE_H_IN / 2
         by_anchor = by + y_offset + NODE_H_IN / 2
 
-        path = elbow_path(ax_anchor, ay_anchor, bx_anchor, by_anchor)
+        path = elbow_path(ax_anchor, ay_anchor, bx_anchor, by_anchor, bend_fraction=bend_fractions.get(idx, 0.5))
         fb = slide.shapes.build_freeform(start_x=path[0][0], start_y=path[0][1], scale=914400)
         fb.add_line_segments(path[1:], close=False)
         conn = fb.convert_to_shape()

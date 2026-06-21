@@ -32,7 +32,10 @@ from typing import Optional
 
 from core.topology.topology_models import TopologyGraph, DeviceRole
 from core.topology.export.coords import compute_canvas_positions
-from core.topology.layout import recommended_canvas_size, elbow_path, compute_link_slot_fractions, endpoint_label_positions
+from core.topology.layout import (
+    recommended_canvas_size, elbow_path, compute_link_slot_fractions,
+    endpoint_label_positions, compute_bend_fractions,
+)
 from core.topology.interface_naming import abbreviate_interface
 
 logger = logging.getLogger("NetBrain.Topology.Export.VDX")
@@ -76,6 +79,7 @@ def export_topology_to_vdx(graph: TopologyGraph) -> Optional[bytes]:
     # labels collide -- matches the convention used by the interactive
     # view and the PPTX/PDF exports.
     slot_fractions = compute_link_slot_fractions(graph)
+    bend_fractions = compute_bend_fractions(graph)
     for idx, link in enumerate(graph.links):
         if link.device_a_ip not in positions or link.device_b_ip not in positions:
             continue
@@ -88,7 +92,8 @@ def export_topology_to_vdx(graph: TopologyGraph) -> Optional[bytes]:
         bx_c = bx + NODE_W_IN / 2 + b_frac * NODE_W_IN
         by_c = flip_y(by + NODE_H_IN / 2)
 
-        path = elbow_path(ax_c, ay_c, bx_c, by_c)
+        bend = bend_fractions.get(idx, 0.5)
+        path = elbow_path(ax_c, ay_c, bx_c, by_c, bend_fraction=bend)
         xs = [p[0] for p in path]
         ys = [p[1] for p in path]
         min_x, max_x = min(xs), max(xs)
@@ -132,7 +137,7 @@ def export_topology_to_vdx(graph: TopologyGraph) -> Optional[bytes]:
         # Per-endpoint port labels, positioned a short distance along
         # each end's own segment of the path -- not a single combined
         # label at the midpoint.
-        (a_lx, a_ly), (b_lx, b_ly) = endpoint_label_positions(ax_c, ay_c, bx_c, by_c)
+        (a_lx, a_ly), (b_lx, b_ly) = endpoint_label_positions(ax_c, ay_c, bx_c, by_c, bend_fraction=bend)
         for lx, ly, port in (
             (a_lx, a_ly, link.device_a_port),
             (b_lx, b_ly, link.device_b_port),
