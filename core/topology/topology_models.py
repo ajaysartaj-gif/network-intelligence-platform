@@ -110,6 +110,7 @@ class TopologyGraph:
     built_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
     devices_polled: int = 0
     devices_failed: List[str] = field(default_factory=list)
+    unapproved_neighbors: List[str] = field(default_factory=list)  # CDP/LLDP neighbors not in approved inventory (approved_only mode)
 
     def add_node(self, node: TopologyNode) -> None:
         self.nodes[node.ip] = node
@@ -146,6 +147,7 @@ class TopologyGraph:
             "built_at": self.built_at,
             "devices_polled": self.devices_polled,
             "devices_failed": self.devices_failed,
+            "unapproved_neighbors": self.unapproved_neighbors,
         }
 
     @classmethod
@@ -158,6 +160,7 @@ class TopologyGraph:
             built_at=data.get("built_at", ""),
             devices_polled=data.get("devices_polled", 0),
             devices_failed=data.get("devices_failed", []),
+            unapproved_neighbors=data.get("unapproved_neighbors", []),
         )
         for ip, n in data.get("nodes", {}).items():
             n = dict(n)
