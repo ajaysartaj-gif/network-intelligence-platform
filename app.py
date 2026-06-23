@@ -178,6 +178,25 @@ def _load_secrets_into_env() -> None:
         if val is not None and str(val).strip() and not os.environ.get(k):
             os.environ[k] = str(val).strip()
 
+    # Per-device credential overrides live in a nested [device_credentials]
+    # table in secrets.toml. Discovery runs in worker threads that must not
+    # touch st.secrets, so serialize the table into a plain env var (JSON)
+    # that core.topology.credentials reads. Keeps per-device passwords in the
+    # gitignored secrets file, never in committed inventory.
+    if not os.environ.get("GNS3_DEVICE_CREDENTIALS_JSON"):
+        try:
+            table = st.secrets.get("device_credentials", None)
+        except Exception:
+            table = None
+        if table:
+            try:
+                import json as _json
+                # st.secrets entries are Mapping-like; coerce to plain dicts.
+                plain = {str(ip): dict(vals) for ip, vals in dict(table).items()}
+                os.environ["GNS3_DEVICE_CREDENTIALS_JSON"] = _json.dumps(plain)
+            except Exception:
+                pass
+
 
 # Copy secrets → env BEFORE any engine/monitor is constructed.
 _load_secrets_into_env()
