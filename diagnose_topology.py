@@ -48,6 +48,14 @@ def main():
         print("  (none) -- nothing to discover. Approve devices first.")
         return
 
+    # Show which credential set each device will use (override vs global).
+    from core.topology.credentials import resolve_device_credentials, has_override
+    print("\nCredential resolution per device:")
+    for dev in approved:
+        user, _pw, _sec = resolve_device_credentials(dev.ip)
+        src = "PER-DEVICE override" if has_override(dev.ip) else "global default"
+        print(f"  {dev.ip:18s} -> username={user!r:12s} ({src})")
+
     # ── STAGE 1 + 2: per-device discovery, raw ──────────────────────────────
     print("\n" + "-" * 70)
     print("STAGE 1+2: PER-DEVICE DISCOVERY (live, no cache)")
@@ -99,6 +107,12 @@ def main():
         for l in g.links:
             print(f"    - {l.device_a_ip} [{l.device_a_port}] <-> "
                   f"{l.device_b_ip} [{l.device_b_port}]  ({l.protocol})")
+        if g.unapproved_neighbors:
+            print(f"  Unapproved neighbors seen but EXCLUDED (approved_only): "
+                  f"{g.unapproved_neighbors}")
+            print("    -> If one of these is a device you EXPECT in the topology,")
+            print("       it means that device failed to poll (see failures above)")
+            print("       or isn't approved. Fix its credentials / approve it.")
 
         # connectivity
         from collections import deque
