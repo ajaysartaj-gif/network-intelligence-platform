@@ -28,7 +28,9 @@ _DEFAULT_TTL_MINUTES = 60   # consider a cached topology "fresh" for 1 hour
 # cache hit because the OLD graph is returned and discovery never re-runs.
 # v2: hostname-based node-identity reconciliation (collapses split-identity
 # duplicate nodes, e.g. "192.168.96.133" + "R2" -> one node).
-_SCHEMA_VERSION = 2
+# v3: approved-only topology (unapproved CDP/LLDP neighbors no longer added
+# as discovered_only nodes) + per-device credentials.
+_SCHEMA_VERSION = 3
 
 
 def _site_key(site_name: str, city: str, country: str, region: str) -> str:
