@@ -21,7 +21,7 @@ import logging
 from typing import Any, List, Optional
 
 from core.topology.topology_models import TopologyGraph, TopologyNode, TopologyLink, DeviceRole
-from core.topology.discovery import discover_neighbors, normalize_interface_name
+from core.topology.discovery import discover_neighbors, normalize_interface_name, normalize_hostname
 from core.topology.l3_discovery import discover_ip_subnets
 from core.topology.role_classifier import classify_role
 from core.topology.layout import compute_layout
@@ -39,12 +39,20 @@ def build_topology_for_site(
     use_cache: bool = True,
     cache_ttl_minutes: int = 60,
     max_workers: int = 6,
+    approved_only: bool = True,
 ) -> TopologyGraph:
     """
     Build (or return cached) topology for one site.
 
     `all_approved_devices` is the full approved inventory (DiscoveredDevice
     list) — this function filters to the ones matching the given site.
+
+    approved_only (default True): the topology contains ONLY approved
+    devices. CDP/LLDP neighbors that don't resolve to an approved device
+    are recorded for visibility (graph.unapproved_neighbors) but are NOT
+    added as nodes, and links to them are not drawn. Set False to also
+    show discovered-but-unapproved neighbors as greyed "discovered_only"
+    nodes (the older behavior).
     """
     cache = get_topology_cache()
 
@@ -84,7 +92,9 @@ def build_topology_for_site(
             site_name=site_name, city=city, country=country, region=region,
         ))
 
-    # Run CDP/LLDP discovery on all site devices in parallel
+    # Run CDP/LLDP discovery on all site devices in parallel, collecting
+    # all results FIRST so we can reconcile identities before building links.
+    results_by_ip: Dict[str, "DiscoveryResult"] = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
         futures = {ex.submit(discover_neighbors, dev): dev for dev in site_devices}
         for fut in concurrent.futures.as_completed(futures, timeout=120):
@@ -99,51 +109,108 @@ def build_topology_for_site(
                 graph.devices_failed.append(f"{dev.hostname or dev.ip} ({result.error})")
                 continue
 
+            results_by_ip[dev.ip] = result
             graph.devices_polled += 1
 
-            for nb in result.neighbors:
-                # Does this neighbor match a known approved device by IP?
-                neighbor_node = None
-                if nb.neighbor_ip and nb.neighbor_ip in graph.nodes:
-                    neighbor_node = graph.nodes[nb.neighbor_ip]
-                elif nb.neighbor_ip:
-                    # Discovered via CDP/LLDP but not in our approved inventory yet
+    # ── Reconciliation pass 1: backfill each polled node's REAL hostname ──
+    # captured from the device's own CLI prompt. Without this, a lab device
+    # (no DNS) stays nameless and can't be matched to the hostname a PEER
+    # advertises for it via CDP/LLDP -- the exact cause of one physical
+    # device splitting into two graph nodes (e.g. "192.168.96.133" the
+    # polled node AND "R2" the neighbor-reported node), which fragments the
+    # graph into multiple disconnected trees.
+    for ip, result in results_by_ip.items():
+        node = graph.nodes.get(ip)
+        if node and not node.hostname and result.local_hostname:
+            node.hostname = result.local_hostname
+
+    # Index every currently-known node by normalized hostname, so neighbor
+    # reports can be reconciled by name as well as by IP.
+    host_index: Dict[str, str] = {}
+    for ip, node in graph.nodes.items():
+        h = normalize_hostname(node.hostname)
+        if h:
+            host_index[h] = ip
+
+    # ── Reconciliation pass 2: merge neighbor reports into nodes + links ──
+    # A neighbor is matched to an existing node by (1) advertised mgmt IP,
+    # then (2) normalized hostname. Only if BOTH miss is a new discovered_only
+    # node created. This is what prevents the split-identity duplication:
+    # CDP frequently advertises a device-ID (hostname) with a mgmt IP that
+    # differs from -- or is absent vs. -- the IP we polled it on, so IP-only
+    # matching (the previous behavior) silently created a second node.
+    for ip, result in results_by_ip.items():
+        if ip not in graph.nodes:
+            continue
+        for nb in result.neighbors:
+            nb_host = normalize_hostname(nb.neighbor_name)
+            neighbor_node = None
+
+            # (1) match by advertised management IP
+            if nb.neighbor_ip and nb.neighbor_ip in graph.nodes:
+                neighbor_node = graph.nodes[nb.neighbor_ip]
+            # (2) match by normalized hostname against any known node
+            elif nb_host and nb_host in host_index:
+                neighbor_node = graph.nodes[host_index[nb_host]]
+            # (3) neighbor does NOT resolve to any device already in the graph
+            elif approved_only:
+                # Requirement: topology contains ONLY approved devices. This
+                # neighbor isn't one of them (didn't match by IP or hostname),
+                # so record it for visibility but don't add a node or link.
+                label = nb.neighbor_name or nb.neighbor_ip or "unknown"
+                if label not in graph.unapproved_neighbors:
+                    graph.unapproved_neighbors.append(label)
+                continue
+            # (3b) legacy behavior (approved_only=False): add the discovered
+            #      device as a greyed discovered_only node.
+            elif nb.neighbor_ip:
+                role = classify_role(
+                    platform_string=nb.neighbor_platform,
+                    capabilities=nb.capabilities,
+                )
+                neighbor_node = TopologyNode(
+                    ip=nb.neighbor_ip,
+                    hostname=nb.neighbor_name,
+                    platform_string=nb.neighbor_platform,
+                    role=role,
+                    site_name=site_name, city=city, country=country, region=region,
+                    discovered_only=True,
+                )
+                graph.add_node(neighbor_node)
+                if nb_host:
+                    host_index[nb_host] = neighbor_node.ip
+            # (4) no IP reported — synthetic hostname key (still dedup'd by
+            #     the hostname index above, so repeated sightings of the same
+            #     unpolled neighbor collapse to one node)
+            else:
+                synthetic_ip = f"unknown:{nb.neighbor_name or 'device'}"
+                if synthetic_ip not in graph.nodes:
                     role = classify_role(
                         platform_string=nb.neighbor_platform,
                         capabilities=nb.capabilities,
                     )
-                    neighbor_node = TopologyNode(
-                        ip=nb.neighbor_ip,
-                        hostname=nb.neighbor_name,
-                        platform_string=nb.neighbor_platform,
-                        role=role,
+                    graph.add_node(TopologyNode(
+                        ip=synthetic_ip, hostname=nb.neighbor_name or synthetic_ip,
+                        platform_string=nb.neighbor_platform, role=role,
                         site_name=site_name, city=city, country=country, region=region,
                         discovered_only=True,
-                    )
-                    graph.add_node(neighbor_node)
-                else:
-                    # No IP reported — use hostname as a synthetic key so it still shows
-                    synthetic_ip = f"unknown:{nb.neighbor_name or 'device'}"
-                    if synthetic_ip not in graph.nodes:
-                        role = classify_role(
-                            platform_string=nb.neighbor_platform,
-                            capabilities=nb.capabilities,
-                        )
-                        graph.add_node(TopologyNode(
-                            ip=synthetic_ip, hostname=nb.neighbor_name or synthetic_ip,
-                            platform_string=nb.neighbor_platform, role=role,
-                            site_name=site_name, city=city, country=country, region=region,
-                            discovered_only=True,
-                        ))
-                    neighbor_node = graph.nodes[synthetic_ip]
+                    ))
+                    if nb_host:
+                        host_index[nb_host] = synthetic_ip
+                neighbor_node = graph.nodes[synthetic_ip]
 
-                graph.add_link(TopologyLink(
-                    device_a_ip=dev.ip,
-                    device_a_port=nb.local_interface,
-                    device_b_ip=neighbor_node.ip,
-                    device_b_port=nb.neighbor_interface or nb.local_interface,
-                    protocol=nb.protocol,
-                ))
+            # Guard against a device matching itself (e.g. a self-referential
+            # CDP entry, or a hostname that normalizes to this same node).
+            if neighbor_node.ip == ip:
+                continue
+
+            graph.add_link(TopologyLink(
+                device_a_ip=ip,
+                device_a_port=nb.local_interface,
+                device_b_ip=neighbor_node.ip,
+                device_b_port=nb.neighbor_interface or nb.local_interface,
+                protocol=nb.protocol,
+            ))
 
     # L3 (IP subnet) discovery -- separate pass from CDP/LLDP above, kept
     # modular since it's a genuinely different concern (interface_subnets
