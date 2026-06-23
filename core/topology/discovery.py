@@ -113,6 +113,7 @@ class DiscoveryResult:
     error: Optional[str] = None
     raw_cdp: str = ""
     raw_lldp: str = ""
+    local_hostname: str = ""   # device's OWN configured hostname, from its CLI prompt
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -138,18 +139,19 @@ def discover_neighbors(device: Any) -> DiscoveryResult:
         result.error = f"No CDP/LLDP command known for device_type '{device.device_type}'"
         return result
 
+    from core.topology.credentials import resolve_device_credentials
+    _user, _pass, _secret = resolve_device_credentials(device.ip)
     cfg = dict(
         device_type=device.device_type or "cisco_ios",
         host=device.ip,
         port=int(getattr(device, "ssh_port", 22) or 22),
-        username=os.environ.get("GNS3_SSH_USER", "admin"),
-        password=os.environ.get("GNS3_SSH_PASS", "admin"),
+        username=_user,
+        password=_pass,
         timeout=25, auth_timeout=25,
         fast_cli=False, global_delay_factor=2,
     )
-    secret = os.environ.get("GNS3_SSH_SECRET", "")
-    if secret:
-        cfg["secret"] = secret
+    if _secret:
+        cfg["secret"] = _secret
 
     try:
         conn = ConnectHandler(**cfg)
@@ -157,6 +159,20 @@ def discover_neighbors(device: Any) -> DiscoveryResult:
             conn.enable()
         except Exception:
             pass
+
+        # Capture this device's OWN configured hostname from its CLI prompt
+        # (e.g. "R2#" -> "R2"). This is the reconciliation anchor: in a lab
+        # with no DNS, inventory discovery can't resolve a hostname, so the
+        # polled node would otherwise stay nameless and fail to match the
+        # hostname a PEER advertises for it via CDP/LLDP -- which is exactly
+        # what splits one physical device into two graph nodes. find_prompt()
+        # is essentially free and works across IOS/IOS-XE/NX-OS/XR since all
+        # use a hostname-based prompt.
+        try:
+            prompt = conn.find_prompt() or ""
+            result.local_hostname = prompt.rstrip("#>").strip()
+        except Exception:
+            result.local_hostname = ""
 
         all_neighbors: List[NeighborRecord] = []
 
@@ -348,6 +364,21 @@ _IFACE_PREFIX_MAP: List[Tuple[str, str]] = [
     ("Port-channel", "Po"), ("Loopback", "Lo"),
     ("Serial", "Se"), ("Tunnel", "Tu"), ("Vlan", "Vl"),
 ]
+
+
+def normalize_hostname(name: str) -> str:
+    """
+    Canonical key for matching the SAME physical device across the two
+    ways it can show up: the hostname captured from its own CLI prompt
+    when polled directly, vs. the device-ID a peer advertises for it via
+    CDP/LLDP. CDP commonly reports a bare hostname ("R2") while LLDP or a
+    domain-configured device may report an FQDN ("R2.lab.local"); case can
+    also differ. So: lowercase, strip whitespace, and drop any DNS domain
+    suffix after the first dot, leaving just the leftmost label.
+    """
+    if not name:
+        return ""
+    return name.strip().split(".")[0].lower()
 
 
 def normalize_interface_name(name: str) -> str:
