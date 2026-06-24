@@ -90,7 +90,15 @@ def build_topology_figure(graph: TopologyGraph, view_mode: str = "physical") -> 
             continue
         (ax, ay), (bx, by) = anchors[idx]
         bend = bend_fractions.get(idx, 0.5)
-        path = elbow_path(ax, ay, bx, by, bend_fraction=bend)
+        core_path = elbow_path(ax, ay, bx, by, bend_fraction=bend)
+        # Anchor the path ends to the TRUE node centers so every link
+        # visibly terminates ON each device. The offset anchors fan a hub's
+        # multiple links into separate lanes (so per-port labels don't
+        # collide), but the drawn line itself must touch the node center or
+        # it reads as a broken/disconnected link -- which is exactly the
+        # "lines don't reach R1" problem. A short stub from center to the
+        # lane connects them.
+        path = [(a.x, a.y)] + core_path + [(b.x, b.y)]
 
         group_key = "_physical"
         status_obj = None
