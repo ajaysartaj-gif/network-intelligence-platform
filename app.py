@@ -2303,35 +2303,76 @@ GROQ_API_KEY = "your-key-here"
                             for _td in _tdevs:
                                 with st.spinner(f"⚙️ Deploying on {_td.hostname or _td.ip}…"):
                                     try:
-                                        from netmiko import ConnectHandler as _DCH
-                                        _dcfg = dict(
-                                            device_type=_td.device_type or "cisco_ios",
-                                            host=_td.ip,
-                                            port=int(_td.ssh_port or 22),
-                                            username=os.environ.get("GNS3_SSH_USER", "admin"),
-                                            password=os.environ.get("GNS3_SSH_PASS", "admin"),
-                                            timeout=30, auth_timeout=30,
-                                            fast_cli=False, global_delay_factor=2,
+                                        # Use the SAME connection layer as topology
+                                        # discovery (SSH→Telnet fallback + per-device
+                                        # credentials + device_type normalization),
+                                        # instead of a brittle SSH-only ConnectHandler.
+                                        # That mismatch is why deploy failed with "TCP
+                                        # connection failed" on devices discovery polls
+                                        # fine.
+                                        from core.topology.discovery import (
+                                            _establish_connection, _base_platform,
                                         )
-                                        _dsec = os.environ.get("GNS3_SSH_SECRET", "")
-                                        if _dsec:
-                                            _dcfg["secret"] = _dsec
-                                        _dconn = _DCH(**_dcfg)
+                                        from core.topology.credentials import resolve_device_credentials
+                                        _du, _dp, _dsec = resolve_device_credentials(_td.ip)
+                                        _dbase = _base_platform(getattr(_td, "device_type", ""))
+                                        _dconn, _dmethod = _establish_connection(
+                                            _td, _dbase, _du, _dp, _dsec,
+                                        )
                                         try:
                                             _dconn.enable()
                                         except Exception:
                                             pass
-                                        _cfgc = [c.replace("[CONFIG]", "").strip()
-                                                 for c in _ai_pend["fix_commands"] if "[CONFIG]" in c]
-                                        _execc = [c.replace("[EXEC]", "").strip()
-                                                  for c in _ai_pend["fix_commands"] if "[EXEC]" in c]
+                                        # Session/mode commands must NOT be sent as
+                                        # standalone send_command() calls. `enable` is
+                                        # already handled by _dconn.enable() above, and
+                                        # `configure terminal`/`end`/`exit` are handled by
+                                        # send_config_set() itself. Sending "configure
+                                        # terminal" via send_command() flips the prompt to
+                                        # (config)# and netmiko hangs waiting for the base
+                                        # prompt -- the exact cause of the deploy error.
+                                        _SKIP_CMDS = {
+                                            "enable", "configure terminal", "conf t",
+                                            "end", "exit", "write memory", "wr", "wr mem",
+                                            "copy running-config startup-config",
+                                            "copy run start",
+                                        }
+                                        _cfgc = [
+                                            _s for c in _ai_pend["fix_commands"] if "[CONFIG]" in c
+                                            for _s in [c.replace("[CONFIG]", "").strip()]
+                                            if _s and _s.lower() not in _SKIP_CMDS
+                                        ]
+                                        _execc = [
+                                            _s for c in _ai_pend["fix_commands"] if "[EXEC]" in c
+                                            for _s in [c.replace("[EXEC]", "").strip()]
+                                            if _s and _s.lower() not in _SKIP_CMDS
+                                        ]
                                         _logs = []
                                         for _ec in _execc:
-                                            _o = _dconn.send_command(_ec, read_timeout=20)
+                                            # send_command_timing reads until output
+                                            # settles instead of matching an exact prompt
+                                            # pattern -- avoids "Pattern not detected" on
+                                            # GNS3 routers whose prompt echo is flaky.
+                                            _o = _dconn.send_command_timing(_ec, read_timeout=20)
                                             _logs.append(f"$ {_ec}\n{_o}")
                                         if _cfgc:
-                                            _o = _dconn.send_config_set(_cfgc)
+                                            # cmd_verify=False disables per-command prompt
+                                            # echo verification -- the source of the
+                                            # "Pattern not detected: 'R1#'" error on lab
+                                            # devices. The config still applies; we just
+                                            # don't demand a perfectly-echoed prompt after
+                                            # each line. read_timeout is generous for slow
+                                            # GNS3 links.
+                                            _o = _dconn.send_config_set(
+                                                _cfgc, cmd_verify=False, read_timeout=60,
+                                            )
                                             _logs.append(f"[CONFIG]\n{_o}")
+                                        # Persist the change so it survives a router reload.
+                                        try:
+                                            _sv = _dconn.save_config()
+                                            _logs.append(f"[SAVE]\n{_sv}")
+                                        except Exception:
+                                            pass
                                         _dconn.disconnect()
                                         _dep_log.append(
                                             f"✅ **{_td.hostname or _td.ip}**\n```\n"
@@ -3927,7 +3968,11 @@ GROQ_API_KEY = "your-key-here"
                     _e1, _e2, _e3 = st.columns(3)
                     _fname_base = f"topology_{_picked['site_name'].replace(' ', '_')}"
                     with _e1:
-                        _pptx_bytes = export_topology_to_pptx(_graph)
+                        try:
+                            _pptx_bytes = export_topology_to_pptx(_graph)
+                        except Exception as _ex:
+                            _pptx_bytes = None
+                            st.caption(f"PPTX unavailable: {_ex}")
                         if _pptx_bytes:
                             st.download_button(
                                 "⬇️ PowerPoint (.pptx)", data=_pptx_bytes,
@@ -3935,16 +3980,32 @@ GROQ_API_KEY = "your-key-here"
                                 mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
                                 use_container_width=True,
                             )
+                        elif _pptx_bytes is not None:
+                            st.caption("PPTX needs python-pptx:\n`pip install python-pptx`")
                     with _e2:
-                        _pdf_bytes = export_topology_to_pdf(_graph)
+                        try:
+                            _pdf_bytes = export_topology_to_pdf(_graph)
+                        except Exception as _ex:
+                            _pdf_bytes = None
+                            st.caption(f"PDF unavailable: {_ex}")
                         if _pdf_bytes:
                             st.download_button(
                                 "⬇️ PDF", data=_pdf_bytes,
                                 file_name=f"{_fname_base}.pdf", mime="application/pdf",
                                 use_container_width=True,
                             )
+                        else:
+                            # Don't silently hide the button — tell the user why
+                            # and how to fix it (reportlab not installed is the
+                            # usual cause; requirements.txt lists it, but the
+                            # environment may not have been re-installed).
+                            st.caption("📄 PDF needs reportlab:\n`pip install reportlab`")
                     with _e3:
-                        _vdx_bytes = export_topology_to_vdx(_graph)
+                        try:
+                            _vdx_bytes = export_topology_to_vdx(_graph)
+                        except Exception as _ex:
+                            _vdx_bytes = None
+                            st.caption(f"Visio unavailable: {_ex}")
                         if _vdx_bytes:
                             st.download_button(
                                 "⬇️ Visio (.vdx)", data=_vdx_bytes,
