@@ -91,9 +91,14 @@ def export_topology_to_vdx(graph: TopologyGraph) -> Optional[bytes]:
         ay_c = flip_y(ay + NODE_H_IN / 2)
         bx_c = bx + NODE_W_IN / 2 + b_frac * NODE_W_IN
         by_c = flip_y(by + NODE_H_IN / 2)
+        # True node centers (no slot offset) so links visibly terminate ON
+        # each device, matching the interactive view's end-to-end connection.
+        a_center = (ax + NODE_W_IN / 2, flip_y(ay + NODE_H_IN / 2))
+        b_center = (bx + NODE_W_IN / 2, flip_y(by + NODE_H_IN / 2))
 
         bend = bend_fractions.get(idx, 0.5)
-        path = elbow_path(ax_c, ay_c, bx_c, by_c, bend_fraction=bend)
+        core = elbow_path(ax_c, ay_c, bx_c, by_c, bend_fraction=bend)
+        path = [a_center] + core + [b_center]
         xs = [p[0] for p in path]
         ys = [p[1] for p in path]
         min_x, max_x = min(xs), max(xs)
