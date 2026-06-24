@@ -100,8 +100,13 @@ def export_topology_to_pptx(graph: TopologyGraph) -> Optional[bytes]:
         bx_anchor = bx + NODE_W_IN / 2 + b_frac * NODE_W_IN
         ay_anchor = ay + y_offset + NODE_H_IN / 2
         by_anchor = by + y_offset + NODE_H_IN / 2
+        # True node centers (no slot offset) so links visibly terminate ON
+        # each device, matching the interactive view's end-to-end connection.
+        a_center = (ax + NODE_W_IN / 2, ay + y_offset + NODE_H_IN / 2)
+        b_center = (bx + NODE_W_IN / 2, by + y_offset + NODE_H_IN / 2)
 
-        path = elbow_path(ax_anchor, ay_anchor, bx_anchor, by_anchor, bend_fraction=bend_fractions.get(idx, 0.5))
+        core = elbow_path(ax_anchor, ay_anchor, bx_anchor, by_anchor, bend_fraction=bend_fractions.get(idx, 0.5))
+        path = [a_center] + core + [b_center]
         fb = slide.shapes.build_freeform(start_x=path[0][0], start_y=path[0][1], scale=914400)
         fb.add_line_segments(path[1:], close=False)
         conn = fb.convert_to_shape()
@@ -109,13 +114,12 @@ def export_topology_to_pptx(graph: TopologyGraph) -> Optional[bytes]:
         conn.line.width = Pt(1.5)
         conn.fill.background()
 
-        # Per-endpoint port labels, positioned a short distance along
-        # each end's own segment of the path -- not a single combined
-        # label at the midpoint.
-        a_lx = path[0][0] + (path[1][0] - path[0][0]) * 0.3
-        a_ly = path[0][1] + (path[1][1] - path[0][1]) * 0.3
-        b_lx = path[-1][0] + (path[-2][0] - path[-1][0]) * 0.3
-        b_ly = path[-1][1] + (path[-2][1] - path[-1][1]) * 0.3
+        # Per-endpoint port labels ride the lane segments (offset anchors),
+        # not the center-connecting stubs, so each sits beside its own cable.
+        a_lx = core[0][0] + (core[1][0] - core[0][0]) * 0.3
+        a_ly = core[0][1] + (core[1][1] - core[0][1]) * 0.3
+        b_lx = core[-1][0] + (core[-2][0] - core[-1][0]) * 0.3
+        b_ly = core[-1][1] + (core[-2][1] - core[-1][1]) * 0.3
 
         for lx, ly, port in (
             (a_lx, a_ly, link.device_a_port),
