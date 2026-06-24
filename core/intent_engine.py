@@ -146,7 +146,9 @@ class IntentResult:
     query: str
     device_results: List[DeviceResult] = field(default_factory=list)
     analysis: str = ""                   # AI root-cause analysis
-    fix_commands: List[str] = field(default_factory=list)    # [CONFIG]/[EXEC] tagged
+    fix_commands: List[str] = field(default_factory=list)    # [CONFIG]/[EXEC] tagged (merged, legacy)
+    commands_per_device: Dict[str, List[str]] = field(default_factory=dict)  # ip -> tagged cmds (grounded per device)
+    verify_commands: List[str] = field(default_factory=list)  # post-deploy checks (e.g. show ip ospf neighbor)
     fix_explanation: str = ""
     rollback_commands: List[str] = field(default_factory=list)
     needs_approval: bool = False
@@ -211,7 +213,8 @@ class IntentEngine:
             # Config requests need approval too, but for config commands not diagnostics
             if intent == INTENT_CONFIG:
                 primary = devices[0] if devices else None
-                self._handle_config(result, query, primary, session_output)
+                self._handle_config(result, query, primary, session_output,
+                                    all_devices=devices)
                 return result
 
             # DIAGNOSTIC / REACHABILITY — generate plan, do NOT execute
@@ -741,61 +744,139 @@ class IntentEngine:
 
     # ── Config handler ────────────────────────────────────────────────────────
 
+    def _read_device_facts(self, device: Any) -> str:
+        """
+        Read a device's REAL interface/IP state so config generation is
+        grounded in what's actually on the box (not a generic guess). Uses
+        the same robust SSH→Telnet connection layer as topology discovery.
+        Returns the raw 'show ip interface brief' (+ OSPF state) text, or ""
+        on failure (caller degrades to ungrounded generation).
+        """
+        try:
+            from core.topology.discovery import _establish_connection, _base_platform
+            from core.topology.credentials import resolve_device_credentials
+            u, p, sec = resolve_device_credentials(device.ip)
+            base = _base_platform(getattr(device, "device_type", ""))
+            conn, _ = _establish_connection(device, base, u, p, sec)
+            try:
+                conn.enable()
+            except Exception:
+                pass
+            out = []
+            for cmd in ("show ip interface brief", "show ip protocols"):
+                try:
+                    out.append(f"=== {cmd} ===\n" + conn.send_command(cmd, read_timeout=20))
+                except Exception:
+                    pass
+            conn.disconnect()
+            return "\n".join(out)
+        except Exception as exc:
+            logger.debug(f"_read_device_facts failed for {device.ip}: {exc}")
+            return ""
+
+    def _rag_context_for(self, query: str) -> str:
+        """Pull grounding context from the RAG knowledge base (runbooks/incidents)
+        so generation is informed by curated knowledge, not just the LLM's priors."""
+        if not KNOWLEDGE_OK:
+            return ""
+        try:
+            hits = get_orchestrator().rag_query(query, top_k=3)
+            if not hits:
+                return ""
+            blocks = [f"[{h.source} · {h.title}]\n{h.text[:500]}" for h in hits]
+            return "RELEVANT KNOWLEDGE (from your runbooks/past incidents):\n" + "\n---\n".join(blocks)
+        except Exception as exc:
+            logger.debug(f"RAG context lookup failed: {exc}")
+            return ""
+
     def _handle_config(
         self,
         result: IntentResult,
         query: str,
         primary_device: Optional[Any],
         session_output: str,
+        all_devices: Optional[List[Any]] = None,
     ) -> None:
-        """Generate config commands with rollback plan. Never auto-executes."""
+        """
+        Generate config PER DEVICE, grounded in each device's REAL interfaces
+        and informed by RAG knowledge. This is the intelligence layer: instead
+        of pushing one generic command set to every router, it reads each
+        router's actual subnets and writes commands that fit THAT router (e.g.
+        an OSPF `network` statement per the interfaces the router really has),
+        then proposes post-deploy verification so success is confirmed, not
+        assumed.
+        """
+        devices = all_devices or ([primary_device] if primary_device else [])
+        if not devices:
+            result.fix_explanation = "No target devices."
+            return
 
-        dev_name = (primary_device.hostname or primary_device.ip) if primary_device else "device"
-        dev_type = getattr(primary_device, "device_type", "cisco_ios") if primary_device else "cisco_ios"
+        rag_ctx = self._rag_context_for(query)
+        merged: List[str] = []
+        explanations: List[str] = []
+        verify_set: set = set()
 
-        # Gather device context
-        dev_ctx = ""
-        if primary_device:
-            dev_ctx = (
-                f"Device: {primary_device.ip}  hostname={dev_name}  "
-                f"type={dev_type}  ports={getattr(primary_device, 'open_ports', [])}\n"
+        for dev in devices:
+            dev_name = getattr(dev, "hostname", "") or dev.ip
+            dev_type = getattr(dev, "device_type", "cisco_ios") or "cisco_ios"
+            facts = self._read_device_facts(dev)   # REAL interfaces/subnets for THIS device
+            facts_block = (
+                f"LIVE STATE of {dev_name} ({dev.ip}):\n{facts[:2500]}"
+                if facts else
+                f"(could not read live state of {dev_name}; generate only if safe without it)"
             )
-        if session_output:
-            dev_ctx += f"\nLive device data (interfaces/routes/CDP):\n{session_output[:3000]}"
 
-        config_prompt = (
-            "You are NetBrain AI — a CCIE-level network engineer.\n\n"
-            f"DEVICE CONTEXT:\n{dev_ctx}\n\n"
-            f"OPERATOR REQUEST: {query}\n\n"
-            "Generate the exact Cisco IOS commands to fulfil this request.\n\n"
-            "RULES:\n"
-            "1. Prefix each config-mode command with [CONFIG]\n"
-            "2. Prefix each exec-mode command with [EXEC]\n"
-            "3. List the ROLLBACK commands (undo) after the line: --- ROLLBACK ---\n"
-            "4. Prefix each rollback command with [ROLLBACK]\n"
-            "5. Write a 1-line risk assessment after: --- RISK ---\n"
-            "6. End with exactly: APPROVAL_REQUIRED\n\n"
-            "Only generate commands that are safe and reversible.\n"
-            "Never include: reload, erase, write erase, delete, no ip routing, "
-            "no line vty, hostname changes, credential changes.\n"
-            "Use exact interface names visible in the device context."
+            prompt = (
+                "You are NetBrain AI — a CCIE-level network engineer configuring ONE router.\n\n"
+                f"{facts_block}\n\n"
+                + (f"{rag_ctx}\n\n" if rag_ctx else "")
+                + f"OPERATOR REQUEST (applies to this router): {query}\n\n"
+                "CRITICAL: Generate commands SPECIFIC to THIS router's real interfaces "
+                "and subnets shown above. For routing protocols, the network/area "
+                "statements MUST match the IP subnets THIS router actually has on its "
+                "interfaces — do NOT copy a subnet that isn't on this device. If this "
+                "router has no interface relevant to the request, say so and emit no "
+                "config for it.\n\n"
+                "RULES:\n"
+                "1. Prefix each config-mode command with [CONFIG]\n"
+                "2. Prefix each exec-mode command with [EXEC]\n"
+                "3. After line '--- VERIFY ---', list [VERIFY]-prefixed show commands that "
+                "confirm the change worked (e.g. [VERIFY] show ip ospf neighbor)\n"
+                "4. After line '--- ROLLBACK ---', list [ROLLBACK]-prefixed undo commands\n"
+                "5. After line '--- RISK ---', one-line risk assessment\n"
+                "6. End with exactly: APPROVAL_REQUIRED\n\n"
+                "Never include: reload, erase, write erase, delete, no ip routing, "
+                "no line vty, hostname changes, credential changes.\n"
+                "Use exact interface names and subnets from the live state above."
+            )
+
+            raw = self.ai_call(prompt) or ""
+            cmds, expl, rb = self._extract_fix_from_analysis(raw)
+
+            # Pull [VERIFY] commands
+            for line in raw.splitlines():
+                ls = line.strip()
+                if ls.startswith("[VERIFY]"):
+                    verify_set.add(ls.replace("[VERIFY]", "").strip())
+
+            if cmds:
+                result.commands_per_device[dev.ip] = cmds
+                merged.extend(cmds)
+                if rb:
+                    result.rollback_commands.extend(rb)
+                explanations.append(f"**{dev_name}** ({dev.ip}): {expl or 'config generated from live interfaces'}")
+            else:
+                explanations.append(f"**{dev_name}** ({dev.ip}): no applicable config (interfaces don't match request)")
+
+        result.fix_commands = merged                      # legacy/merged view
+        result.verify_commands = sorted(verify_set)
+        result.needs_approval = bool(result.commands_per_device)
+        result.fix_explanation = (
+            "Per-device configuration (grounded in each router's real interfaces):\n\n"
+            + "\n\n".join(explanations)
         )
-
-        raw = self.ai_call(config_prompt) or ""
-        result.fix_commands, result.fix_explanation, result.rollback_commands = (
-            self._extract_fix_from_analysis(raw)
-        )
-
-        # Extract risk
-        risk = ""
-        if "--- RISK ---" in raw:
-            risk_part = raw.split("--- RISK ---")[-1].replace("APPROVAL_REQUIRED", "").strip()
-            risk = risk_part.splitlines()[0].strip() if risk_part else ""
-
-        result.needs_approval = bool(result.fix_commands)
-        result.fix_explanation = result.fix_explanation or f"Configuration change on {dev_name}"
-        if risk:
-            result.fix_explanation += f"\n\n⚠️ **Risk:** {risk}"
+        if rag_ctx:
+            result.fix_explanation += "\n\n_Informed by RAG knowledge base._"
 
     # ── Concept handler ───────────────────────────────────────────────────────
 
@@ -1088,8 +1169,13 @@ class IntentEngine:
 
         # Config fix + validation
         if result.needs_approval and result.fix_commands:
+            # Display the commands cleanly, exactly as an engineer would enter
+            # them. The [CONFIG]/[EXEC] markers are internal routing hints for
+            # the deploy path (which mode each line runs in) -- they must NOT
+            # leak into the display as a fake "cfg>" prompt, which looks broken
+            # and confuses (real IOS shows "R2(config)#", never "cfg>").
             cmd_display = "\n".join(
-                c.replace("[CONFIG]", "  cfg>").replace("[EXEC]", "  #   ")
+                c.replace("[CONFIG]", "").replace("[EXEC]", "").strip()
                 for c in result.fix_commands
             )
             fix_block = (
