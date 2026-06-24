@@ -117,6 +117,80 @@ class DiscoveryResult:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Connection helpers (robust, multi-transport — mirrors the Device Management
+# access layer which tries SSH then Telnet, rather than SSH-only)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _base_platform(device_type: str) -> str:
+    """
+    Map a possibly-empty or transport-suffixed device_type to the base
+    platform key used for CDP/LLDP command lookup. The CLI commands ("show
+    cdp neighbors detail" etc.) are identical regardless of transport, so
+    "cisco_ios_telnet" and "cisco_ios" share commands; an empty device_type
+    defaults to cisco_ios. This fixes a real failure where a device whose
+    device_type was blank or telnet-suffixed exited early with "No CDP/LLDP
+    command known" and never even connected.
+    """
+    dt = (device_type or "").strip().lower()
+    for suffix in ("_telnet", "_ssh", "_serial", "_console"):
+        if dt.endswith(suffix):
+            dt = dt[: -len(suffix)]
+            break
+    return dt or "cisco_ios"
+
+
+def _establish_connection(device: Any, base_type: str,
+                          user: str, password: str, secret: str):
+    """
+    Open a netmiko connection trying SSH first, then Telnet — mirroring the
+    proven Device Management access path (SSH→REST→Telnet→Pinggy); topology
+    only needs CLI, so SSH→Telnet. Returns (conn, method_str). Raises with a
+    combined, readable error listing every attempt if all fail, so the real
+    reason (auth vs refused vs timeout, and on which transport) is visible
+    instead of a single opaque "TCP connection failed".
+
+    An explicit telnet device_type (or GNS3_DEVICE_TYPE ending in _telnet)
+    makes Telnet the first attempt.
+    """
+    from netmiko import ConnectHandler
+
+    ssh_port = int(getattr(device, "ssh_port", 22) or 22)
+    telnet_port = int(getattr(device, "telnet_port", 23) or 23)
+
+    explicit = (getattr(device, "device_type", "") or
+                os.environ.get("GNS3_DEVICE_TYPE", "")).strip().lower()
+    prefer_telnet = explicit.endswith("_telnet")
+
+    ssh_attempt = ("ssh", base_type, ssh_port)
+    telnet_attempt = ("telnet", f"{base_type}_telnet", telnet_port)
+    attempts = ([telnet_attempt, ssh_attempt] if prefer_telnet
+                else [ssh_attempt, telnet_attempt])
+
+    errors: List[str] = []
+    for method, dtype, port in attempts:
+        cfg = dict(
+            device_type=dtype, host=device.ip, port=port,
+            password=password,
+            timeout=20, auth_timeout=20, banner_timeout=20,
+            fast_cli=False, global_delay_factor=2,
+        )
+        # Mirror the working Test-Router path: telnet device_types omit the
+        # username (GNS3/console telnet typically logs in without a separate
+        # username prompt); SSH uses username + password.
+        if not dtype.endswith("_telnet"):
+            cfg["username"] = user
+        if secret:
+            cfg["secret"] = secret
+        try:
+            conn = ConnectHandler(**cfg)
+            return conn, method
+        except Exception as exc:
+            errors.append(f"{method}://{device.ip}:{port} ({exc})")
+
+    raise ConnectionError("; ".join(errors) if errors else "no transport succeeded")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Main entry point
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -131,30 +205,33 @@ def discover_neighbors(device: Any) -> DiscoveryResult:
         result.error = "netmiko not installed"
         return result
 
-    cmds = VENDOR_COMMANDS.get(device.device_type, {})
+    # Normalize device_type for command lookup (handles blank / telnet types).
+    base_type = _base_platform(getattr(device, "device_type", ""))
+    cmds = VENDOR_COMMANDS.get(base_type, {})
     cdp_cfg  = cmds.get("cdp",  {"command": None, "textfsm_platform": None})
     lldp_cfg = cmds.get("lldp", {"command": None, "textfsm_platform": None})
 
     if not cdp_cfg.get("command") and not lldp_cfg.get("command"):
-        result.error = f"No CDP/LLDP command known for device_type '{device.device_type}'"
+        result.error = (
+            f"No CDP/LLDP command known for device_type "
+            f"'{getattr(device, 'device_type', '')}' (base '{base_type}')"
+        )
         return result
 
-    from core.topology.credentials import resolve_device_credentials
-    _user, _pass, _secret = resolve_device_credentials(device.ip)
-    cfg = dict(
-        device_type=device.device_type or "cisco_ios",
-        host=device.ip,
-        port=int(getattr(device, "ssh_port", 22) or 22),
-        username=_user,
-        password=_pass,
-        timeout=25, auth_timeout=25,
-        fast_cli=False, global_delay_factor=2,
-    )
-    if _secret:
-        cfg["secret"] = _secret
+    # Resolve credentials, falling back gracefully if the per-device
+    # credentials module isn't present (so a missing/unsynced file can't
+    # silently break ALL discovery — it just uses the global defaults).
+    try:
+        from core.topology.credentials import resolve_device_credentials
+        _user, _pass, _secret = resolve_device_credentials(device.ip)
+    except Exception as cred_exc:
+        logger.warning(f"credentials module unavailable ({cred_exc}); using env defaults")
+        _user = os.environ.get("GNS3_SSH_USER", "admin")
+        _pass = os.environ.get("GNS3_SSH_PASS", "admin")
+        _secret = os.environ.get("GNS3_SSH_SECRET", "")
 
     try:
-        conn = ConnectHandler(**cfg)
+        conn, _method = _establish_connection(device, base_type, _user, _pass, _secret)
         try:
             conn.enable()
         except Exception:
@@ -182,7 +259,7 @@ def discover_neighbors(device: Any) -> DiscoveryResult:
                 raw = conn.send_command(cdp_cfg["command"], read_timeout=20)
                 result.raw_cdp = raw
                 parsed = _parse_with_textfsm(
-                    raw, device.device_type, cdp_cfg["command"], cdp_cfg.get("textfsm_platform")
+                    raw, base_type, cdp_cfg["command"], cdp_cfg.get("textfsm_platform")
                 )
                 if parsed is None:
                     parsed = _parse_cdp_regex(raw)
@@ -196,7 +273,7 @@ def discover_neighbors(device: Any) -> DiscoveryResult:
                 raw = conn.send_command(lldp_cfg["command"], read_timeout=20)
                 result.raw_lldp = raw
                 parsed = _parse_with_textfsm(
-                    raw, device.device_type, lldp_cfg["command"], lldp_cfg.get("textfsm_platform")
+                    raw, base_type, lldp_cfg["command"], lldp_cfg.get("textfsm_platform")
                 )
                 if parsed is None:
                     parsed = _parse_lldp_regex(raw)
