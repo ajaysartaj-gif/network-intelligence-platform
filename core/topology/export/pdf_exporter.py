@@ -97,8 +97,13 @@ def export_topology_to_pdf(graph: TopologyGraph) -> Optional[bytes]:
         a_frac, b_frac = slot_fractions.get(idx, (0.0, 0.0))
         ax_c, ay_c = to_page_xy(ax + NODE_W_IN / 2 + a_frac * NODE_W_IN, ay + NODE_H_IN / 2)
         bx_c, by_c = to_page_xy(bx + NODE_W_IN / 2 + b_frac * NODE_W_IN, by + NODE_H_IN / 2)
+        # True node centers (no slot offset) so links visibly terminate ON
+        # each device, matching the interactive view's end-to-end connection.
+        a_center = to_page_xy(ax + NODE_W_IN / 2, ay + NODE_H_IN / 2)
+        b_center = to_page_xy(bx + NODE_W_IN / 2, by + NODE_H_IN / 2)
 
-        path = elbow_path(ax_c, ay_c, bx_c, by_c, bend_fraction=bend_fractions.get(idx, 0.5))
+        core = elbow_path(ax_c, ay_c, bx_c, by_c, bend_fraction=bend_fractions.get(idx, 0.5))
+        path = [a_center] + core + [b_center]
         p = c.beginPath()
         p.moveTo(path[0][0] * inch, path[0][1] * inch)
         for px, py in path[1:]:
@@ -107,10 +112,12 @@ def export_topology_to_pdf(graph: TopologyGraph) -> Optional[bytes]:
 
         c.setFillColor(HexColor("#475569"))
         c.setFont("Helvetica", 7)
-        a_lx = path[0][0] + (path[1][0] - path[0][0]) * 0.3
-        a_ly = path[0][1] + (path[1][1] - path[0][1]) * 0.3
-        b_lx = path[-1][0] + (path[-2][0] - path[-1][0]) * 0.3
-        b_ly = path[-1][1] + (path[-2][1] - path[-1][1]) * 0.3
+        # Labels ride the lane segments (from the offset anchors), not the
+        # center-connecting stubs, so they sit beside their own cable.
+        a_lx = core[0][0] + (core[1][0] - core[0][0]) * 0.3
+        a_ly = core[0][1] + (core[1][1] - core[0][1]) * 0.3
+        b_lx = core[-1][0] + (core[-2][0] - core[-1][0]) * 0.3
+        b_ly = core[-1][1] + (core[-2][1] - core[-1][1]) * 0.3
         c.drawCentredString(a_lx * inch, a_ly * inch, abbreviate_interface(link.device_a_port))
         c.drawCentredString(b_lx * inch, b_ly * inch, abbreviate_interface(link.device_b_port))
 
