@@ -5,13 +5,16 @@ The central knowledge orchestrator.
 
 Lookup priority (highest to lowest):
   1. Local SQLite cache         → instant, if fresh
-  2. Vendor web fetcher          → web-scrape vendor docs (Cisco, Juniper, etc.)
-  3. MCP sources (fallback)      → official vendor MCPs (e.g. Cisco DevNet)
-  4. Stale cache                 → if web fetch + MCP both fail
-  5. UNVERIFIED                  → AI guess, with warning badge
+  2. RAG (PRIMARY)              → semantic retrieval over ingested runbooks
+                                   and past incidents (local, offline)
+  3. Vendor web fetcher          → web-scrape vendor docs (Cisco, Juniper, etc.)
+  4. MCP sources (fallback)      → official vendor MCPs (e.g. Cisco DevNet)
+  5. Stale cache                 → if RAG + web + MCP all miss
+  6. UNVERIFIED                  → AI guess, with warning badge
 
-The fetcher-first ordering matches the operator's stated preference:
-"first look for fetchers then go to MCP".
+RAG is primary over MCP per the operator's requirement: curated local
+knowledge is consulted first; only a weak semantic match (below the score
+cutoff) falls through to live web/MCP sources.
 """
 from __future__ import annotations
 
@@ -41,6 +44,20 @@ except ImportError as _mi:
     logger.warning(f"MCP layer unavailable: {_mi}")
     MCP_AVAILABLE = False
 
+# ── RAG layer (optional — primary source, falls back if package missing) ─────
+try:
+    from core.knowledge.rag import get_rag_engine, RAGHit
+    RAG_AVAILABLE = True
+except ImportError as _ri:
+    logger.warning(f"RAG layer unavailable: {_ri}")
+    RAG_AVAILABLE = False
+
+# Minimum cosine similarity for a RAG hit to be trusted over web/MCP. Below
+# this, the local match is too weak and we fall through to live sources.
+# Tunable via env because the cutoff depends on the embedding model.
+import os
+_RAG_MIN_SCORE = float(os.environ.get("NETBRAIN_RAG_MIN_SCORE", "0.45"))
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # KnowledgeOrchestrator
@@ -53,10 +70,12 @@ class KnowledgeOrchestrator:
         self,
         enable_web_fetch: bool = True,
         enable_mcp:       bool = True,
+        enable_rag:       bool = True,
     ):
         self.cache = get_cache()
         self.enable_web_fetch = enable_web_fetch
         self.enable_mcp = enable_mcp and MCP_AVAILABLE
+        self.enable_rag = enable_rag and RAG_AVAILABLE
 
     # ── Single lookup ─────────────────────────────────────────────────────────
 
@@ -88,7 +107,19 @@ class KnowledgeOrchestrator:
             logger.debug(f"Cache HIT: {vendor}/{command}")
             return cached
 
-        # ── 2. Web fetcher (PRIMARY — user's stated preference) ──────────────
+        # ── 2. RAG (PRIMARY — curated local knowledge: runbooks/incidents) ──
+        # Semantic retrieval over ingested knowledge runs BEFORE web/MCP, per
+        # the requirement that RAG be primary over MCP. Only a sufficiently
+        # strong match (>= _RAG_MIN_SCORE) is trusted; a weak local match
+        # falls through to live sources rather than returning something stale.
+        if self.enable_rag:
+            rag_entry = self._rag_lookup(vendor, command, platform)
+            if rag_entry:
+                logger.info(f"RAG HIT (primary): {vendor}/{command}")
+                return rag_entry
+            logger.debug(f"RAG below threshold for {vendor}/{command}, falling through")
+
+        # ── 3. Web fetcher ───────────────────────────────────────────────────
         if self.enable_web_fetch:
             fetched = self._web_fetch(vendor, command, platform)
             if fetched:
@@ -99,7 +130,7 @@ class KnowledgeOrchestrator:
                 return fetched
             logger.debug(f"Web fetcher returned nothing for {vendor}/{command}")
 
-        # ── 3. MCP sources (FALLBACK — only if fetcher returned nothing) ─────
+        # ── 4. MCP sources (FALLBACK — only after RAG and fetcher) ───────────
         if self.enable_mcp:
             mcp_entry = self._mcp_lookup(vendor, command, platform)
             if mcp_entry:
@@ -243,6 +274,94 @@ class KnowledgeOrchestrator:
                 continue
         return None
 
+    # ── RAG (primary) ─────────────────────────────────────────────────────────
+
+    def _rag_lookup(
+        self,
+        vendor: str,
+        command: str,
+        platform: Optional[str],
+    ) -> Optional[KnowledgeEntry]:
+        """
+        Semantic retrieval over ingested knowledge. Returns a KnowledgeEntry
+        only if the top hit clears _RAG_MIN_SCORE; otherwise None so the
+        caller falls through to web/MCP.
+        """
+        if not RAG_AVAILABLE:
+            return None
+        try:
+            engine = get_rag_engine()
+            # vendor filter only when we actually have ingested that vendor;
+            # an over-narrow filter on an empty store would suppress good hits.
+            hits = engine.search(command, top_k=3, min_score=_RAG_MIN_SCORE,
+                                  vendor=vendor or None)
+            if not hits:
+                # retry without vendor filter (knowledge may be vendor-agnostic)
+                hits = engine.search(command, top_k=3, min_score=_RAG_MIN_SCORE)
+            if not hits:
+                return None
+            return self._rag_hit_to_entry(hits[0], vendor, command, platform)
+        except Exception as exc:
+            logger.debug(f"RAG lookup failed: {exc}")
+            return None
+
+    def _rag_hit_to_entry(
+        self, hit: "RAGHit", vendor: str, command: str, platform: Optional[str],
+    ) -> KnowledgeEntry:
+        # Confidence scales with similarity; a strong semantic match is HIGH.
+        if hit.score >= 0.7:
+            conf = ConfidenceLevel.HIGH
+        elif hit.score >= 0.55:
+            conf = ConfidenceLevel.MEDIUM
+        else:
+            conf = ConfidenceLevel.LOW
+        src_label = {
+            "incident": "Past incident (RAG)",
+            "runbook": "Runbook (RAG)",
+            "vendor_doc": "Vendor doc (RAG)",
+        }.get(hit.source, f"{hit.source} (RAG)")
+        return KnowledgeEntry(
+            vendor=vendor or hit.vendor,
+            platform=platform or hit.platform,
+            command=command,
+            description=hit.text,
+            citation=Citation(
+                source_name=f"rag::{hit.source}",
+                source_type="rag",
+                source_title=hit.title or src_label,
+                vendor=vendor or hit.vendor,
+                confidence=conf,
+                notes=f"{src_label} · semantic match {hit.score:.2f} · doc '{hit.doc_id}'",
+            ),
+        )
+
+    def rag_query(
+        self,
+        query: str,
+        top_k: int = 5,
+        min_score: Optional[float] = None,
+        vendor: Optional[str] = None,
+        source: Optional[str] = None,
+    ) -> List["RAGHit"]:
+        """
+        Free-text semantic retrieval over the knowledge base — the entry point
+        for the AI chat to pull grounding context (runbooks, past incidents)
+        for an arbitrary question, not just a command lookup. Returns raw
+        RAGHits (empty list if RAG unavailable or nothing relevant).
+        """
+        if not self.enable_rag:
+            return []
+        try:
+            engine = get_rag_engine()
+            return engine.search(
+                query, top_k=top_k,
+                min_score=_RAG_MIN_SCORE if min_score is None else min_score,
+                vendor=vendor, source=source,
+            )
+        except Exception as exc:
+            logger.debug(f"rag_query failed: {exc}")
+            return []
+
     # ── Admin / stats ─────────────────────────────────────────────────────────
 
     def stats(self) -> Dict[str, Any]:
@@ -250,6 +369,12 @@ class KnowledgeOrchestrator:
         s["supported_vendors"] = supported_vendors()
         s["web_fetch_enabled"] = self.enable_web_fetch
         s["mcp_enabled"]       = self.enable_mcp
+        s["rag_enabled"]       = self.enable_rag
+        if self.enable_rag:
+            try:
+                s["rag"] = get_rag_engine().stats()
+            except Exception:
+                s["rag"] = {"error": "unavailable"}
 
         # MCP source health
         if self.enable_mcp:
