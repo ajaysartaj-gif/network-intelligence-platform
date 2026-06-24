@@ -2206,6 +2206,8 @@ GROQ_API_KEY = "your-key-here"
                             "plan_pending":   _ie_res.plan_pending,
                             "needs_approval": _ie_res.needs_approval,
                             "fix_commands":   _ie_res.fix_commands,
+                            "commands_per_device": _ie_res.commands_per_device,
+                            "verify_commands": _ie_res.verify_commands,
                             "target_ips":     [d.ip for d in _targets],
                             "scope_label":    _scope_label,
                         }
@@ -2337,17 +2339,26 @@ GROQ_API_KEY = "your-key-here"
                                             "copy running-config startup-config",
                                             "copy run start",
                                         }
+                                        # Per-device commands grounded in THIS router's real
+                                        # interfaces. Fall back to the merged list only if a
+                                        # per-device set wasn't generated (legacy/safety).
+                                        _pdcmds = (_ai_pend.get("commands_per_device") or {}).get(
+                                            _td.ip, _ai_pend.get("fix_commands", [])
+                                        )
                                         _cfgc = [
-                                            _s for c in _ai_pend["fix_commands"] if "[CONFIG]" in c
+                                            _s for c in _pdcmds if "[CONFIG]" in c
                                             for _s in [c.replace("[CONFIG]", "").strip()]
                                             if _s and _s.lower() not in _SKIP_CMDS
                                         ]
                                         _execc = [
-                                            _s for c in _ai_pend["fix_commands"] if "[EXEC]" in c
+                                            _s for c in _pdcmds if "[EXEC]" in c
                                             for _s in [c.replace("[EXEC]", "").strip()]
                                             if _s and _s.lower() not in _SKIP_CMDS
                                         ]
                                         _logs = []
+                                        if not _cfgc and not _execc:
+                                            _logs.append("(no applicable config for this router — "
+                                                         "its interfaces don't match the request)")
                                         for _ec in _execc:
                                             # send_command_timing reads until output
                                             # settles instead of matching an exact prompt
@@ -2368,15 +2379,41 @@ GROQ_API_KEY = "your-key-here"
                                             )
                                             _logs.append(f"[CONFIG]\n{_o}")
                                         # Persist the change so it survives a router reload.
-                                        try:
-                                            _sv = _dconn.save_config()
-                                            _logs.append(f"[SAVE]\n{_sv}")
-                                        except Exception:
-                                            pass
+                                        if _cfgc:
+                                            try:
+                                                _sv = _dconn.save_config()
+                                                _logs.append(f"[SAVE]\n{_sv}")
+                                            except Exception:
+                                                pass
+                                        # ── VERIFICATION: confirm the change actually worked,
+                                        # rather than assuming success because commands didn't
+                                        # error. Runs the AI-proposed [VERIFY] checks (e.g.
+                                        # 'show ip ospf neighbor') and surfaces the real output.
+                                        _vstatus = ""
+                                        _vcmds = _ai_pend.get("verify_commands") or []
+                                        if _cfgc and _vcmds:
+                                            for _vc in _vcmds:
+                                                try:
+                                                    _vo = _dconn.send_command(_vc, read_timeout=25,
+                                                                              expect_string=r"#")
+                                                except Exception:
+                                                    _vo = ""
+                                                _logs.append(f"[VERIFY] {_vc}\n{_vo}")
+                                                # Heuristic: an OSPF neighbor check that shows a
+                                                # neighbor in FULL state means adjacency formed.
+                                                if "ospf neighbor" in _vc.lower():
+                                                    if "FULL" in (_vo or ""):
+                                                        _vstatus = "✅ verified: OSPF neighbor in FULL state"
+                                                    else:
+                                                        _vstatus = ("⚠️ no OSPF neighbor in FULL state yet "
+                                                                    "(adjacency not formed — check the other "
+                                                                    "end / give it a moment)")
                                         _dconn.disconnect()
+                                        _hdr = f"✅ **{_td.hostname or _td.ip}**"
+                                        if _vstatus:
+                                            _hdr += f" — {_vstatus}"
                                         _dep_log.append(
-                                            f"✅ **{_td.hostname or _td.ip}**\n```\n"
-                                            + "\n".join(_logs) + "\n```"
+                                            _hdr + "\n```\n" + "\n".join(_logs) + "\n```"
                                         )
                                     except Exception as _de:
                                         _dep_log.append(
