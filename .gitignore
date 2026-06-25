@@ -1,11 +1,27 @@
-# Knowledge cache (auto-generated)
+# ── Python ──────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.pytest_cache/
+venv/
+.venv/
+env/
+
+# ── Secrets (NEVER commit) ──────────────────────────────
+.streamlit/secrets.toml
+.env
+core/.env
+*.env
+
+# ── Knowledge cache (auto-generated) ────────────────────
 .knowledge_cache/
 *.knowledge.db
 
-# Python
-__pycache__/
-*.pyc
-
-# Secrets
-.streamlit/secrets.toml
-.env
+# ── NetBrain local data stores ──────────────────────────
+# Local accumulated data, not code — must not be committed.
+.netbrain_memory.sqlite
+.netbrain_rag_chroma/
+.netbrain_topology_cache.json
