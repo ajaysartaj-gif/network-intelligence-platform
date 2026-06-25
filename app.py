@@ -222,6 +222,11 @@ def _bind_capabilities() -> None:
         bind_knowledge_capability()
     except Exception:
         pass
+    try:
+        from core.intelligence.reasoning import bind_reasoning_capability
+        bind_reasoning_capability()
+    except Exception:
+        pass
 
 
 _bind_capabilities()
