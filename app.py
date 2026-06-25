@@ -168,6 +168,12 @@ def _load_secrets_into_env() -> None:
         "GNS3_TELNET_USER", "GNS3_ROUTER_USER", "GNS3_ROUTER_PASS",
         "GNS3_LOG_GITHUB_URL", "GNS3_LOG_DEFAULT_DEVICE", "GNS3_LOG_GITHUB_TOKEN",
         "NETBRAIN_LIVE_ONLY", "GROQ_API_KEY",
+        # Operational Memory shared brain (Postgres/Supabase). When present,
+        # all instances read/write ONE cloud brain in real time; absent, the
+        # service falls back to a local SQLite file automatically.
+        "NETBRAIN_MEMORY_DSN", "NETBRAIN_MEMORY_DB",
+        # RAG / embedding store config (so knowledge config travels too).
+        "NETBRAIN_RAG_DIR", "NETBRAIN_RAG_EMBED_MODEL", "NETBRAIN_RAG_MIN_SCORE",
     ]
     for k in keys:
         try:
