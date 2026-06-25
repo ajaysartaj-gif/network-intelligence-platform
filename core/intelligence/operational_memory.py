@@ -84,22 +84,98 @@ def _cosine(a: List[float], b: List[float]) -> float:
     return dot / (na * nb) if na and nb else 0.0
 
 
-class OperationalMemory:
-    """Persistent, searchable operational memory service."""
+class _Backend:
+    """
+    Storage backend abstraction. The rich memory LOGIC lives once in
+    OperationalMemory; only raw SQL execution differs between SQLite (local)
+    and Postgres (shared cloud brain). This class normalizes the two real
+    differences: the parameter placeholder ('?' vs '%s') and the upsert
+    clause. Pick Postgres by setting a connection string; otherwise SQLite.
+    """
+    def __init__(self, dsn: str = "", sqlite_path: str = _DB_PATH):
+        self.is_postgres = bool(dsn)
+        if self.is_postgres:
+            import psycopg2
+            import psycopg2.extras
+            self._pg = psycopg2
+            self._extras = psycopg2.extras
+            self._conn = psycopg2.connect(dsn)
+            self._conn.autocommit = True
+            self.ph = "%s"                       # Postgres placeholder
+        else:
+            self._conn = sqlite3.connect(sqlite_path, check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
+            self.ph = "?"                        # SQLite placeholder
 
-    def __init__(self, db_path: str = _DB_PATH, embedder: Optional[Any] = None):
+    def kind(self) -> str:
+        return "postgres" if self.is_postgres else "sqlite"
+
+    def execute(self, sql: str, params: tuple = ()):  # returns cursor
+        # callers write SQL with '?' placeholders; translate for Postgres.
+        if self.is_postgres:
+            sql = sql.replace("?", "%s")
+        cur = self._conn.cursor()
+        cur.execute(sql, params)
+        return cur
+
+    def query(self, sql: str, params: tuple = ()) -> List[Dict[str, Any]]:
+        if self.is_postgres:
+            sql = sql.replace("?", "%s")
+            cur = self._conn.cursor(cursor_factory=self._extras.RealDictCursor)
+            cur.execute(sql, params)
+            return [dict(r) for r in cur.fetchall()]
+        cur = self._conn.cursor()
+        cur.execute(sql, params)
+        cols = [c[0] for c in cur.description] if cur.description else []
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    def upsert_event_sql(self) -> str:
+        """INSERT-or-replace, dialect-correct, same column order both ways."""
+        cols = ("id, ts, event_type, summary, detail, device, interface, site, "
+                "protocol, outcome, signature, intent, operator, related_ids, "
+                "extra, embedding")
+        ph = ", ".join(["?"] * 16)
+        if self.is_postgres:
+            return (f"INSERT INTO memory_events ({cols}) VALUES ({ph}) "
+                    f"ON CONFLICT (id) DO UPDATE SET "
+                    + ", ".join(f"{c}=EXCLUDED.{c}" for c in cols.replace(" ", "").split(",") if c != "id"))
+        return f"INSERT OR REPLACE INTO memory_events ({cols}) VALUES ({ph})"
+
+    def commit(self):
+        if not self.is_postgres:
+            self._conn.commit()
+
+
+class OperationalMemory:
+    """Persistent, searchable operational memory service.
+
+    Backend is chosen automatically: if a Postgres connection string is
+    configured (NETBRAIN_MEMORY_DSN env, or memory_dsn in secrets bridged to
+    that env), ALL instances share ONE cloud brain in real time — true
+    Continuous Learning across machines. Otherwise it uses a local SQLite
+    file. Identical method surface either way.
+    """
+
+    def __init__(self, db_path: str = _DB_PATH, embedder: Optional[Any] = None,
+                 dsn: str = ""):
         self.db_path = db_path
         self._embedder = embedder            # lazy; reuse RAG embedder
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
+        dsn = dsn or os.environ.get("NETBRAIN_MEMORY_DSN", "")
+        try:
+            self._be = _Backend(dsn=dsn, sqlite_path=db_path)
+        except Exception as exc:
+            logger.warning(f"Postgres unavailable ({exc}); falling back to local SQLite.")
+            self._be = _Backend(dsn="", sqlite_path=db_path)
         self._init_schema()
 
     # ── schema ───────────────────────────────────────────────────────────────
     def _init_schema(self):
-        self._conn.execute("""
+        # 'ts double precision' works on both; TEXT/REAL map cleanly.
+        ts_type = "DOUBLE PRECISION" if self._be.is_postgres else "REAL"
+        self._be.execute(f"""
             CREATE TABLE IF NOT EXISTS memory_events (
                 id TEXT PRIMARY KEY,
-                ts REAL NOT NULL,
+                ts {ts_type} NOT NULL,
                 event_type TEXT,
                 summary TEXT,
                 detail TEXT,
@@ -118,9 +194,9 @@ class OperationalMemory:
         """)
         for col in ("ts", "device", "site", "protocol", "interface",
                     "event_type", "signature"):
-            self._conn.execute(
+            self._be.execute(
                 f"CREATE INDEX IF NOT EXISTS idx_mem_{col} ON memory_events({col})")
-        self._conn.commit()
+        self._be.commit()
 
     def _embedder_obj(self):
         if self._embedder is None:
@@ -144,20 +220,14 @@ class OperationalMemory:
                 emb_json = json.dumps(vec)
             except Exception as exc:
                 logger.debug(f"embed failed: {exc}")
-        self._conn.execute("""
-            INSERT OR REPLACE INTO memory_events
-            (id, ts, event_type, summary, detail, device, interface, site,
-             protocol, outcome, signature, intent, operator, related_ids,
-             extra, embedding)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        """, (
+        self._be.execute(self._be.upsert_event_sql(), (
             event.id, event.ts, event.event_type, event.summary, event.detail,
             (event.device or "").lower(), (event.interface or "").lower(),
             (event.site or "").lower(), (event.protocol or "").lower(),
             event.outcome, event.signature, event.intent, event.operator,
             json.dumps(event.related_ids), json.dumps(event.extra), emb_json,
         ))
-        self._conn.commit()
+        self._be.commit()
         return event.id
 
     # ── AUTO-WRITE from a verified outcome contract ──────────────────────────
@@ -270,7 +340,7 @@ class OperationalMemory:
         if event_type:
             sql += " AND event_type = ?"
             params.append(event_type)
-        rows = self._conn.execute(sql, params).fetchall()
+        rows = self._be.query(sql, tuple(params))
         scored = []
         for r in rows:
             try:
@@ -299,7 +369,7 @@ class OperationalMemory:
             sql += " AND event_type = ?"; params.append(event_type)
         sql += f" ORDER BY ts {'DESC' if newest_first else 'ASC'} LIMIT ?"
         params.append(limit)
-        return [_row_to_dict(r) for r in self._conn.execute(sql, params).fetchall()]
+        return [_row_to_dict(r) for r in self._be.query(sql, tuple(params))]
 
     # ── search: dimensional history ──────────────────────────────────────────
     def _history(self, column: str, value: str, limit: int,
@@ -309,7 +379,7 @@ class OperationalMemory:
         if event_type:
             sql += " AND event_type = ?"; params.append(event_type)
         sql += " ORDER BY ts DESC LIMIT ?"; params.append(limit)
-        return [_row_to_dict(r) for r in self._conn.execute(sql, params).fetchall()]
+        return [_row_to_dict(r) for r in self._be.query(sql, tuple(params))]
 
     def device_history(self, device, limit=50, event_type=None):
         return self._history("device", device, limit, event_type)
@@ -331,18 +401,18 @@ class OperationalMemory:
         if outcome:
             sql += " AND outcome = ?"; params.append(outcome)
         sql += " ORDER BY ts DESC LIMIT ?"; params.append(limit)
-        return [_row_to_dict(r) for r in self._conn.execute(sql, params).fetchall()]
+        return [_row_to_dict(r) for r in self._be.query(sql, tuple(params))]
 
     def recurring_failures(self, min_count: int = 2, limit: int = 20) -> List[Dict[str, Any]]:
         """Signatures that have failed >= min_count times — the patterns worth fixing."""
-        rows = self._conn.execute("""
+        rows = self._be.query("""
             SELECT signature, COUNT(*) c, MAX(ts) last_ts,
                    MAX(intent) intent, MAX(protocol) protocol
             FROM memory_events
             WHERE outcome='failure' AND signature != ''
             GROUP BY signature HAVING c >= ?
             ORDER BY c DESC, last_ts DESC LIMIT ?
-        """, (min_count, limit)).fetchall()
+        """, (min_count, limit))
         return [{"signature": r["signature"], "count": r["c"],
                  "last_ts": r["last_ts"], "intent": r["intent"],
                  "protocol": r["protocol"]} for r in rows]
@@ -356,10 +426,10 @@ class OperationalMemory:
                 "events": n}
 
     def metrics(self) -> Dict[str, Any]:
-        by_type = {r["event_type"]: r["c"] for r in self._conn.execute(
+        by_type = {r["event_type"]: r["c"] for r in self._be.query(
             "SELECT event_type, COUNT(*) c FROM memory_events GROUP BY event_type")}
-        span = self._conn.execute(
-            "SELECT MIN(ts) a, MAX(ts) b FROM memory_events").fetchone()
+        span = self._be.query(
+            "SELECT MIN(ts) a, MAX(ts) b FROM memory_events")[0]
         return {
             "total_events": self.count(),
             "by_type": by_type,
@@ -369,7 +439,7 @@ class OperationalMemory:
         }
 
     def count(self) -> int:
-        return self._conn.execute("SELECT COUNT(*) c FROM memory_events").fetchone()["c"]
+        return self._be.query("SELECT COUNT(*) c FROM memory_events")[0]["c"]
 
 
 def _signature(intent: str, protocol: str, failed_conditions: List[str]) -> str:
