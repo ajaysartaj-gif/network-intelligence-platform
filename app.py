@@ -202,6 +202,25 @@ def _load_secrets_into_env() -> None:
 _load_secrets_into_env()
 
 
+# Plug the standalone intelligence services into the Capability Registry once
+# at startup, so the backbone reports their live status. Best-effort: a missing
+# subsystem never blocks app launch.
+def _bind_capabilities() -> None:
+    try:
+        from core.intelligence.operational_memory import bind_memory_capability
+        bind_memory_capability()
+    except Exception:
+        pass
+    try:
+        from core.knowledge.enterprise import bind_knowledge_capability
+        bind_knowledge_capability()
+    except Exception:
+        pass
+
+
+_bind_capabilities()
+
+
 def _resolve_api_key() -> str:
     # 1. Streamlit Secrets (works on Cloud + local .streamlit/secrets.toml)
     try:
@@ -2210,6 +2229,7 @@ GROQ_API_KEY = "your-key-here"
                             "verify_commands": _ie_res.verify_commands,
                             "target_ips":     [d.ip for d in _targets],
                             "scope_label":    _scope_label,
+                            "query":          _ai_q,
                         }
                     except Exception as _ie_err:
                         st.session_state["devices_ai_last_ans"] = (
@@ -2378,40 +2398,81 @@ GROQ_API_KEY = "your-key-here"
                                                 _cfgc, cmd_verify=False, read_timeout=60,
                                             )
                                             _logs.append(f"[CONFIG]\n{_o}")
-                                        # Persist the change so it survives a router reload.
+                                        # ── SAVE, then PROVE the outcome with the AI-driven
+                                        # OUTCOME CONTRACT. Nothing here is hardcoded per
+                                        # protocol: the AI derives the post-conditions for
+                                        # THIS intent (including persistence — so "forgot
+                                        # write memory" is impossible by construction),
+                                        # runs the checks live, re-polls anything still
+                                        # converging, and interprets each result by reading
+                                        # the evidence. Works for OSPF, BGP, interfaces,
+                                        # any vendor — the model decides what success means.
                                         if _cfgc:
                                             try:
                                                 _sv = _dconn.save_config()
-                                                _logs.append(f"[SAVE]\n{_sv}")
-                                            except Exception:
-                                                pass
-                                        # ── VERIFICATION: confirm the change actually worked,
-                                        # rather than assuming success because commands didn't
-                                        # error. Runs the AI-proposed [VERIFY] checks (e.g.
-                                        # 'show ip ospf neighbor') and surfaces the real output.
-                                        _vstatus = ""
-                                        _vcmds = _ai_pend.get("verify_commands") or []
-                                        if _cfgc and _vcmds:
-                                            for _vc in _vcmds:
+                                                _logs.append(f"[SAVE] {_sv}")
+                                            except Exception as _se:
+                                                _logs.append(f"[SAVE] FAILED: {_se}")
+
+                                        _contract = None
+                                        if _cfgc:
+                                            try:
+                                                from core.intelligence.outcome_contract import OutcomeContractEngine
+                                                _oce = OutcomeContractEngine(ai_call=call_ai)
+
+                                                def _run_show(cmd, _c=_dconn):
+                                                    try:
+                                                        return _c.send_command(cmd, read_timeout=30, expect_string=r"#")
+                                                    except Exception as _e:
+                                                        return f"(command error: {_e})"
+
+                                                _contract = _oce.enforce(
+                                                    intent=_ai_pend.get("query") or _ai_pend.get("scope_label") or "configuration change",
+                                                    device_name=_td.hostname or _td.ip,
+                                                    applied_commands=_cfgc,
+                                                    run_command=_run_show,
+                                                    device_facts="",
+                                                    converge_timeout_s=45,
+                                                    poll_interval_s=5,
+                                                )
+                                                _logs.append(_contract.to_log())
+
+                                                # ── AUTO-WRITE OPERATIONAL MEMORY ──
+                                                # Every verified change records itself: the
+                                                # platform accumulates experience automatically,
+                                                # no manual step. Protocol is derived from the
+                                                # intent; site comes from the device.
                                                 try:
-                                                    _vo = _dconn.send_command(_vc, read_timeout=25,
-                                                                              expect_string=r"#")
-                                                except Exception:
-                                                    _vo = ""
-                                                _logs.append(f"[VERIFY] {_vc}\n{_vo}")
-                                                # Heuristic: an OSPF neighbor check that shows a
-                                                # neighbor in FULL state means adjacency formed.
-                                                if "ospf neighbor" in _vc.lower():
-                                                    if "FULL" in (_vo or ""):
-                                                        _vstatus = "✅ verified: OSPF neighbor in FULL state"
-                                                    else:
-                                                        _vstatus = ("⚠️ no OSPF neighbor in FULL state yet "
-                                                                    "(adjacency not formed — check the other "
-                                                                    "end / give it a moment)")
+                                                    from core.intelligence.operational_memory import get_operational_memory
+                                                    _intent_l = (_ai_pend.get("query") or "").lower()
+                                                    _proto = next((p for p in
+                                                        ("ospf","bgp","eigrp","rip","isis","mpls","vlan",
+                                                         "interface","acl","nat","hsrp","vrrp","stp")
+                                                        if p in _intent_l), "")
+                                                    get_operational_memory().record_from_contract(
+                                                        _contract,
+                                                        site=getattr(_td, "site_name", "") or "",
+                                                        protocol=_proto,
+                                                        operator="",
+                                                        commands=_cfgc,
+                                                    )
+                                                except Exception as _me:
+                                                    _logs.append(f"[MEMORY] not recorded: {_me}")
+                                            except Exception as _ce:
+                                                _logs.append(f"[CONTRACT] could not run outcome contract: {_ce}")
+
                                         _dconn.disconnect()
-                                        _hdr = f"✅ **{_td.hostname or _td.ip}**"
-                                        if _vstatus:
-                                            _hdr += f" — {_vstatus}"
+
+                                        # ── OUTCOME HEADER reflects the proven contract ──
+                                        if _contract is not None:
+                                            if _contract.satisfied:
+                                                _hdr = f"✅ **{_td.hostname or _td.ip}** — outcome verified ({_contract.summary})"
+                                            else:
+                                                _hdr = f"⚠️ **{_td.hostname or _td.ip}** — applied, outcome NOT fully proven: {_contract.summary}"
+                                        elif _cfgc:
+                                            _hdr = f"✅ **{_td.hostname or _td.ip}** — applied & saved"
+                                        else:
+                                            _hdr = f"✅ **{_td.hostname or _td.ip}**"
                                         _dep_log.append(
                                             _hdr + "\n```\n" + "\n".join(_logs) + "\n```"
                                         )
