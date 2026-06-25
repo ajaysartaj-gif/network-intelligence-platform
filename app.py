@@ -500,6 +500,7 @@ WORKSPACES = [
     ("Observability", "📡", "Observability"),
     ("security",   "🔒",  "Security"),
     ("executive",  "📈",  "Executive"),
+    ("intelligence", "🧠", "Intelligence"),
     ("admin",      "⚙️",  "Admin"),
 ]
 
@@ -1422,6 +1423,17 @@ elif workspace == "executive":
         st.warning("🟠 MEDIUM RISK — Maintain elevated monitoring posture.")
     else:
         st.success("🟢 LOW RISK — Network operating normally.")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# WORKSPACE: INTELLIGENCE (the AI Brain — powered by Operational Memory)
+# ══════════════════════════════════════════════════════════════════════════════
+elif workspace == "intelligence":
+    try:
+        from ui.intelligence_center import render_intelligence_center
+        render_intelligence_center()
+    except Exception as _ic_exc:
+        st.markdown("## 🧠 Intelligence Center")
+        st.error(f"Intelligence Center failed to load: {_ic_exc}")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # WORKSPACE: ADMIN
