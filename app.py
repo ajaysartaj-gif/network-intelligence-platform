@@ -235,9 +235,37 @@ def _bind_capabilities() -> None:
         wire_memory_system()
     except Exception:
         pass
+    # Anticipation: register the forecasters, bind the first-class Prediction
+    # pillar to the engine, and expose the forecast reasoning faculty.
+    try:
+        from core.intelligence.forecasting import wire_prediction
+        wire_prediction()
+    except Exception:
+        pass
 
 
 _bind_capabilities()
+
+
+# Continuous-improvement loop for forecasting: grade matured predictions against
+# what actually happened and recalibrate. Throttled so it runs at most once every
+# 15 minutes regardless of how often Streamlit reruns the script.
+_LAST_FORECAST_RESOLVE = [0.0]
+
+
+def _maybe_resolve_forecasts() -> None:
+    import time as _t
+    if _t.time() - _LAST_FORECAST_RESOLVE[0] < 900:
+        return
+    _LAST_FORECAST_RESOLVE[0] = _t.time()
+    try:
+        from core.intelligence.forecasting import get_prediction_engine
+        get_prediction_engine().resolve_outcomes()
+    except Exception:
+        pass
+
+
+_maybe_resolve_forecasts()
 
 
 def _resolve_api_key() -> str:
