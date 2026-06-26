@@ -242,6 +242,22 @@ def _bind_capabilities() -> None:
         wire_prediction()
     except Exception:
         pass
+    # Self-management: register the self-* faculties and the MAPE-K autonomic
+    # controller, bind the Decision / Autonomous / Self-Management pillars, and
+    # install the authorize() safety gate (changes still need approval by default).
+    try:
+        from core.intelligence.autonomy import wire_autonomy
+        wire_autonomy()
+    except Exception:
+        pass
+    # Organizational learning: register the learners + lessons-learned registry,
+    # bind the Learning / Institutional-Learning pillars, and surface lessons into
+    # reasoning. Every deployment/incident/operator interaction now teaches it.
+    try:
+        from core.intelligence.learning import wire_learning
+        wire_learning()
+    except Exception:
+        pass
 
 
 _bind_capabilities()
@@ -261,6 +277,14 @@ def _maybe_resolve_forecasts() -> None:
     try:
         from core.intelligence.forecasting import get_prediction_engine
         get_prediction_engine().resolve_outcomes()
+    except Exception:
+        pass
+    # Periodic after-action review: mine the whole corpus for new patterns,
+    # repeated mistakes and proven strategies. Cheap and self-throttled (≤ every
+    # 6 hours), so it can sit on the same low-frequency tick.
+    try:
+        from core.intelligence.learning import get_learning_engine
+        get_learning_engine().maybe_retrospect()
     except Exception:
         pass
 
@@ -2532,6 +2556,22 @@ GROQ_API_KEY = "your-key-here"
                                                         )
                                                     except Exception as _cme:
                                                         _logs.append(f"[MEMORY+] not consolidated: {_cme}")
+                                                    # ── LEARN FROM THIS DEPLOYMENT ──
+                                                    # The same verified contract feeds the organizational
+                                                    # learning loop: every deployment improves knowledge,
+                                                    # reasoning, risk, planning, confidence and more — and
+                                                    # repeated mistakes / winning strategies get named.
+                                                    try:
+                                                        from core.intelligence.learning import get_learning_engine
+                                                        get_learning_engine().learn_from_contract(
+                                                            _contract,
+                                                            site=getattr(_td, "site_name", "") or "",
+                                                            protocol=_proto,
+                                                            operator="",
+                                                            commands=_cfgc,
+                                                        )
+                                                    except Exception as _lme:
+                                                        _logs.append(f"[LEARN+] not recorded: {_lme}")
                                                 except Exception as _me:
                                                     _logs.append(f"[MEMORY] not recorded: {_me}")
                                             except Exception as _ce:
