@@ -227,6 +227,14 @@ def _bind_capabilities() -> None:
         bind_reasoning_capability()
     except Exception:
         pass
+    # Expanded memory: register the expert faculties and bind the derived-memory
+    # pillars (Experience/Failure/Pattern/Procedural/Semantic/Temporal/…) plus
+    # upgrade Continuous Learning + Prediction now that the feedback loop exists.
+    try:
+        from core.intelligence.memory import wire_memory_system
+        wire_memory_system()
+    except Exception:
+        pass
 
 
 _bind_capabilities()
@@ -2479,6 +2487,23 @@ GROQ_API_KEY = "your-key-here"
                                                         operator="",
                                                         commands=_cfgc,
                                                     )
+                                                    # ── CONSOLIDATE INTO DERIVED MEMORY ──
+                                                    # Same verified contract fans out into every
+                                                    # derived memory (procedural/experience/failure/
+                                                    # pattern/temporal/trust/verification/…), so the
+                                                    # platform turns this episode into expertise, not
+                                                    # just a log line.
+                                                    try:
+                                                        from core.intelligence.memory import get_memory_system
+                                                        get_memory_system().record_from_contract(
+                                                            _contract,
+                                                            site=getattr(_td, "site_name", "") or "",
+                                                            protocol=_proto,
+                                                            operator="",
+                                                            commands=_cfgc,
+                                                        )
+                                                    except Exception as _cme:
+                                                        _logs.append(f"[MEMORY+] not consolidated: {_cme}")
                                                 except Exception as _me:
                                                     _logs.append(f"[MEMORY] not recorded: {_me}")
                                             except Exception as _ce:
