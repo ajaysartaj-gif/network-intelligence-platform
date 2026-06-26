@@ -67,7 +67,7 @@ class OperationsOrchestrator:
         if device_catalog:
             logger.info(f"Live mode: loaded {len(device_catalog)} device(s) from catalog")
         else:
-            logger.info("Simulation mode: no live device catalog configured")
+            logger.info("Live mode: no device catalog — using GNS3 / GitHub log sources only")
         
         # Tracking
         self.query_history: List[QueryRecord] = []
@@ -687,15 +687,20 @@ class OperationsOrchestrator:
         cycle_start = datetime.utcnow()
 
         try:
-            # 1. SIMULATION STEP
-            simulation_changes = self.simulator.step()
+            # 1. LIVE TELEMETRY (simulation disabled — real GNS3 / catalog only)
+            if LIVE_ONLY:
+                simulation_changes = {"anomalies": []}
+            else:
+                simulation_changes = self.simulator.step()
 
             # 2. COLLECT TELEMETRY
             telemetry = self.telemetry.collect_all_telemetry()
 
             # 3. DETECT ANOMALIES
             telemetry_anomalies = self.telemetry.detect_anomalies()
-            simulation_anomalies = simulation_changes.get("anomalies", [])
+            simulation_anomalies = (
+                [] if LIVE_ONLY else simulation_changes.get("anomalies", [])
+            )
             all_anomalies = telemetry_anomalies + simulation_anomalies
             
             # 4. PROCESS ANOMALIES → EVENTS → INCIDENTS
@@ -717,26 +722,53 @@ class OperationsOrchestrator:
             operational_summary = self.state.get_operational_summary()
 
             # 8. UPDATE TOPOLOGY STATE
-            topology_state = {
-                "devices": self.simulator.get_topology_summary(),
-                "links": len(self.simulator.links),
-                "critical_devices": critical_devices,
-            }
+            if LIVE_ONLY:
+                live_metrics = self.state.get_all_device_metrics()
+                topology_state = {
+                    "devices": {
+                        "total_devices": len(live_metrics),
+                        "device_types": {},
+                    },
+                    "links": 0,
+                    "critical_devices": critical_devices,
+                    "mode": "live",
+                }
+            else:
+                topology_state = {
+                    "devices": self.simulator.get_topology_summary(),
+                    "links": len(self.simulator.links),
+                    "critical_devices": critical_devices,
+                    "mode": "simulation",
+                }
             self.state.update_topology(topology_state)
 
-            # 9. UPDATE DIGITAL TWIN
-            for hostname, device in self.simulator.devices.items():
-                dt_device = DeviceState(
-                    hostname=hostname,
-                    vendor=device.vendor,
-                    model=device.model,
-                    os_version=device.os_version,
-                    status=device.status,
-                    cpu=device.cpu,
-                    memory=device.memory,
-                    interfaces=device.interfaces,
-                )
-                self.twin.add_device(dt_device)
+            # 9. UPDATE DIGITAL TWIN (live metrics only in live mode)
+            if LIVE_ONLY:
+                for hostname, metrics in live_metrics.items():
+                    dt_device = DeviceState(
+                        hostname=hostname,
+                        vendor="Cisco",
+                        model="GNS3",
+                        os_version="",
+                        status="healthy" if getattr(metrics, "reachable", True) else "critical",
+                        cpu=getattr(metrics, "cpu", 0.0),
+                        memory=getattr(metrics, "memory", 0.0),
+                        interfaces=[],
+                    )
+                    self.twin.add_device(dt_device)
+            else:
+                for hostname, device in self.simulator.devices.items():
+                    dt_device = DeviceState(
+                        hostname=hostname,
+                        vendor=device.vendor,
+                        model=device.model,
+                        os_version=device.os_version,
+                        status=device.status,
+                        cpu=device.cpu,
+                        memory=device.memory,
+                        interfaces=device.interfaces,
+                    )
+                    self.twin.add_device(dt_device)
 
             cycle_duration = (datetime.utcnow() - cycle_start).total_seconds()
             self.last_update = datetime.utcnow().isoformat()
@@ -760,6 +792,48 @@ class OperationsOrchestrator:
                 "error": str(e),
                 "timestamp": datetime.utcnow().isoformat(),
             }
+
+    # ── Autonomic self-management (additive; does not change run_cycle) ───────
+    def autonomic_cycle(self, candidates: Optional[List[Any]] = None) -> Dict[str, Any]:
+        """
+        Run one SELF-MANAGED operational cycle: the normal run_cycle() wrapped in
+        the MAPE-K controller (monitor→analyze→plan→execute→verify→learn). The
+        controller never pushes a network change itself — it authorises and
+        recommends; every change still flows through the approval-gated path.
+        Falls back to a plain run_cycle() if the autonomy layer is unavailable.
+        """
+        try:
+            from core.intelligence.autonomy import get_controller
+            return get_controller().governed_run(self.run_cycle, candidates=candidates)
+        except Exception as exc:
+            logger.debug(f"autonomic_cycle falling back to run_cycle: {exc}")
+            return {"cycle": self.run_cycle(), "governance": {"error": str(exc)}}
+
+    def authorize_change(self, intent: str, device: str, protocol: str = "",
+                         site: str = "", operator: str = "") -> Dict[str, Any]:
+        """
+        The single safety gate any change path can call BEFORE applying config.
+        Returns a plain dict {verdict, reasons, risk, level, requires_approval}.
+        Defaults to requiring approval if the autonomy layer is unavailable.
+        """
+        try:
+            from core.intelligence.autonomy import authorize, Action
+            d = authorize(Action(kind="config_change", intent=intent, device=device,
+                                 protocol=protocol, site=site, operator=operator))
+            return {"verdict": d.verdict.value, "reasons": d.reasons,
+                    "risk": d.risk, "level": d.level.name,
+                    "requires_approval": d.requires_approval, "allowed": d.allowed}
+        except Exception as exc:
+            return {"verdict": "gate", "reasons": [f"autonomy layer unavailable: {exc}"],
+                    "risk": 0.0, "level": "observe", "requires_approval": True,
+                    "allowed": False}
+
+    def autonomy_report(self) -> Dict[str, Any]:
+        try:
+            from core.intelligence.autonomy import get_controller
+            return get_controller().report()
+        except Exception as exc:
+            return {"error": str(exc)}
 
     def get_operational_status(self) -> Dict[str, Any]:
         """Get current operational status."""
