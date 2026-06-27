@@ -258,6 +258,15 @@ def _bind_capabilities() -> None:
         wire_learning()
     except Exception:
         pass
+    # Decision intelligence: register the judgment faculties and expose the
+    # Judgment reasoner in the reasoning registry, so the platform can deliberate
+    # over options (tradeoffs, ethics-veto, counterfactual, second-order) and
+    # render an explained, confidence-bearing decision — still gated for safety.
+    try:
+        from core.intelligence.decision import wire_decision
+        wire_decision()
+    except Exception:
+        pass
 
 
 _bind_capabilities()
