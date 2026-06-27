@@ -267,6 +267,15 @@ def _bind_capabilities() -> None:
         wire_decision()
     except Exception:
         pass
+    # Configuration intelligence: deterministic, doc-grounded, idempotent,
+    # cross-device-consistent config synthesis + honest applied/persisted/
+    # operational verification. Replaces per-device free generation for the
+    # features it covers (DNS/NTP/clock) via the generate_config chokepoint.
+    try:
+        from core.intelligence.config_synthesis import wire_configuration
+        wire_configuration()
+    except Exception:
+        pass
 
 
 _bind_capabilities()
