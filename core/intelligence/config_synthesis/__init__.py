@@ -29,6 +29,11 @@ from core.intelligence.config_synthesis.verification import (
 from core.intelligence.config_synthesis.base import (
     ConfigIntent, ConfigPlan, StateCheck, CheckKind, Vendor,
 )
+from core.intelligence.config_synthesis.interface import (
+    normalize_if_name, if_name_variants, verify_descriptions,
+    build_description_checks, normalize_check_command, deterministic_precheck,
+    extract_interface,
+)
 
 __all__ = [
     "ConfigurationIntelligence", "get_config_intelligence", "synthesize_config",
