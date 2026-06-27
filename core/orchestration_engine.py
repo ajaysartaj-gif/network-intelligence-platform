@@ -835,6 +835,23 @@ class OperationsOrchestrator:
         except Exception as exc:
             return {"error": str(exc)}
 
+    def deliberate(self, question: str, options: List[Any],
+                   goal: str = "", operator: str = "default") -> Dict[str, Any]:
+        """
+        Render a senior-architect-style JUDGMENT over a set of options: weighs
+        tradeoffs, business value, risk, ethics (hard veto), second-order and
+        long-term effects, reversibility and regret; returns an explained,
+        confidence-bearing decision (still gated for safety before execution).
+        """
+        try:
+            from core.intelligence.decision import get_deliberation_engine, DecisionContext
+            from core.intelligence.decision.engine import _coerce_options
+            ctx = DecisionContext(question=question, options=_coerce_options(options),
+                                  goal=goal, operator=operator)
+            return get_deliberation_engine().judge_dict(ctx)
+        except Exception as exc:
+            return {"error": str(exc), "chosen": None, "requires_human": True}
+
     def get_operational_status(self) -> Dict[str, Any]:
         """Get current operational status."""
         return {
