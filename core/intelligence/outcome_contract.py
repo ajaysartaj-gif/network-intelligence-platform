@@ -153,15 +153,46 @@ class OutcomeContractEngine:
                 cmd = str(item.get("check_command", "")).strip()
                 if not cmd:
                     continue
+                _desc = str(item.get("description", "")).strip()
+                # Harden interface checks: rewrite description read-backs to an
+                # authoritative, format-stable command (full interface name,
+                # untruncated `description` line) so a correct description is
+                # never reported "missing" due to name abbreviation/truncation.
+                try:
+                    from core.intelligence.config_synthesis.interface import normalize_check_command
+                    cmd = normalize_check_command(cmd, _desc)
+                except Exception:
+                    pass
                 conditions.append(PostCondition(
                     key=str(item.get("key", "cond"))[:40],
-                    description=str(item.get("description", "")).strip() or item.get("key", "condition"),
+                    description=_desc or item.get("key", "condition"),
                     check_command=cmd,
                 ))
         return conditions
 
     # ── 2. AI INTERPRETS one piece of evidence ───────────────────────────────
-    def interpret(self, condition: PostCondition, output: str, intent: str) -> PostCondition:
+    def interpret(self, condition: PostCondition, output: str, intent: str,
+                  applied_commands: Optional[List[str]] = None,
+                  running_config: str = "", startup_config: str = "") -> PostCondition:
+        # Deterministic guard first: a config-PRESENCE condition is proven (or
+        # not) directly against the authoritative config we just applied —
+        # feature-agnostic and normalised, so abbreviation/truncation/empty-output
+        # can't manufacture a false "missing". Operational facts (sync, adjacency,
+        # reachability) still defer to the model. Only ever short-circuits to PASS.
+        try:
+            from core.intelligence.config_synthesis.interface import general_precheck
+            _pre = general_precheck(condition.description, condition.check_command,
+                                    output, intent, applied_commands=applied_commands,
+                                    running_config=running_config,
+                                    startup_config=startup_config)
+            if _pre == "pass":
+                condition.evidence = output or ""
+                condition.verdict = Verdict.PASS
+                condition.reason = ("deterministically confirmed against authoritative "
+                                    "running/startup-config (normalised)")
+                return condition
+        except Exception:
+            pass
         prompt = (
             "You are a CCIE-level engineer judging whether a post-condition is met, "
             "by READING the command output (not keyword matching).\n\n"
@@ -214,6 +245,21 @@ class OutcomeContractEngine:
             return result
         result.conditions = conditions
 
+        # Authoritative, full-fidelity config snapshots fetched ONCE. These let
+        # config-PRESENCE conditions be proven deterministically against what we
+        # actually applied — no LLM output-reading, immune to abbreviation /
+        # truncation / empty-output. Operational checks still use their own
+        # command output and the model.
+        _running_cfg, _startup_cfg = "", ""
+        try:
+            _running_cfg = run_command("show running-config") or ""
+        except Exception:
+            _running_cfg = ""
+        try:
+            _startup_cfg = run_command("show startup-config") or ""
+        except Exception:
+            _startup_cfg = ""
+
         deadline = time.time() + max(0, converge_timeout_s)
         # Initial evaluation
         for cond in conditions:
@@ -222,7 +268,8 @@ class OutcomeContractEngine:
                 out = run_command(cond.check_command)
             except Exception as exc:
                 out = f"(command error: {exc})"
-            self.interpret(cond, out, intent)
+            self.interpret(cond, out, intent, applied_commands=applied_commands,
+                           running_config=_running_cfg, startup_config=_startup_cfg)
 
         # Re-poll only the PENDING ones until they resolve or we time out.
         while any(c.verdict == Verdict.PENDING for c in conditions) and time.time() < deadline:
@@ -235,7 +282,8 @@ class OutcomeContractEngine:
                     out = run_command(cond.check_command)
                 except Exception as exc:
                     out = f"(command error: {exc})"
-                self.interpret(cond, out, intent)
+                self.interpret(cond, out, intent, applied_commands=applied_commands,
+                               running_config=_running_cfg, startup_config=_startup_cfg)
 
         # Any remaining PENDING after timeout is treated as FAIL (didn't converge).
         for c in conditions:
