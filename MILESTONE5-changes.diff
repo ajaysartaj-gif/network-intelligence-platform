@@ -1,0 +1,36 @@
+MILESTONE 5 — Enterprise Policy & Autonomous Control (+ mandatory M4 refinement)
+
+NEW: core/policy/{__init__,contract,engine}.py  — the Policy Layer
+
+── M4 REFINEMENT (smallest patch; reviewed against the 7 required checks) ──
+core/governance/contract.py:
+  + import time
+  + GovernanceContract.ts: float                     # (7) audit completeness
+  + GovernanceContract.simulation_performed property  # (6) explicit sim state
+  + to_dict() now includes "simulation_performed" and "ts"
+core/execution_pipeline.py (governance gate):
+  + on govern=False OR governance error, result.governance is set to an explicit
+    {"status":"not_evaluated","bypassed":True,"reason":...} marker            # (5)
+    governance bypass is now always auditable, never silently None.
+
+── M5 POLICY INTEGRATION ──
+core/execution_pipeline.py:
+  @@ ExecutionResult @@
+  +    policy: Any = None              # core.policy.PolicyContract (as dict)
+  @@ deploy() signature @@
+  +    policy: bool = True,
+  +    policy_strict: bool = False,
+  +    autonomous: bool = False,
+  @@ deploy() body — AFTER governance gate, BEFORE NetworkFixer.fix() @@
+  +    # ── POLICY GATE (Milestone 5) ──
+  +    if policy:
+  +        from core.policy import evaluate_policy
+  +        _pol = evaluate_policy(device=device, intent=intent, operator=operator,
+  +                               protocol=protocol, site=site,
+  +                               autonomous=autonomous, strict=policy_strict)
+  +        result.policy = _pol.to_dict()
+  +        for w in _pol.business_warnings: _log(f"POLICY WARNING: {w}")
+  +        if not _pol.permitted:
+  +            result.success = False; result.error = _pol.summary()
+  +            return result          # STOP — do NOT reach the deployer
+  +    else: result.policy = {"status":"not_evaluated","bypassed":True,...}
