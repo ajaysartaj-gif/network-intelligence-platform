@@ -41,6 +41,7 @@ class ExecutionResult:
     contract: Any = None            # OutcomeContractEngine result (or None)
     verified: Optional[bool] = None
     error: str = ""
+    governance: Any = None          # core.governance.GovernanceContract (as dict)
     logs: List[str] = field(default_factory=list)
 
 
@@ -92,6 +93,9 @@ class ExecutionPipeline:
         config_mode: bool = True,
         step_logger: Optional[Callable] = None,
         anomaly: Optional[Dict[str, Any]] = None,
+        govern: bool = True,
+        rollback_commands: Optional[List[str]] = None,
+        govern_strict: bool = False,
     ) -> ExecutionResult:
         """
         Deploy ``fix_commands`` to ``device`` through the single deployer
@@ -119,6 +123,40 @@ class ExecutionPipeline:
                 self.tracker.create_run(f"deploy:{device}")
             except Exception:
                 pass
+
+        # ── GOVERNANCE GATE (Milestone 4 — Enterprise Change Governance) ──
+        # Final engineering decision BEFORE any device write. Every deployment
+        # request passes through here. Governance reuses Compliance, the autonomy
+        # Authorization gate, Risk, Rollback readiness and (optional) Simulation
+        # to authorize or STOP the deployment. The LLM never decides deployment
+        # safety. On a non-authorized decision we return WITHOUT calling
+        # NetworkFixer; governance never opens a session or writes config itself.
+        if govern:
+            try:
+                from core.governance import govern_change
+                _gov = govern_change(
+                    device=device,
+                    commands=list(fix_commands or []),
+                    intent=intent,
+                    protocol=protocol,
+                    site=site,
+                    operator=operator,
+                    rollback_commands=rollback_commands,
+                    device_facts=device_facts,
+                    strict=govern_strict,
+                )
+                result.governance = _gov.to_dict()
+                for w in _gov.warnings:
+                    _log(f"GOVERNANCE WARNING: {w}")
+                if not _gov.authorized:
+                    result.success = False
+                    result.error = _gov.summary()
+                    _log(f"GOVERNANCE: {_gov.status.value} — deployment stopped.")
+                    return result  # STOP — do NOT reach the deployer
+            except Exception as _ge:
+                # Governance must never crash deployment; fail-open on its own
+                # error (never on an explicit non-authorized verdict).
+                _log(f"governance skipped (error): {_ge}")
 
         # ── DEPLOYMENT — the ONLY device write, via NetworkFixer ─────────────
         fr = self.fixer.fix(
