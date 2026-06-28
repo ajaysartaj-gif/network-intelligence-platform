@@ -449,6 +449,37 @@ def generate_config(
     except Exception:
         pass  # fall through to AI generation on any issue
 
+    # ── EVIDENCE GATE (Milestone 2 — Evidence-Driven Change Decision) ──
+    # Evidence-first: the LLM must never invent configuration. Before any LLM
+    # call we assess whether enough VERIFIED runtime evidence exists. If not,
+    # generation is halted and the caller is told what is missing and how to
+    # collect it. The deterministic template path above is evidence-independent
+    # (canonical templates, no invention) and intentionally runs before this.
+    try:
+        from core.evidence import assess_evidence
+        _ev = assess_evidence(
+            request, device, device_facts,
+            fleet_context=fleet_context, inventory_summary=inventory_summary,
+        )
+        out["evidence"] = _ev.to_dict()
+        out["evidence_status"] = _ev.status.value
+        if not _ev.sufficient:
+            # Do NOT call the LLM. Report missing evidence + collection actions.
+            out["status"] = "empty"          # existing UI renders reasons as bullets, blocks deploy
+            out["mode"] = "evidence"
+            out["commands"] = []
+            out["summary"] = _ev.summary()
+            out["missing"] = _ev.missing_labels()
+            out["recommendations"] = _ev.recommendations
+            out["risk"] = "unknown"
+            out["reasons"] = [_ev.summary()] + _ev.recommendations
+            return out
+    except Exception:
+        # The evidence layer must never crash generation; on assessor failure
+        # fall through to existing behavior (fail-open on infrastructure error,
+        # never on an actual insufficiency verdict).
+        pass
+
     try:
         raw = ai_call(
             build_prompt(
