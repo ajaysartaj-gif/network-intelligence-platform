@@ -42,6 +42,7 @@ class ExecutionResult:
     verified: Optional[bool] = None
     error: str = ""
     governance: Any = None          # core.governance.GovernanceContract (as dict)
+    policy: Any = None              # core.policy.PolicyContract (as dict)
     logs: List[str] = field(default_factory=list)
 
 
@@ -96,6 +97,9 @@ class ExecutionPipeline:
         govern: bool = True,
         rollback_commands: Optional[List[str]] = None,
         govern_strict: bool = False,
+        policy: bool = True,
+        policy_strict: bool = False,
+        autonomous: bool = False,
     ) -> ExecutionResult:
         """
         Deploy ``fix_commands`` to ``device`` through the single deployer
@@ -155,8 +159,49 @@ class ExecutionPipeline:
                     return result  # STOP — do NOT reach the deployer
             except Exception as _ge:
                 # Governance must never crash deployment; fail-open on its own
-                # error (never on an explicit non-authorized verdict).
+                # error (never on an explicit non-authorized verdict). The bypass
+                # is recorded explicitly so it is auditable, never silent.
+                result.governance = {"status": "not_evaluated",
+                                     "bypassed": True, "reason": f"error: {_ge}"}
                 _log(f"governance skipped (error): {_ge}")
+        else:
+            # Explicit, auditable bypass — governance was deliberately disabled.
+            result.governance = {"status": "not_evaluated",
+                                 "bypassed": True, "reason": "govern=False"}
+            _log("GOVERNANCE: not evaluated (govern=False).")
+
+        # ── POLICY GATE (Milestone 5 — Enterprise Policy & Autonomous Control) ──
+        # Organizational permission BEFORE any device write, evaluated AFTER and
+        # independently of Governance. Reuses the business-rules subsystem (change
+        # freeze, maintenance window, business criticality, operator/role and
+        # autonomous eligibility). On a non-permitted decision we return WITHOUT
+        # calling NetworkFixer; policy never deploys, generates, or reasons.
+        if policy:
+            try:
+                from core.policy import evaluate_policy
+                _pol = evaluate_policy(
+                    device=device, intent=intent, operator=operator,
+                    protocol=protocol, site=site,
+                    autonomous=autonomous, strict=policy_strict,
+                )
+                result.policy = _pol.to_dict()
+                for w in _pol.business_warnings:
+                    _log(f"POLICY WARNING: {w}")
+                if not _pol.permitted:
+                    result.success = False
+                    result.error = _pol.summary()
+                    _log(f"POLICY: {_pol.status.value} — execution stopped.")
+                    return result  # STOP — do NOT reach the deployer
+            except Exception as _pe:
+                # Policy must never crash deployment; fail-open on its own error
+                # (never on an explicit non-permitted decision). Bypass recorded.
+                result.policy = {"status": "not_evaluated",
+                                 "bypassed": True, "reason": f"error: {_pe}"}
+                _log(f"policy skipped (error): {_pe}")
+        else:
+            result.policy = {"status": "not_evaluated",
+                             "bypassed": True, "reason": "policy=False"}
+            _log("POLICY: not evaluated (policy=False).")
 
         # ── DEPLOYMENT — the ONLY device write, via NetworkFixer ─────────────
         fr = self.fixer.fix(
