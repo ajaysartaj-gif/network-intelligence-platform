@@ -8,6 +8,7 @@ import logging
 import os
 import time
 import random
+import contextlib
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -165,12 +166,20 @@ class NetworkFixer:
         device_config: Optional[Dict[str, Any]] = None,
         step_logger=None,
         command_override: Optional[Dict[str, List[str]]] = None,
+        connection=None,
+        save: bool = False,
+        config_mode: bool = False,
     ) -> FixResult:
         """
         Execute remediation for an anomaly.
         step_logger: callable(str) → logs to the workflow step.
         command_override: AI-generated {diagnostic,fix,verify} commands. When
             provided, these are used INSTEAD of the built-in table.
+        connection: an already-open netmiko connection. When provided it is
+            used as-is (and left open for the caller to close) instead of
+            opening a new one — this lets callers that already established a
+            session with special handling (e.g. SSH→Telnet fallback) reuse it
+            while keeping this method the single deployment implementation.
         """
         device = anomaly.get("device", "unknown")
         anomaly_type = anomaly.get("type", "unknown")
@@ -202,17 +211,40 @@ class NetworkFixer:
         else:
             commands = self._resolve_commands(anomaly_type, anomaly)
 
-        # 3. Execute (live or simulated)
-        if conn_config and NETMIKO_AVAILABLE:
-            result = self._execute_live(conn_config, commands, anomaly, result, _log)
+        # 3. Execute (live connection required — no simulated fallback)
+        if (conn_config or connection is not None) and NETMIKO_AVAILABLE:
+            result = self._execute_live(conn_config, commands, anomaly, result, _log,
+                                        connection=connection, save=save,
+                                        config_mode=config_mode)
         else:
-            result = self._execute_simulated(commands, anomaly, result, _log)
+            result.error = (
+                "No live device connection. Set GNS3_ROUTER_HOST and GNS3_ROUTER_PORT "
+                "in Secrets, or approve the device in Device Management."
+            )
+            _log(f"❌ {result.error}")
 
         result.finish()
         self._record(result)
         return result
 
     # ── live execution ──────────────────────────────────────────────────────
+
+    @contextlib.contextmanager
+    def _session(self, conn_config, connection):
+        """Yield a netmiko session: reuse the passed-in one (left open for the
+        caller), or open one from conn_config and close it afterwards. This
+        keeps a single deployment code path regardless of who owns the socket."""
+        if connection is not None:
+            yield connection
+        else:
+            conn = ConnectHandler(**conn_config)
+            try:
+                yield conn
+            finally:
+                try:
+                    conn.disconnect()
+                except Exception:
+                    pass
 
     def _execute_live(
         self,
@@ -221,10 +253,14 @@ class NetworkFixer:
         anomaly: Dict[str, Any],
         result: FixResult,
         log,
+        connection=None,
+        save: bool = False,
+        config_mode: bool = False,
     ) -> FixResult:
         try:
-            log(f"Connecting to {conn_config['host']}:{conn_config.get('port', 22)} via {conn_config['device_type']}")
-            with ConnectHandler(**conn_config) as conn:
+            _host = (conn_config or {}).get("host", "existing-session") if conn_config else "existing-session"
+            log(f"Connecting to {_host} via {(conn_config or {}).get('device_type', 'session')}")
+            with self._session(conn_config, connection) as conn:
                 log("SSH/Telnet session established")
 
                 # Run diagnostics
@@ -247,7 +283,7 @@ class NetworkFixer:
                     # sending. Otherwise the router receives literal text like
                     # 'interface {interface}' and rejects it, so the fix never applies.
                     rendered_fix = [self._interpolate(c, anomaly) for c in fix_cmds]
-                    if any(c in ["end", "exit", "wr", "write memory"] for c in fix_cmds):
+                    if config_mode or any(c in ["end", "exit", "wr", "write memory"] for c in fix_cmds):
                         try:
                             cfg_cmds = [self._interpolate(c, anomaly)
                                         for c in fix_cmds if c not in ("end", "exit")]
@@ -270,6 +306,16 @@ class NetworkFixer:
                             except Exception as e:
                                 log(f"   {cmd} failed: {e}")
 
+                # Persist config (only when caller asks — preserves existing
+                # save behavior for admin/copilot; monitor default is unchanged)
+                if save and fix_cmds:
+                    try:
+                        _sv = conn.save_config()
+                        result.outputs.append(str(_sv))
+                        log(f"   [SAVE] {_sv}")
+                    except Exception as e:
+                        log(f"   [SAVE] failed: {e}")
+
                 # Verify
                 log("Running verification checks...")
                 verify_passed = True
@@ -290,10 +336,10 @@ class NetworkFixer:
 
         except NetmikoAuthenticationException:
             result.error = "Authentication failed — check credentials"
-            log(f"Auth failed for {conn_config['host']}")
+            log(f"Auth failed for {(conn_config or {}).get('host', 'device')}")
         except NetmikoTimeoutException:
             result.error = "Connection timed out"
-            log(f"Timeout connecting to {conn_config['host']}")
+            log(f"Timeout connecting to {(conn_config or {}).get('host', 'device')}")
         except Exception as e:
             result.error = str(e)
             log(f"Fix failed: {e}")

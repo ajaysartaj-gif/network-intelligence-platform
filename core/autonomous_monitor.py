@@ -425,10 +425,19 @@ class AutonomousMonitor:
 
             device_cfg = self._get_device_config(device)
             ai_commands = approval_data.get("ai_commands")  # safe AI commands
-            fix_result = self.fixer.fix(
-                anomaly, device_config=device_cfg, step_logger=step5_log,
-                command_override=ai_commands,
+            from core.execution_pipeline import get_execution_pipeline
+            _pipe = get_execution_pipeline(self.fixer, self.tracker)
+            _er = _pipe.deploy(
+                device=device,
+                anomaly=anomaly,
+                device_config=device_cfg,
+                exec_commands=(ai_commands or {}).get("diagnostic", []),
+                fix_commands=(ai_commands or {}).get("fix", []),
+                verify_commands=(ai_commands or {}).get("verify", []),
+                step_logger=step5_log,
+                config_mode=False,
             )
+            fix_result = _er.fix_result
 
             # Expose the outcome so the UI can show live-vs-sim and commands run.
             self.last_fix_result = {
