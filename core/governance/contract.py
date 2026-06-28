@@ -12,6 +12,7 @@ Future milestones depend on THIS contract — never on raw governance internals.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List
@@ -48,11 +49,17 @@ class GovernanceContract:
     warnings: List[str] = field(default_factory=list)
     blocking_conditions: List[str] = field(default_factory=list)
     reasons: List[str] = field(default_factory=list)
+    ts: float = field(default_factory=time.time)     # audit timestamp
 
     @property
     def authorized(self) -> bool:
         """Deployment is permitted ONLY when this is True."""
         return self.status in _AUTHORIZED
+
+    @property
+    def simulation_performed(self) -> bool:
+        """Explicit simulation state (never assumed)."""
+        return self.simulation_result in ("passed", "failed")
 
     @property
     def deployment_authorization(self) -> str:
@@ -74,6 +81,7 @@ class GovernanceContract:
             "risk_score": round(self.risk_score, 2),
             "compliance_result": self.compliance_result,
             "simulation_result": self.simulation_result,
+            "simulation_performed": self.simulation_performed,
             "approval_requirement": self.approval_requirement,
             "rollback_readiness": self.rollback_readiness,
             "warnings": list(self.warnings),
@@ -81,4 +89,5 @@ class GovernanceContract:
             "deployment_authorization": self.deployment_authorization,
             "reasons": list(self.reasons),
             "summary": self.summary(),
+            "ts": self.ts,
         }
