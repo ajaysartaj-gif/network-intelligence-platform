@@ -455,6 +455,7 @@ def generate_config(
     # generation is halted and the caller is told what is missing and how to
     # collect it. The deterministic template path above is evidence-independent
     # (canonical templates, no invention) and intentionally runs before this.
+    _ev = None
     try:
         from core.evidence import assess_evidence
         _ev = assess_evidence(
@@ -479,6 +480,39 @@ def generate_config(
         # fall through to existing behavior (fail-open on infrastructure error,
         # never on an actual insufficiency verdict).
         pass
+
+    # ── REASONING & DECISION GATE (Milestone 3 — Reasoning & Decision Engine) ──
+    # Reasoning-first: the LLM must NOT decide whether enough information exists.
+    # With evidence confirmed (above), the Reasoning Layer activates the existing
+    # intelligence (Reasoning Registry, Decision Faculty, Knowledge Graph,
+    # Operational Memory) to make a DETERMINISTIC engineering decision. Only a
+    # PROCEED decision allows the LLM to run; anything else returns the
+    # engineering decision and requests the next action — without calling the LLM.
+    if _ev is not None:
+        try:
+            from core.reasoning_layer import decide_change
+            _dec = decide_change(request, device, _ev, device_facts=device_facts)
+            out["decision"] = _dec.to_dict()
+            out["decision_status"] = _dec.status.value
+            if not _dec.proceed:
+                out["status"] = "empty"      # existing UI renders reasons as bullets, blocks deploy
+                out["mode"] = "decision"
+                out["commands"] = []
+                out["summary"] = _dec.summary()
+                out["missing"] = _dec.missing_evidence
+                out["recommendations"] = (
+                    [_dec.recommended_action] if _dec.recommended_action else [])
+                out["risk"] = "unknown"
+                out["reasons"] = (
+                    [_dec.summary()]
+                    + ([_dec.recommended_action] if _dec.recommended_action else [])
+                    + list(_dec.warnings))
+                return out
+        except Exception:
+            # The reasoning layer must never crash generation; on failure fall
+            # through to existing behavior (it never blocks on an error, only on
+            # an explicit non-PROCEED engineering decision).
+            pass
 
     try:
         raw = ai_call(
