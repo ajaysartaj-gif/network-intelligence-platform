@@ -2487,113 +2487,37 @@ GROQ_API_KEY = "your-key-here"
                                             # GNS3 routers whose prompt echo is flaky.
                                             _o = _dconn.send_command_timing(_ec, read_timeout=20)
                                             _logs.append(f"$ {_ec}\n{_o}")
-                                        if _cfgc:
-                                            # cmd_verify=False disables per-command prompt
-                                            # echo verification -- the source of the
-                                            # "Pattern not detected: 'R1#'" error on lab
-                                            # devices. The config still applies; we just
-                                            # don't demand a perfectly-echoed prompt after
-                                            # each line. read_timeout is generous for slow
-                                            # GNS3 links.
-                                            _o = _dconn.send_config_set(
-                                                _cfgc, cmd_verify=False, read_timeout=60,
-                                            )
-                                            _logs.append(f"[CONFIG]\n{_o}")
-                                        # ── SAVE, then PROVE the outcome with the AI-driven
-                                        # OUTCOME CONTRACT. Nothing here is hardcoded per
-                                        # protocol: the AI derives the post-conditions for
-                                        # THIS intent (including persistence — so "forgot
-                                        # write memory" is impossible by construction),
-                                        # runs the checks live, re-polls anything still
-                                        # converging, and interprets each result by reading
-                                        # the evidence. Works for OSPF, BGP, interfaces,
-                                        # any vendor — the model decides what success means.
-                                        if _cfgc:
-                                            try:
-                                                _sv = _dconn.save_config()
-                                                _logs.append(f"[SAVE] {_sv}")
-                                            except Exception as _se:
-                                                _logs.append(f"[SAVE] FAILED: {_se}")
-
                                         _contract = None
                                         if _cfgc:
-                                            try:
-                                                from core.intelligence.outcome_contract import OutcomeContractEngine
-                                                _oce = OutcomeContractEngine(ai_call=call_ai)
+                                            # ── Canonical pipeline: ONE deployment path
+                                            # (NetworkFixer) + verify + memory + learning.
+                                            from core.execution_pipeline import get_execution_pipeline
 
-                                                def _run_show(cmd, _c=_dconn):
-                                                    try:
-                                                        return _c.send_command(cmd, read_timeout=30, expect_string=r"#")
-                                                    except Exception as _e:
-                                                        return f"(command error: {_e})"
-
-                                                _contract = _oce.enforce(
-                                                    intent=_ai_pend.get("query") or _ai_pend.get("scope_label") or "configuration change",
-                                                    device_name=_td.hostname or _td.ip,
-                                                    applied_commands=_cfgc,
-                                                    run_command=_run_show,
-                                                    device_facts="",
-                                                    converge_timeout_s=45,
-                                                    poll_interval_s=5,
-                                                )
-                                                _logs.append(_contract.to_log())
-
-                                                # ── AUTO-WRITE OPERATIONAL MEMORY ──
-                                                # Every verified change records itself: the
-                                                # platform accumulates experience automatically,
-                                                # no manual step. Protocol is derived from the
-                                                # intent; site comes from the device.
+                                            def _run_show(cmd, _c=_dconn):
                                                 try:
-                                                    from core.intelligence.operational_memory import get_operational_memory
-                                                    _intent_l = (_ai_pend.get("query") or "").lower()
-                                                    _proto = next((p for p in
-                                                        ("ospf","bgp","eigrp","rip","isis","mpls","vlan",
-                                                         "interface","acl","nat","hsrp","vrrp","stp")
-                                                        if p in _intent_l), "")
-                                                    get_operational_memory().record_from_contract(
-                                                        _contract,
-                                                        site=getattr(_td, "site_name", "") or "",
-                                                        protocol=_proto,
-                                                        operator="",
-                                                        commands=_cfgc,
-                                                    )
-                                                    # ── CONSOLIDATE INTO DERIVED MEMORY ──
-                                                    # Same verified contract fans out into every
-                                                    # derived memory (procedural/experience/failure/
-                                                    # pattern/temporal/trust/verification/…), so the
-                                                    # platform turns this episode into expertise, not
-                                                    # just a log line.
-                                                    try:
-                                                        from core.intelligence.memory import get_memory_system
-                                                        get_memory_system().record_from_contract(
-                                                            _contract,
-                                                            site=getattr(_td, "site_name", "") or "",
-                                                            protocol=_proto,
-                                                            operator="",
-                                                            commands=_cfgc,
-                                                        )
-                                                    except Exception as _cme:
-                                                        _logs.append(f"[MEMORY+] not consolidated: {_cme}")
-                                                    # ── LEARN FROM THIS DEPLOYMENT ──
-                                                    # The same verified contract feeds the organizational
-                                                    # learning loop: every deployment improves knowledge,
-                                                    # reasoning, risk, planning, confidence and more — and
-                                                    # repeated mistakes / winning strategies get named.
-                                                    try:
-                                                        from core.intelligence.learning import get_learning_engine
-                                                        get_learning_engine().learn_from_contract(
-                                                            _contract,
-                                                            site=getattr(_td, "site_name", "") or "",
-                                                            protocol=_proto,
-                                                            operator="",
-                                                            commands=_cfgc,
-                                                        )
-                                                    except Exception as _lme:
-                                                        _logs.append(f"[LEARN+] not recorded: {_lme}")
-                                                except Exception as _me:
-                                                    _logs.append(f"[MEMORY] not recorded: {_me}")
-                                            except Exception as _ce:
-                                                _logs.append(f"[CONTRACT] could not run outcome contract: {_ce}")
+                                                    return _c.send_command(cmd, read_timeout=30, expect_string=r"#")
+                                                except Exception as _e:
+                                                    return f"(command error: {_e})"
+
+                                            _intent_l = (_ai_pend.get("query") or "").lower()
+                                            _proto = next((p for p in
+                                                ("ospf","bgp","eigrp","rip","isis","mpls","vlan",
+                                                 "interface","acl","nat","hsrp","vrrp","stp")
+                                                if p in _intent_l), "")
+                                            _pipe = get_execution_pipeline(fixer, tracker, call_ai)
+                                            _er = _pipe.deploy(
+                                                device=_td.hostname or _td.ip,
+                                                connection=_dconn,
+                                                fix_commands=_cfgc,
+                                                intent=(_ai_pend.get("query") or _ai_pend.get("scope_label") or "configuration change"),
+                                                protocol=_proto,
+                                                site=getattr(_td, "site_name", "") or "",
+                                                verify=True,
+                                                save=True,
+                                                run_command=_run_show,
+                                            )
+                                            _logs.extend(_er.logs)
+                                            _contract = _er.contract
 
                                         _dconn.disconnect()
 
@@ -3333,19 +3257,21 @@ GROQ_API_KEY = "your-key-here"
                                         _cfg_exec["secret"] = _creds_exec["enable_secret"]
 
                                     with st.spinner(f"⚙️ Deploying configuration on {dev.ip}…"):
-                                        _conn_exec = ConnectHandler(**_cfg_exec)
                                         _config_cmds = [c.replace("[CONFIG]","").strip()
                                                         for c in _pending if "[CONFIG]" in c]
                                         _exec_cmds   = [c.replace("[EXEC]","").strip()
                                                         for c in _pending if "[EXEC]" in c]
-                                        if _exec_cmds:
-                                            for _ec in _exec_cmds:
-                                                _o = _conn_exec.send_command(_ec, read_timeout=20)
-                                                _exec_log.append(f"$ {_ec}\n{_o}")
-                                        if _config_cmds:
-                                            _o = _conn_exec.send_config_set(_config_cmds)
-                                            _exec_log.append(f"[CONFIG MODE]\n{_o}")
-                                        _conn_exec.disconnect()
+                                        from core.execution_pipeline import get_execution_pipeline
+                                        _pipe = get_execution_pipeline(fixer, tracker, call_ai)
+                                        _er = _pipe.deploy(
+                                            device=dev.hostname or dev.ip,
+                                            device_config=_cfg_exec,
+                                            exec_commands=_exec_cmds,
+                                            fix_commands=_config_cmds,
+                                        )
+                                        _exec_log.extend(_er.logs)
+                                        if not _er.success:
+                                            raise RuntimeError(_er.error or "deployment failed")
 
                                     _nlp_reply = (
                                         "✅ **Configuration deployed successfully on "
@@ -3593,37 +3519,18 @@ GROQ_API_KEY = "your-key-here"
                                                 and c.replace("[EXEC]", "").strip()
                                             ]
 
-                                            # ── Execute EXEC-mode commands ────────────
+                                            # ── Execute via canonical pipeline ────────
                                             with st.spinner("⚙️ Executing on " + dev.ip + "…"):
-                                                if _exec_cmds:
-                                                    for _ec in _exec_cmds:
-                                                        try:
-                                                            _o = _conn_exec.send_command(
-                                                                _ec,
-                                                                read_timeout=30,
-                                                                expect_string=r"#",
-                                                            )
-                                                            _exec_log.append("$ " + _ec + "\n" + _o)
-                                                        except Exception as _ce:
-                                                            _exec_log.append("$ " + _ec + "\nERROR: " + str(_ce))
-
-                                                # ── Execute CONFIG-mode commands ──────
-                                                if _config_cmds:
-                                                    try:
-                                                        _o = _conn_exec.send_config_set(
-                                                            _config_cmds,
-                                                            read_timeout=30,
-                                                            enter_config_mode=True,
-                                                            exit_config_mode=True,
-                                                        )
-                                                        _exec_log.append("[CONFIG MODE]\n" + _o)
-                                                        try:
-                                                            _conn_exec.save_config()
-                                                        except Exception:
-                                                            pass
-                                                    except Exception as _cfg_err:
-                                                        _exec_log.append("[CONFIG MODE] ERROR: " + str(_cfg_err))
-
+                                                from core.execution_pipeline import get_execution_pipeline
+                                                _pipe = get_execution_pipeline(fixer, tracker, call_ai)
+                                                _er = _pipe.deploy(
+                                                    device=dev.hostname or dev.ip,
+                                                    connection=_conn_exec,
+                                                    exec_commands=_exec_cmds,
+                                                    fix_commands=_config_cmds,
+                                                    save=True,
+                                                )
+                                                _exec_log.extend(_er.logs)
                                                 _conn_exec.disconnect()
 
                                             _hostname_disp = dev.hostname or dev.ip
@@ -3696,12 +3603,6 @@ GROQ_API_KEY = "your-key-here"
                                                 _cfg_rb["secret"] = _creds_rb["enable_secret"]
 
                                             with st.spinner("↩️ Restoring pre-change config on " + dev.ip + "…"):
-                                                _conn_rb = ConnectHandler(**_cfg_rb)
-                                                try:
-                                                    _conn_rb.enable()
-                                                except Exception:
-                                                    pass
-
                                                 # _rb_cmds is the full running-config snapshot (a string)
                                                 # Parse it into config lines, skipping header boilerplate
                                                 _skip_prefixes = (
@@ -3726,18 +3627,15 @@ GROQ_API_KEY = "your-key-here"
                                                     _restore_lines.append(_rs)
 
                                                 if _restore_lines:
-                                                    _o = _conn_rb.send_config_set(
-                                                        _restore_lines,
-                                                        read_timeout=60,
-                                                        enter_config_mode=True,
-                                                        exit_config_mode=True,
+                                                    from core.execution_pipeline import get_execution_pipeline
+                                                    _pipe = get_execution_pipeline(fixer, tracker, call_ai)
+                                                    _er = _pipe.deploy(
+                                                        device=dev.hostname or dev.ip,
+                                                        device_config=_cfg_rb,
+                                                        fix_commands=_restore_lines,
+                                                        save=True,
                                                     )
-                                                    _rb_log.append("[RESTORED FROM SNAPSHOT]\n" + _o)
-                                                    try:
-                                                        _conn_rb.save_config()
-                                                    except Exception:
-                                                        pass
-                                                _conn_rb.disconnect()
+                                                    _rb_log.extend(_er.logs)
 
                                             _rb_result = (
                                                 "↩️ **Rollback completed on "
@@ -4838,9 +4736,6 @@ if workspace == "copilot":
                                 if _rb_creds["enable_secret"]:
                                     _rb_cfg["secret"] = _rb_creds["enable_secret"]
                                 with st.spinner(f"↩️ Restoring {_rb_ip}…"):
-                                    _rb_conn = ConnectHandler(**_rb_cfg)
-                                    try: _rb_conn.enable()
-                                    except: pass
                                     _skip = ("!","Building configuration","Current configuration",
                                              "version ","boot-","no service","service ",
                                              "hostname ","logging ","enable secret","enable password",
@@ -4848,10 +4743,14 @@ if workspace == "copilot":
                                     _rb_lines = [l.strip() for l in _snap.splitlines()
                                                  if l.strip() and not any(l.strip().startswith(s) for s in _skip)]
                                     if _rb_lines:
-                                        _rb_conn.send_config_set(_rb_lines, read_timeout=60)
-                                        try: _rb_conn.save_config()
-                                        except: pass
-                                    _rb_conn.disconnect()
+                                        from core.execution_pipeline import get_execution_pipeline
+                                        _pipe = get_execution_pipeline(fixer, tracker, call_ai)
+                                        _pipe.deploy(
+                                            device=_rb_hn or _rb_ip,
+                                            device_config=_rb_cfg,
+                                            fix_commands=_rb_lines,
+                                            save=True,
+                                        )
                                 st.session_state["copilot_rollback"].pop(_rb_ip, None)
                                 st.session_state["copilot_messages"].append({
                                     "role": "assistant",
@@ -4977,19 +4876,18 @@ if workspace == "copilot":
                             )
                             if _d_creds["enable_secret"]: _dcfg["secret"] = _d_creds["enable_secret"]
                             with st.spinner(f"⚙️ Deploying on {_pdev_hn}…"):
-                                _dconn = ConnectHandler(**_dcfg)
-                                try: _dconn.enable()
-                                except: pass
-                                if _exec_c:
-                                    for _ec in _exec_c:
-                                        _o = _dconn.send_command(_ec, read_timeout=30, expect_string=r"#")
-                                        _d_log.append(f"$ {_ec}\n{_o}")
-                                if _cfg_c:
-                                    _o = _dconn.send_config_set(_cfg_c, read_timeout=30)
-                                    _d_log.append(f"[CONFIG MODE]\n{_o}")
-                                    try: _dconn.save_config()
-                                    except: pass
-                                _dconn.disconnect()
+                                from core.execution_pipeline import get_execution_pipeline
+                                _pipe = get_execution_pipeline(fixer, tracker, call_ai)
+                                _er = _pipe.deploy(
+                                    device=_pdev_hn or _pdev_ip,
+                                    device_config=_dcfg,
+                                    exec_commands=_exec_c or [],
+                                    fix_commands=_cfg_c or [],
+                                    save=True,
+                                )
+                                _d_log.extend(_er.logs)
+                                if not _er.success:
+                                    raise RuntimeError(_er.error or "deployment failed")
                             _d_result = (
                                 f"✅ **Deployed successfully on {_pdev_hn} ({_pdev_ip})**\n\n"
                                 f"```\n" + "\n".join(_d_log) + "\n```"
