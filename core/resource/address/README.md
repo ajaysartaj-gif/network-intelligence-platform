@@ -58,3 +58,35 @@ and exposes **read-only** APIs (`enterprise_hierarchy`, `resource_hierarchy`, `b
 IP allocation · address/resource planning · prediction · capacity · optimization · route
 summarization · explainability · recommendation · validation · deployment · config generation ·
 DHCP/DNS automation · vendor/cloud integrations · AI decision-making.
+
+---
+
+## PR-001.1 — Foundation Hardening (refinement)
+
+Extends PR-001 in place (no rewrites, no file moves, existing tests still pass):
+
+1. **Richer Business Context** — `entities.BusinessContext` now also carries
+   *why a resource exists*: business_capability, business_service, business_owner,
+   availability (target/RTO/RPO), growth_expectation, operational_model,
+   architecture_pattern, risk_classification (criticality & compliance retained).
+2. **Context Builder** (`context/`) — `models.py` (EnterpriseContext, ResourceContext,
+   BusinessContextModel, OrganizationalContext, merged **ResourceContextBundle**),
+   `interfaces.py` (ContextBuilder protocol), `builder.py` (DefaultContextBuilder:
+   build each context + merge into one). Reusable by future Planning / Prediction /
+   Optimization / Explainability. **No allocation/planning logic.**
+3. **Pool is the Address Aggregate Root** (`aggregates.Pool`) — owns Subnets,
+   Reservations, Capacity, Utilization, Fragmentation and Growth. Future allocation
+   must work through this aggregate (none implemented here — ownership/structure only).
+4. **Strengthened Ontology** (`knowledge/ontology.py`) — adds a reusable,
+   DOMAIN-NEUTRAL relationship vocabulary: belongs_to, contains, supports,
+   depends_on, connected_to, protected_by, owned_by, uses, allocated_from,
+   managed_by. Existing edges preserved; `relationships.py` maps dependency kinds
+   onto these reusable types.
+5. **Extensibility** — `ResourceDomain` enum + `domain` tag on Pool/ResourceContextBundle
+   ensure nothing assumes Address is the only Resource Domain. Device/Cloud/
+   Connectivity/Identity are **not** implemented (future PRs).
+
+Additionally touched (necessary, additive, backward-compatible): `value_objects.py`
+(new enums/VOs for the above) and `events.py` (Pool events). Tests: `tests/test_hardening.py`
+(6 tests). Out of scope unchanged: allocation, planning, prediction, optimization,
+explainability, lifecycle, vendor/cloud, deployment, config generation.
