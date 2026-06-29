@@ -1536,9 +1536,18 @@ elif workspace == "admin":
     st.markdown("## ⚙️ Administration")
     st.caption("Configure connection settings, credentials, thresholds, and system actions.")
 
-    tab_conn, tab_creds, tab_thresh, tab_actions, tab_aicfg, tab_devices, tab_topology = st.tabs(
-        ["Connection", "Credentials", "Thresholds", "System Actions", "🧠 AI Config", "🖧 Devices", "🗺️ Network Topology"]
+    tab_conn, tab_creds, tab_thresh, tab_actions, tab_aicfg, tab_devices, tab_topology, tab_nrie = st.tabs(
+        ["Connection", "Credentials", "Thresholds", "System Actions", "🧠 AI Config", "🖧 Devices", "🗺️ Network Topology", "🧮 IP Intelligence"]
     )
+
+    # ── IP Intelligence (NRIE) tab — sits beside Network Topology ─────────────
+    with tab_nrie:
+        try:
+            from core.resource.address.api.ui import render_nrie_panel
+            render_nrie_panel()
+        except Exception as _nrie_exc:
+            st.markdown("### 🧮 IP Intelligence (NRIE)")
+            st.error(f"NRIE panel failed to load: {_nrie_exc}")
 
     # ── Connection tab ────────────────────────────────────────────────────────
     with tab_conn:
