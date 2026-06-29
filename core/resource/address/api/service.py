@@ -131,6 +131,34 @@ class NRIEFoundationService:
                              tags=list(r.tags), lifecycle=r.lifecycle.value)
                 for r in self._know.by_kind(kind)]
 
+    # ── context assembly (reuses repositories + Context Builder) ─────────────
+    def build_context_bundle(self, resource_id: str):
+        """Assemble the single ResourceContextBundle for a stored resource by
+        reusing the Context Builder — used by the UI and intelligence layers."""
+        from ..context.builder import DefaultContextBuilder
+        res = self._res.get(resource_id)
+        if res is None:
+            return None
+        node = self._ent.get(res.hierarchy_ref.value) if res.hierarchy_ref else None
+        ancestors = []
+        cur, seen = node, set()
+        while cur is not None and cur.parent_id is not None and cur.parent_id.value not in seen:
+            seen.add(cur.parent_id.value)
+            parent = self._ent.get(cur.parent_id.value)
+            if parent is None:
+                break
+            ancestors.insert(0, parent)
+            cur = parent
+        ctx = None
+        if res.hierarchy_ref:
+            ctx = self._ctx.for_target(res.hierarchy_ref.value)
+        if ctx is None:
+            ctx = self._ctx.for_target(resource_id)
+        knowledge = self._know.by_kind(None)
+        return DefaultContextBuilder().for_resource(
+            res, enterprise_node=node, ancestors=ancestors,
+            business_context=ctx, knowledge=knowledge)
+
 
 _SERVICE: Optional[NRIEFoundationService] = None
 
