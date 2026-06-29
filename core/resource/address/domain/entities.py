@@ -14,8 +14,9 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from .value_objects import (
-    Criticality, EnterpriseLevel, Identifier, Lifecycle, Metadata, Ownership,
-    ResourceStatus, ResourceType, SLA, Tags, Utilization,
+    ArchitecturePattern, AvailabilityRequirement, Criticality, EnterpriseLevel,
+    GrowthExpectation, Identifier, Lifecycle, Metadata, OperationalModel, Ownership,
+    ResourceStatus, ResourceType, RiskClassification, SLA, Tags, Utilization,
 )
 
 
@@ -59,7 +60,12 @@ class NetworkResource:
 
 @dataclass
 class BusinessContext:
-    """Business meaning attachable to any resource or hierarchy node."""
+    """Business meaning attachable to any resource or hierarchy node.
+
+    Describes *why* a resource exists (capability, service, owner, criticality,
+    compliance, availability, growth, operating/architecture posture, risk) — not
+    networking details. Original fields are retained for backward compatibility.
+    """
     id: Identifier
     attached_to: Optional[Identifier] = None
     site_type: str = ""
@@ -75,6 +81,30 @@ class BusinessContext:
     compliance: List[str] = field(default_factory=list)
     criticality: Criticality = Criticality.NORMAL
     sla: SLA = field(default_factory=SLA)
+    metadata: Metadata = field(default_factory=Metadata)
+    # ── PR-001.1: richer enterprise meaning (why the resource exists) ──
+    business_capability: str = ""
+    business_service: str = ""
+    business_owner: Ownership = field(default_factory=Ownership)
+    availability: AvailabilityRequirement = field(default_factory=AvailabilityRequirement)
+    growth_expectation: GrowthExpectation = field(default_factory=GrowthExpectation)
+    operational_model: OperationalModel = OperationalModel.UNSPECIFIED
+    architecture_pattern: ArchitecturePattern = ArchitecturePattern.UNSPECIFIED
+    risk_classification: RiskClassification = RiskClassification.LOW
+
+
+@dataclass
+class Reservation:
+    """A recorded reservation owned by a Pool (knowledge only — NO allocation).
+
+    It records that capacity is intended to be set aside; it performs no carving,
+    sizing, or assignment (those belong to a later Allocation PR).
+    """
+    id: Identifier
+    pool_id: Optional[Identifier] = None
+    reserved_for: str = ""
+    size_hint_hosts: int = 0
+    status: ResourceStatus = ResourceStatus.RESERVED
     metadata: Metadata = field(default_factory=Metadata)
 
 

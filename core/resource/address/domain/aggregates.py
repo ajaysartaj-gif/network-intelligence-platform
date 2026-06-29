@@ -101,3 +101,87 @@ class OrganizationalMemory:
     def pull_events(self) -> List[DomainEvent]:
         out, self._events = self._events, []
         return out
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PR-001.1 — Pool becomes the Address Aggregate Root
+# ──────────────────────────────────────────────────────────────────────────────
+from .entities import Reservation                       # noqa: E402
+from .events import (                                    # noqa: E402
+    PoolRegistered, ReservationRecorded, SubnetAttachedToPool,
+)
+from .value_objects import (                             # noqa: E402
+    Capacity, Fragmentation, GrowthInfo, Identifier as _Id, ResourceDomain,
+    ResourceType, Utilization,
+)
+
+
+@dataclass
+class Pool:
+    """The Address aggregate root.
+
+    A Pool owns its Subnets, Reservations, Capacity, Utilization, Fragmentation
+    and Growth information. It is the single consistency boundary for address
+    resources — future allocation logic must work THROUGH this aggregate (no
+    allocation/sizing/carving is implemented here; this PR only establishes
+    ownership and structure).
+    """
+    id: _Id
+    purpose: str = ""
+    hierarchy_ref: Optional[_Id] = None
+    domain: ResourceDomain = ResourceDomain.ADDRESS      # not address-only by assumption
+    parent_pool_id: Optional[_Id] = None
+    # owned members
+    subnets: Dict[str, NetworkResource] = field(default_factory=dict)
+    reservations: Dict[str, Reservation] = field(default_factory=dict)
+    # recorded structural knowledge (NOT computed plans)
+    capacity: Capacity = field(default_factory=Capacity)
+    utilization: Utilization = field(default_factory=Utilization)
+    fragmentation: Fragmentation = field(default_factory=Fragmentation)
+    growth: GrowthInfo = field(default_factory=GrowthInfo)
+    _events: List[DomainEvent] = field(default_factory=list)
+
+    def __post_init__(self):
+        self._events.append(PoolRegistered(
+            pool_id=self.id.value, purpose=self.purpose,
+            hierarchy_ref=self.hierarchy_ref.value if self.hierarchy_ref else None))
+
+    # ── ownership operations (knowledge only; no allocation) ─────────────────
+    def add_subnet(self, subnet: NetworkResource) -> NetworkResource:
+        if subnet.resource_type != ResourceType.SUBNET:
+            raise ValueError("Pool only owns SUBNET resources")
+        self.subnets[subnet.id.value] = subnet
+        self._events.append(SubnetAttachedToPool(
+            pool_id=self.id.value, subnet_id=subnet.id.value))
+        return subnet
+
+    def add_reservation(self, reservation: Reservation) -> Reservation:
+        reservation.pool_id = self.id
+        self.reservations[reservation.id.value] = reservation
+        self._events.append(ReservationRecorded(
+            pool_id=self.id.value, reservation_id=reservation.id.value,
+            reserved_for=reservation.reserved_for))
+        return reservation
+
+    def record_capacity(self, capacity: Capacity) -> None:
+        self.capacity = capacity
+
+    def record_utilization(self, utilization: Utilization) -> None:
+        self.utilization = utilization
+
+    def record_fragmentation(self, fragmentation: Fragmentation) -> None:
+        self.fragmentation = fragmentation
+
+    def record_growth(self, growth: GrowthInfo) -> None:
+        self.growth = growth
+
+    # ── read views ───────────────────────────────────────────────────────────
+    def list_subnets(self) -> List[NetworkResource]:
+        return list(self.subnets.values())
+
+    def list_reservations(self) -> List[Reservation]:
+        return list(self.reservations.values())
+
+    def pull_events(self) -> List[DomainEvent]:
+        out, self._events = self._events, []
+        return out

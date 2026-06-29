@@ -153,3 +153,77 @@ class Utilization:
 
     def __post_init__(self):
         object.__setattr__(self, "percent", max(0.0, min(100.0, float(self.percent))))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PR-001.1 additions — richer business meaning + Pool descriptors
+# (additive, backward-compatible; no allocation/planning logic)
+# ──────────────────────────────────────────────────────────────────────────────
+class ResourceDomain(str, Enum):
+    """Resource domains the platform may know about. Only ADDRESS is implemented
+    today; this exists so nothing assumes Address is the only domain."""
+    ADDRESS = "address"
+    # future (NOT implemented here): DEVICE, CLOUD, CONNECTIVITY, IDENTITY
+
+
+class OperationalModel(str, Enum):
+    CENTRALIZED = "centralized"
+    DISTRIBUTED = "distributed"
+    MANAGED_SERVICE = "managed_service"
+    CO_MANAGED = "co_managed"
+    UNSPECIFIED = "unspecified"
+
+
+class ArchitecturePattern(str, Enum):
+    HUB_SPOKE = "hub_spoke"
+    SPINE_LEAF = "spine_leaf"
+    THREE_TIER = "three_tier"
+    SDWAN = "sdwan"
+    FLAT = "flat"
+    UNSPECIFIED = "unspecified"
+
+
+class RiskClassification(str, Enum):
+    LOW = "low"
+    MODERATE = "moderate"
+    HIGH = "high"
+    SEVERE = "severe"
+
+
+@dataclass(frozen=True)
+class AvailabilityRequirement:
+    """Why uptime matters — not how it is engineered."""
+    target: str = ""        # e.g. "99.99%"
+    rto: str = ""           # recovery time objective, e.g. "15m"
+    rpo: str = ""           # recovery point objective, e.g. "5m"
+
+
+@dataclass(frozen=True)
+class GrowthExpectation:
+    """Declared business growth expectation (NOT a prediction)."""
+    horizon: str = ""       # e.g. "12m"
+    expected_pct: float = 0.0
+
+
+# ── Pool structural descriptors (recorded knowledge, not computed plans) ─────
+@dataclass(frozen=True)
+class Capacity:
+    total_hosts: int = 0
+    used_hosts: int = 0
+
+    @property
+    def utilization_pct(self) -> float:
+        return round(100.0 * self.used_hosts / self.total_hosts, 2) if self.total_hosts else 0.0
+
+
+@dataclass(frozen=True)
+class Fragmentation:
+    """A recorded fragmentation observation (no defragmentation logic here)."""
+    free_blocks: int = 0
+    largest_free_block_hosts: int = 0
+
+
+@dataclass(frozen=True)
+class GrowthInfo:
+    growth_pct: float = 0.0
+    horizon: str = ""

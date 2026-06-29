@@ -50,3 +50,24 @@ class KnowledgeCaptured(DomainEvent):
     knowledge_id: str = ""
     kind: str = ""
     title: str = ""
+
+
+# ── PR-001.1: Pool aggregate events ─────────────────────────────────────────
+@dataclass(frozen=True)
+class PoolRegistered(DomainEvent):
+    pool_id: str = ""
+    purpose: str = ""
+    hierarchy_ref: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class SubnetAttachedToPool(DomainEvent):
+    pool_id: str = ""
+    subnet_id: str = ""
+
+
+@dataclass(frozen=True)
+class ReservationRecorded(DomainEvent):
+    pool_id: str = ""
+    reservation_id: str = ""
+    reserved_for: str = ""
