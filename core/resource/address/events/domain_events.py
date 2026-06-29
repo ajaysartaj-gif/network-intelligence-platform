@@ -71,3 +71,15 @@ def get_event_publisher(event_engine: Optional[Any] = None) -> IntelligenceEvent
     if _PUBLISHER is None or event_engine is not None:
         _PUBLISHER = IntelligenceEventPublisher(event_engine)
     return _PUBLISHER
+
+
+# ── PR-003: planning / allocation / lifecycle / optimization events ──────────
+RESOURCE_PLANNED = "nrie.ResourcePlanned"
+RESOURCE_ALLOCATED = "nrie.ResourceAllocated"
+ALLOCATION_FAILED = "nrie.AllocationFailed"
+LIFECYCLE_CHANGED = "nrie.LifecycleChanged"
+OPTIMIZATION_SUGGESTED = "nrie.OptimizationSuggested"
+RECOMMENDATION_GENERATED = "nrie.RecommendationGenerated"
+VALIDATION_COMPLETED = "nrie.ValidationCompleted"
+DEPLOYMENT_VERIFIED = "nrie.DeploymentVerified"
+LEARNING_UPDATED = "nrie.LearningUpdated"
