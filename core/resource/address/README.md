@@ -90,3 +90,118 @@ Additionally touched (necessary, additive, backward-compatible): `value_objects.
 (new enums/VOs for the above) and `events.py` (Pool events). Tests: `tests/test_hardening.py`
 (6 tests). Out of scope unchanged: allocation, planning, prediction, optimization,
 explainability, lifecycle, vendor/cloud, deployment, config generation.
+
+---
+
+## PR-002 — Intelligence & Reasoning Foundation (Phase 2)
+
+Turns the knowledge foundation into an intelligence platform. **Binding rule:
+every intelligence module consumes the `ResourceContextBundle` from the Context
+Builder — none reconstructs Enterprise/Business/Organizational/Resource context.
+The Context Builder is the single source of contextual truth.**
+
+```
+memory/
+  decision_memory.py      Layer 4 — engineering decisions (queryable)        [MemoryStore reuse]
+  operational_memory.py   Layer 5 — resource operational timeline            [MemoryStore reuse]
+  predictive_memory.py    Layer 6 — predictions + realized accuracy/variance [MemoryStore reuse]
+cognition/
+  classification.py       resource classification + criticality (from bundle)
+  relationship_engine.py  relationship discovery via reusable ontology
+  context_builder.py      Layer 9 — ResourceCognition: CONSUMES the bundle, adds understanding
+policy/
+  policy_engine.py        Layer 10 — policy registry (report-only rules)
+  policy_evaluator.py     evaluate bundle → pass/violations/recommendations/standards
+dependency/
+  dependency_graph.py     Layer 11 — wraps the platform Knowledge Graph (reuse, no new graph)
+  dependency_engine.py    discover upstream/downstream/business/routing/security/cloud deps
+events/
+  domain_events.py        DecisionRecorded / OperationalHistoryUpdated / PredictionGenerated /
+                          CognitionCompleted / PolicyEvaluated / DependencyDiscovered
+                          (published through the existing EventEngine; locally recorded too)
+api/
+  intelligence_api.py     read-only: decision/operational/prediction history, resource context,
+                          policy evaluation, dependency graph
+tests/test_intelligence.py  7 tests, all bundle-driven
+```
+
+### Reuse (no duplication)
+- **Memory Platform** — Decision/Operational/Predictive memory subclass `MemoryStore`
+  (dual-backend, consolidation); NRIE operational memory is a distinct *resource* history,
+  not a copy of the platform autonomy memory.
+- **Knowledge Graph** — Dependency Intelligence registers/queries the existing
+  `KnowledgeGraph` (`add_node`/`add_relationship`/`get_dependencies`/`trace_impact_chain`);
+  no second graph.
+- **Event Framework** — events emitted via the existing `EventEngine.emit_event`.
+- **Reasoning** — Decision Memory stores reasoning summaries/confidence; it does not
+  re-implement the platform reasoning engine.
+- **Context** — all layers consume the PR-001.1 Context Builder bundle.
+
+### Out of scope (PR-003)
+IP allocation · pool selection · reservation · route summarization · capacity optimization ·
+lifecycle state machine · recommendation/explainability engines · config generation ·
+deployment · vendor/cloud provisioning.
+
+---
+
+## PR-003 — Autonomous Resource Planning & Execution (Phase 3)
+
+Completes NRIE: it now plans, allocates, validates, recommends, optimizes,
+explains and learns. **Planning is separated from deployment; allocation is
+separated from configuration generation. NRIE never generates config or deploys**
+— existing deployment components own execution. Every capability consumes the
+`ResourceContextBundle`.
+
+```
+allocation/
+  conflict_detector.py   overlap/duplicate detection (ipaddress)
+  reservation.py         soft reservations (reuses domain Reservation/Pool)
+  allocator.py           intelligent best-fit allocation (growth + criticality headroom,
+                         NOT first-available); references business context/standards/utilisation
+planning/
+  planner.py             Layer: Enterprise Resource Plan (pools/subnets/VLANs/VRFs/DHCP/DNS/
+                         headroom/hierarchy/business mapping) — no config generation
+  planning_service.py    orchestrates plan → validate → recommend → explain
+lifecycle/
+  state_machine.py       Planned→Reserved→Allocated→Configured→Verified→Production→
+                         Expanding→Retiring→Archived
+  lifecycle_manager.py   Layer 12 — audited transitions (timestamp/trigger/actor/reason/
+                         deployment/change/prev/new); audit via reused Operational Memory
+optimization/
+  fragmentation.py       fragmentation analysis (ipaddress)
+  summarization.py       route-aggregation opportunities (collapse_addresses)
+  optimizer.py           Layer 13 — recommendations only (no automatic changes)
+explainability/
+  explanation_engine.py  Layer 14 — why/evidence/policies/business/alternatives/confidence/
+                         benefits/risks/future impact for every recommendation
+validation/
+  policy_validator.py    reuses the PR-002 Policy Evaluator (no duplicate policy logic)
+  validator.py           Validation Engine — duplicate/overlap/capacity/policy/naming/lifecycle
+recommendation/
+  recommendation_engine.py  ranked alternatives (never one answer): confidence/risk/cost/
+                            complexity/growth/business-impact/explanation
+learning/
+  outcome_tracker.py     structured execution outcomes
+  feedback.py            feeds outcomes back into reused Decision/Operational/Predictive memory
+api/
+  planning_api.py        plan/allocate/validate/recommend/optimize/lifecycle/explain/learn
+tests/test_planning.py   7 tests (real CIDR math), all bundle-driven
+```
+
+### Reuse (no duplication)
+Pool aggregate (PR-001.1) for ownership · Context Builder bundle for context ·
+PR-002 Decision/Operational/Predictive memory for learning + lifecycle audit ·
+PR-002 Policy Evaluator for validation · existing Event framework for all PR-003
+events · `ipaddress` stdlib for CIDR math. No new orchestration/memory/graph/
+reasoning/deployment components.
+
+### UI
+The Admin → **🧮 IP Intelligence** panel now has a third tab, **🤖 Autonomous
+Planning**: pick a resource, enter intent + demands, and NRIE returns the
+Enterprise Resource Plan (real CIDRs/VLANs/VRFs/DHCP/DNS), validation, ranked
+recommendations, a full explanation, and optimization opportunities — with a
+clear note that NRIE plans/allocates only and deployment remains the platform's.
+
+### Out of scope (unchanged)
+vendor config/CLI/Terraform/Ansible generation · device deployment · cloud
+provisioning · DHCP/DNS server implementation.
