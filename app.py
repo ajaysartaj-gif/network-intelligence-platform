@@ -1421,6 +1421,17 @@ elif workspace == "topology":
             st.dataframe(pd.DataFrame(rows), use_container_width=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
+# WORKSPACE: IP INTELLIGENCE (NRIE — Network Resource Intelligence Engine)
+# ══════════════════════════════════════════════════════════════════════════════
+elif workspace == "nrie":
+    try:
+        from core.resource.address.api.ui import render_nrie_panel
+        render_nrie_panel()
+    except Exception as _e:
+        st.markdown("## 🧮 IP Intelligence (NRIE)")
+        st.info(f"NRIE knowledge foundation is initializing: {_e}")
+
+# ══════════════════════════════════════════════════════════════════════════════
 # WORKSPACE: OBSERVABILITY
 # ══════════════════════════════════════════════════════════════════════════════
 elif workspace == "Observability":
