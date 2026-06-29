@@ -1,1 +1,26 @@
+"""Workspace registry used by the top navigation."""
 
+WORKSPACES = [
+    ('Net Ops', '⚡', 'Net Ops'),
+    ('incident', '🚨', 'Incidents'),
+    ('topology', '🗺', 'Topology'),
+    ('nrie', '🧮', 'IP Intelligence'),
+    ('observe', '📡', 'Observability'),
+    ('troubleshoot', '🔧', 'Diagnose'),
+    ('change', '📋', 'Changes'),
+    ('autonomous', '🤖', 'Autonomous'),
+    ('twin', '👾', 'Digital Twin'),
+    ('security', '🔒', 'Security'),
+    ('compliance', '🛡', 'Compliance'),
+    ('design', '🏗', 'Design'),
+    ('mdq', '⚡', 'Multi-Device'),
+    ('nlp', '🧬', 'NLP'),
+    ('rag', '📚', 'Knowledge'),
+    ('learn', '📖', 'Learn'),
+    ('devices', '🖧', 'Devices'),
+    ('executive', '📈', 'Executive'),
+    ('finops', '💰', 'FinOps'),
+    ('audit', '🔐', 'Audit'),
+    ('Network Engineering', '🔐', 'Network Engineering'),
+    ('local_router', '🔌', 'Local Router Access'),
+]
