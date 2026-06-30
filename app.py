@@ -4503,10 +4503,6 @@ elif workspace == "nlp":
 
 # ── NETWORK COPILOT ───────────────────────────────────────────────────────────
 if workspace == "copilot":
-    from workspaces.network_copilot import render_network_copilot_page
-
-    render_network_copilot_page(call_ai=call_ai)
-    st.stop()
 
     # ── Copilot CSS ──────────────────────────────────────────────────────────
     st.markdown("""
