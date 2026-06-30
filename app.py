@@ -2403,14 +2403,32 @@ GROQ_API_KEY = "your-key-here"
                                 st.session_state["devices_ai_last_ans"] = (
                                     IntentEngine.format_for_chat(_ie_res2, _ai_pend["scope_label"])
                                 )
-                                st.session_state["devices_ai_last_result"] = {
-                                    "plan_pending":   False,
-                                    "needs_approval": _ie_res2.needs_approval,
-                                    "fix_commands":   _ie_res2.fix_commands,
-                                    "target_ips":     _ai_pend["target_ips"],
-                                    "scope_label":    _ai_pend["scope_label"],
-                                }
-                                st.session_state["devices_ai_plan"] = None
+                                # ── Agentic loop: inconclusive → queue the next round ──
+                                if getattr(_ie_res2, "needs_followup", False) and getattr(_ie_res2, "next_plan", None):
+                                    st.session_state["devices_ai_plan"] = _ie_res2.next_plan
+                                    st.session_state["devices_ai_last_result"] = {
+                                        "plan_pending":   True,
+                                        "needs_approval": False,
+                                        "fix_commands":   [],
+                                        "target_ips":     _ai_pend["target_ips"],
+                                        "scope_label":    _ai_pend["scope_label"],
+                                        "round_index":    getattr(_ie_res2.next_plan, "round_index", 2),
+                                    }
+                                    st.session_state["devices_ai_last_ans"] += (
+                                        f"\n\n🔁 **Round {_ie_res2.round_index} was inconclusive — "
+                                        f"NetBrain AI has prepared the next diagnostic step "
+                                        f"(round {getattr(_ie_res2.next_plan, 'round_index', 2)}). "
+                                        "Review and approve it below to continue.**"
+                                    )
+                                else:
+                                    st.session_state["devices_ai_last_result"] = {
+                                        "plan_pending":   False,
+                                        "needs_approval": _ie_res2.needs_approval,
+                                        "fix_commands":   _ie_res2.fix_commands,
+                                        "target_ips":     _ai_pend["target_ips"],
+                                        "scope_label":    _ai_pend["scope_label"],
+                                    }
+                                    st.session_state["devices_ai_plan"] = None
                             except Exception as _ee:
                                 st.session_state["devices_ai_last_ans"] = (
                                     f"⚠️ Execute error: {_ee}"
