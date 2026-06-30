@@ -160,6 +160,11 @@ class IntentResult:
     needs_followup: bool = False               # True when the analysis was inconclusive
     round_index: int = 1                       # which diagnostic round produced this result
     max_rounds: int = 4                        # cap on autonomous diagnostic rounds
+    trace: List[Dict[str, Any]] = field(default_factory=list)  # per-round autonomous reasoning trace
+    autonomous: bool = False                   # produced by the autonomous loop
+    applied: bool = False                      # fix was auto-applied
+    verified: bool = False                     # post-fix verification passed
+    reverted: bool = False                     # auto-rolled back after failed verify
     citations_md: str = ""                     # rendered citation block (markdown)
     validation_md: str = ""                    # rendered command validation block
     timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
@@ -461,6 +466,11 @@ class IntentEngine:
         if session_diagnosis:
             prior_ctx += f"\n\nPRIOR AI DIAGNOSIS:\n{session_diagnosis[:500]}"
 
+        # ── RAG-FIRST grounding: your runbooks/incidents/topology BEFORE the LLM's priors ──
+        grounding = self._ground(query, devices)
+        if grounding:
+            prior_ctx += "\n\n" + grounding
+
         plan_prompt = (
             "You are NetBrain AI — a CCIE-level network engineer (R&S, SP, Security, Data Center).\n"
             "You have deep knowledge of every Cisco IOS / IOS-XE / NX-OS / IOS-XR show command, "
@@ -723,12 +733,18 @@ class IntentEngine:
             sections.append("\n".join(block))
         all_output = "\n\n".join(sections) if sections else "(no output)"
 
+        grounding = self._ground(plan.query, [
+            type("D", (), {"ip": dr.ip, "hostname": dr.hostname, "device_type": "cisco_ios"})()
+            for dr in result.device_results])
+        grounding_block = ("\n\n" + grounding + "\n") if grounding else ""
+
         prompt = (
             "You are NetBrain AI — a CCIE-level network engineer.\n"
             "You proposed a hypothesis and ran diagnostic commands. Now ANALYZE the results.\n\n"
             f"OPERATOR QUESTION: {plan.query}\n\n"
             f"YOUR INITIAL HYPOTHESIS: {plan.hypothesis}\n"
-            f"YOUR EXPECTED OUTCOME: {plan.expected_outcome}\n\n"
+            f"YOUR EXPECTED OUTCOME: {plan.expected_outcome}\n"
+            f"{grounding_block}\n"
             f"LIVE ROUTER OUTPUT FROM ALL DEVICES:\n\n{all_output}\n\n"
             "ANALYSIS TASK — be rigorous and specific:\n\n"
             "1. **VERIFY HYPOTHESIS**: State whether the output CONFIRMS or REJECTS your initial "
@@ -903,6 +919,254 @@ class IntentEngine:
         except Exception as exc:
             logger.debug(f"RAG context lookup failed: {exc}")
             return ""
+
+    # ── RAG-FIRST grounding: enterprise knowledge + topology before any LLM call ──
+    def _ground(self, query: str, devices: List[Any]) -> str:
+        """Assemble grounding for the model: (1) your RAG knowledge FIRST, then
+        (2) live topology/neighbor facts for the devices in scope. MCP/vendor docs
+        are intentionally NOT consulted here — they are a syntax fallback only."""
+        parts: List[str] = []
+        rag = self._rag_context_for(query)
+        if rag:
+            parts.append(rag)
+        topo = self._topology_facts(devices)
+        if topo:
+            parts.append(topo)
+        return "\n\n".join(parts)
+
+    def _topology_facts(self, devices: List[Any]) -> str:
+        """Neighbor/adjacency facts from the platform Knowledge Graph (best-effort).
+        Lets the agent reason about the OTHER end of an adjacency, not just the
+        devices the operator happened to select."""
+        try:
+            from core.knowledge_graph import KnowledgeGraph  # reused, not new
+            kg = KnowledgeGraph()
+        except Exception:
+            return ""
+        lines: List[str] = []
+        for d in devices:
+            ip = getattr(d, "ip", "")
+            if not ip:
+                continue
+            try:
+                deps = kg.get_dependencies(ip) or []
+                if deps:
+                    lines.append(f"{getattr(d,'hostname','') or ip} is adjacent to: {', '.join(map(str, deps))}")
+            except Exception:
+                continue
+        return ("LIVE TOPOLOGY (from the knowledge graph):\n" + "\n".join(lines)) if lines else ""
+
+    # ── Command safety classifier — the enabler for read-only autonomy ─────────
+    READ_VERBS = ("show", "ping", "traceroute", "trace", "display", "dir", "more",
+                  "monitor", "test", "verify", "who", "terminal length")
+    WRITE_MARKERS = ("configure", "conf t", "interface ", "ip ", "no ", "shutdown",
+                     "no shutdown", "clear ", "reload", "write", "copy ", "erase",
+                     "delete", "crypto ", "router ", "switchport", "vlan ", "boot ",
+                     "username ", "snmp-server", "line ", "logging ", "ntp ", "hostname ")
+
+    @classmethod
+    def is_read_only(cls, command: str) -> bool:
+        c = (command or "").strip().lower().lstrip("[exec] ").lstrip("[config] ")
+        if not c:
+            return False
+        if c.startswith(cls.READ_VERBS):
+            # 'show' et al never mutate state
+            return True
+        # anything that looks like config-mode or a mutating exec is NOT read-only
+        if any(m in c for m in cls.WRITE_MARKERS):
+            return False
+        # default-deny: unknown verbs are treated as NOT read-only (safe)
+        return False
+
+    @classmethod
+    def _filter_read_only(cls, cmds_per_device: Dict[str, List[str]]) -> Dict[str, List[str]]:
+        out: Dict[str, List[str]] = {}
+        for ip, cmds in cmds_per_device.items():
+            safe = [c for c in cmds if cls.is_read_only(c)]
+            if safe:
+                out[ip] = safe
+        return out
+
+    # ── Autonomous diagnostic loop ─────────────────────────────────────────────
+    def run_autonomous(
+        self,
+        query: str,
+        devices: List[Any],
+        *,
+        max_rounds: int = 4,
+        auto_fix: bool = True,
+        scenario: str = "general",
+        stop_flag: Optional[Callable[[], bool]] = None,
+        on_round: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> IntentResult:
+        """Full read-only autonomy: the agent plans, runs READ-ONLY diagnostics
+        itself (no per-round gate), analyses, and keeps going until it reaches a
+        root cause or the round cap. When a fix is found and auto_fix=True, it is
+        applied with guardrails (validate → apply → verify → auto-rollback).
+        """
+        intent, scen = self._classify(query)
+        result = IntentResult(intent=intent, scenario=scen or scenario, query=query,
+                              autonomous=True, max_rounds=max_rounds)
+        session_diagnosis = ""
+        plan: Optional[DiagnosticPlan] = None
+
+        for rnd in range(1, max_rounds + 1):
+            if stop_flag and stop_flag():
+                result.analysis += "\n\n🛑 Stopped by operator."
+                return result
+
+            # 1) PLAN (RAG-grounded). First round from the query; later rounds from
+            #    the AI's own NEXT_STEP commands.
+            if plan is None:
+                plan = self._ai_generate_plan(query, devices, result.scenario, "", session_diagnosis)
+                plan.round_index = rnd
+            # 2) SAFETY: keep ONLY read-only commands for autonomous execution
+            plan.commands_per_device = self._filter_read_only(plan.commands_per_device)
+            if not plan.commands_per_device:
+                result.analysis += "\n\n(no read-only commands proposed — nothing to auto-run)"
+                break
+
+            # 3) EXECUTE read-only commands ourselves (no human gate)
+            round_result = self.execute_plan(plan, devices)
+            # carry forward device output + analysis
+            result.device_results = round_result.device_results
+            result.analysis = round_result.analysis
+            session_diagnosis = round_result.analysis[:800]
+
+            entry = {
+                "round": rnd,
+                "hypothesis": plan.hypothesis,
+                "commands": {ip: cmds for ip, cmds in plan.commands_per_device.items()},
+                "analysis": round_result.analysis,
+                "verdict": ("fix" if round_result.needs_approval else
+                            "next" if round_result.needs_followup else "complete"),
+            }
+            result.trace.append(entry)
+            if on_round:
+                try:
+                    on_round(entry)
+                except Exception:
+                    pass
+
+            # 4) DECIDE
+            if round_result.needs_approval and round_result.fix_commands:
+                result.needs_approval = True
+                result.fix_commands = round_result.fix_commands
+                result.commands_per_device = round_result.commands_per_device
+                result.fix_explanation = round_result.fix_explanation
+                result.rollback_commands = round_result.rollback_commands
+                result.verify_commands = round_result.verify_commands
+                result.validation_md = round_result.validation_md
+                if auto_fix:
+                    self._auto_apply_fix(result, devices, original_query=query)
+                return result
+
+            if round_result.needs_followup and round_result.next_plan:
+                plan = round_result.next_plan          # continue autonomously
+                continue
+
+            # DIAGNOSIS_COMPLETE / no fix needed
+            return result
+
+        result.analysis += (f"\n\n⚠️ Reached the {max_rounds}-round limit without a "
+                            "conclusive fix. Escalating to a human.")
+        return result
+
+    # ── Guardrailed auto-fix: validate → apply → verify → auto-rollback ────────
+    def _auto_apply_fix(self, result: IntentResult, devices: List[Any],
+                        original_query: str = "") -> None:
+        ip_to_dev = {d.ip: d for d in devices}
+        # per-device config commands (grounded) or merged fix list
+        per_dev = result.commands_per_device or {}
+        applied_any = False
+        for ip, dev in ip_to_dev.items():
+            cfg = [c.replace("[CONFIG]", "").strip()
+                   for c in per_dev.get(ip, result.fix_commands)
+                   if "[CONFIG]" in c]
+            cfg = [c for c in cfg if c and not self.is_read_only(c) or c]  # keep config lines
+            cfg = [c.split("(on", 1)[0].strip() if "(on" in c else c for c in cfg]
+            if not cfg:
+                continue
+            try:
+                self._ssh_apply(dev, cfg)
+                applied_any = True
+                result.trace.append({"round": "fix", "device": ip, "applied": cfg})
+            except Exception as e:
+                result.trace.append({"round": "fix", "device": ip, "error": str(e)})
+        result.applied = applied_any
+        if not applied_any:
+            return
+
+        # VERIFY: re-run the verification commands and let the AI judge
+        verify_cmds = result.verify_commands or [self._default_verify(original_query)]
+        ok = True
+        for ip, dev in ip_to_dev.items():
+            dr = self._ssh_collect(dev, [c for c in verify_cmds if self.is_read_only(c)])
+            joined = "\n".join(dr.outputs.values())
+            verdict = self.ai_call(
+                f"After applying a fix for '{original_query}', here is verification output "
+                f"from {dev.hostname or ip}:\n{joined}\n\nIs the issue RESOLVED? "
+                "Answer strictly RESOLVED or NOT_RESOLVED on the first line.") or ""
+            if "NOT_RESOLVED" in verdict.upper():
+                ok = False
+        result.verified = ok
+
+        # AUTO-ROLLBACK on failed verification
+        if not ok and result.rollback_commands:
+            for ip, dev in ip_to_dev.items():
+                rb = [c.replace("[ROLLBACK]", "").strip() for c in result.rollback_commands
+                      if "[ROLLBACK]" in c]
+                rb = [c.split("(on", 1)[0].strip() if "(on" in c else c for c in rb]
+                if rb:
+                    try:
+                        self._ssh_apply(dev, rb)
+                    except Exception:
+                        pass
+            result.reverted = True
+
+    def _default_verify(self, query: str) -> str:
+        q = (query or "").lower()
+        if "ospf" in q:
+            return "show ip ospf neighbor"
+        if "bgp" in q:
+            return "show ip bgp summary"
+        if "eigrp" in q:
+            return "show ip eigrp neighbors"
+        return "show ip interface brief"
+
+    def _ssh_apply(self, dev: Any, config_commands: List[str]) -> str:
+        """Apply configuration via the same connection layer as _ssh_collect, but
+        in config mode (send_config_set). Mutating — only called from the fix step.
+        """
+        if not NETMIKO_OK:
+            raise RuntimeError("netmiko not installed")
+        cfg = dict(
+            device_type=getattr(dev, "device_type", "cisco_ios") or "cisco_ios",
+            host=dev.ip, port=int(getattr(dev, "ssh_port", 22) or 22),
+            username=os.environ.get("GNS3_SSH_USER", "admin"),
+            password=os.environ.get("GNS3_SSH_PASS", "admin"),
+            timeout=30, auth_timeout=30, fast_cli=False, global_delay_factor=2,
+        )
+        secret = os.environ.get("GNS3_SSH_SECRET", "")
+        if secret:
+            cfg["secret"] = secret
+        conn = ConnectHandler(**cfg)
+        try:
+            try:
+                conn.enable()
+            except Exception:
+                pass
+            out = conn.send_config_set(config_commands, read_timeout=30)
+            try:
+                conn.save_config()
+            except Exception:
+                pass
+            return out
+        finally:
+            try:
+                conn.disconnect()
+            except Exception:
+                pass
 
     def _handle_config(
         self,
