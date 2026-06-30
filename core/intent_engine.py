@@ -1140,14 +1140,22 @@ class IntentEngine:
             result.reverted = True
 
     def _default_verify(self, query: str) -> str:
-        q = (query or "").lower()
-        if "ospf" in q:
-            return "show ip ospf neighbor"
-        if "bgp" in q:
-            return "show ip bgp summary"
-        if "eigrp" in q:
-            return "show ip eigrp neighbors"
-        return "show ip interface brief"
+        """Resolve a verification command for the query's intent — cache → RAG →
+        MCP → grounded AI. No hardcoded command map."""
+        try:
+            from core.command_resolver import get_command_resolver
+            res = get_command_resolver(ai_call=self.ai_call).resolve(
+                f"verify the health of: {query}", phase="verify", n=1)
+            if res.commands:
+                return res.commands[0]
+        except Exception as exc:
+            logger.debug(f"verify resolve failed: {exc}")
+        # last-resort grounded generation (still not a hardcoded command)
+        gen = self.ai_call(
+            f"Give ONLY the single most useful read-only Cisco IOS show command to "
+            f"verify whether this is healthy: '{query}'. Return just the command.") or ""
+        line = (gen.strip().splitlines() or [""])[0].strip("`").strip()
+        return line if self.is_read_only(line) else ""
 
     def _ssh_apply(self, dev: Any, config_commands: List[str]) -> str:
         """Apply configuration via the same connection layer as _ssh_collect, but

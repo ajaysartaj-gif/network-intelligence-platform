@@ -23,108 +23,9 @@ except ImportError:
 
 # ── Fix command library ──────────────────────────────────────────────────────
 
-FIX_COMMANDS: Dict[str, Dict[str, List[str]]] = {
-    "interface_down": {
-        "diagnostic": [
-            "show interfaces status",
-            "show interfaces {interface} | include line|errors|rate",
-            "show logging | include {interface} | tail 20",
-        ],
-        "fix": [
-            "interface {interface}",
-            "no shutdown",
-            "end",
-        ],
-        "verify": [
-            "show interfaces {interface} | include line protocol",
-        ],
-    },
-    "bgp_instability": {
-        "diagnostic": [
-            "show ip bgp summary",
-            "show ip bgp neighbors | include BGP|state|reset",
-            "show logging | include BGP | tail 20",
-        ],
-        "fix": [
-            "clear ip bgp * soft",
-        ],
-        "verify": [
-            "show ip bgp summary | include Established",
-        ],
-    },
-    "packet_loss": {
-        "diagnostic": [
-            "show interfaces | include rate|errors|drops",
-            "show interfaces counters errors",
-            "show queue {interface}",
-        ],
-        "fix": [
-            "clear counters",
-            "interface {interface}",
-            "no shutdown",
-            "end",
-        ],
-        "verify": [
-            "show interfaces | include Input errors|Output drops",
-        ],
-    },
-    "latency_spike": {
-        "diagnostic": [
-            "show interfaces | include rate|latency",
-            "show ip route | include via",
-            "show processes cpu sorted | head 10",
-        ],
-        "fix": [
-            "clear ip route *",
-        ],
-        "verify": [
-            "show ip route summary",
-        ],
-    },
-    "cpu_spike": {
-        "diagnostic": [
-            "show processes cpu sorted | head 20",
-            "show processes cpu history",
-            "show ip traffic",
-        ],
-        "fix": [
-            "no ip inspect name GLOBAL",
-            "end",
-        ],
-        "verify": [
-            "show processes cpu | include CPU utilization",
-        ],
-    },
-    "memory_exhaustion": {
-        "diagnostic": [
-            "show processes memory sorted | head 20",
-            "show memory statistics",
-        ],
-        "fix": [
-            "clear ip cache",
-            "clear ip bgp * soft",
-        ],
-        "verify": [
-            "show memory statistics | include Processor",
-        ],
-    },
-    "device_unreachable": {
-        "diagnostic": [
-            "show ip interface brief",
-            "show ip route",
-            "show cdp neighbors",
-        ],
-        "fix": [
-            "interface {interface}",
-            "no shutdown",
-            "end",
-            "clear ip arp",
-        ],
-        "verify": [
-            "show ip interface brief | include up",
-        ],
-    },
-}
+# NOTE: the former static FIX_COMMANDS table has been removed. Commands are
+# now resolved live (cache → RAG → MCP → grounded AI) via core.command_resolver.
+# Nothing in this module hardcodes a command literal.
 
 
 @dataclass
@@ -397,11 +298,20 @@ class NetworkFixer:
     # ── helpers ─────────────────────────────────────────────────────────────
 
     def _resolve_commands(self, anomaly_type: str, anomaly: Dict[str, Any]) -> Dict[str, List[str]]:
-        return FIX_COMMANDS.get(anomaly_type, {
-            "diagnostic": ["show version", "show ip interface brief"],
-            "fix":        [],
-            "verify":     ["show ip interface brief"],
-        })
+        # No static command table. Commands are resolved live via
+        # cache → RAG (OEM knowledge) → MCP → grounded AI, keyed by the abstract
+        # anomaly type and the device vendor/OS.
+        from core.command_resolver import get_command_resolver
+        vendor = str(anomaly.get("vendor") or "cisco")
+        os_ = str(anomaly.get("os") or anomaly.get("device_type") or "ios").replace("cisco_", "")
+        ctx = str(anomaly.get("interface") or anomaly.get("detail") or "")
+        resolved = get_command_resolver().resolve_set(
+            anomaly_type, vendor=vendor, os_=os_, context=ctx)
+        # never invent a fix; only diagnostic/verify may be empty-safe
+        resolved.setdefault("diagnostic", [])
+        resolved.setdefault("fix", [])
+        resolved.setdefault("verify", [])
+        return resolved
 
     def _build_tunnel_config(self) -> Optional[Dict[str, Any]]:
         """Build connection config from GNS3_ROUTER_HOST/PORT env vars (pinggy tunnel).
