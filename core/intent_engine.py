@@ -988,6 +988,13 @@ class IntentEngine:
         return out
 
     # ── Autonomous diagnostic loop ─────────────────────────────────────────────
+    # HARDCODED POLICY (intentional — this is an invariant, not a command):
+    # the human is ALWAYS in the loop for any WRITE/mutating action. Read-only
+    # diagnostics may run autonomously under operator oversight (visible trace +
+    # kill switch); configuration changes are NEVER applied without explicit human
+    # approval. Commands themselves are never hardcoded — only this policy is.
+    REQUIRE_HUMAN_APPROVAL_FOR_WRITES = True
+
     def run_autonomous(
         self,
         query: str,
@@ -1057,8 +1064,16 @@ class IntentEngine:
                 result.rollback_commands = round_result.rollback_commands
                 result.verify_commands = round_result.verify_commands
                 result.validation_md = round_result.validation_md
-                if auto_fix:
+                # HUMAN-IN-THE-LOOP POLICY: a write is NEVER auto-applied while the
+                # policy is on. The agent prepares + validates the fix and hands it
+                # to the operator to approve. auto_fix can only deploy if policy is
+                # explicitly disabled (e.g. a lab with REQUIRE_..._WRITES=False).
+                if auto_fix and not self.REQUIRE_HUMAN_APPROVAL_FOR_WRITES:
                     self._auto_apply_fix(result, devices, original_query=query)
+                else:
+                    result.trace.append({"round": "fix",
+                                         "awaiting_human": True,
+                                         "fix_commands": result.fix_commands})
                 return result
 
             if round_result.needs_followup and round_result.next_plan:
