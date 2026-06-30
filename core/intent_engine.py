@@ -136,6 +136,7 @@ class DiagnosticPlan:
     expected_outcome: str = ""                       # What AI expects to find
     query: str = ""
     devices: List[Dict[str, str]] = field(default_factory=list)  # [{ip, hostname, type}]
+    round_index: int = 1                             # agentic diagnostic round (1-based)
 
 
 @dataclass
@@ -155,6 +156,10 @@ class IntentResult:
     plain_answer: str = ""               # for concept questions
     plan: Optional[DiagnosticPlan] = None      # plan awaiting human approval
     plan_pending: bool = False                 # True when waiting for human
+    next_plan: Optional[DiagnosticPlan] = None  # agentic follow-up round, awaiting approval
+    needs_followup: bool = False               # True when the analysis was inconclusive
+    round_index: int = 1                       # which diagnostic round produced this result
+    max_rounds: int = 4                        # cap on autonomous diagnostic rounds
     citations_md: str = ""                     # rendered citation block (markdown)
     validation_md: str = ""                    # rendered command validation block
     timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
@@ -249,6 +254,7 @@ class IntentEngine:
         intent, scenario = self._classify(plan.query)
         result = IntentResult(intent=intent, scenario=scenario, query=plan.query)
         result.plan = plan
+        result.round_index = getattr(plan, "round_index", 1)
 
         try:
             # Map device IPs in the plan back to device objects
@@ -265,7 +271,7 @@ class IntentEngine:
             analysis_prompt = self._build_deep_analysis_prompt(plan, result)
             result.analysis = self.ai_call(analysis_prompt) or "AI unavailable."
 
-            # Extract any fix commands proposed
+            # ── Agentic decision: fix / next-round / done ────────────────────
             if "APPROVAL_REQUIRED" in result.analysis:
                 result.needs_approval = True
                 result.fix_commands, result.fix_explanation, result.rollback_commands = (
@@ -282,13 +288,112 @@ class IntentEngine:
                     except Exception as ve:
                         logger.debug(f"Validation failed: {ve}")
 
+            elif "NEXT_STEP_REQUIRED" in result.analysis:
+                # inconclusive — keep going autonomously (approval-gated), up to max_rounds
+                next_cmds = self._parse_next_commands(result.analysis, plan, all_devices)
+                result.analysis = result.analysis.split("NEXT_STEP_REQUIRED")[0].strip()
+                if result.round_index < result.max_rounds and next_cmds:
+                    result.needs_followup = True
+                    result.next_plan = self._build_followup_plan(plan, result, next_cmds)
+                else:
+                    result.analysis += (
+                        f"\n\n⚠️ Reached the diagnostic round limit "
+                        f"({result.max_rounds}) without a conclusive root cause. "
+                        "Consider widening device scope or capturing `debug` output manually."
+                        if result.round_index >= result.max_rounds else
+                        "\n\n⚠️ The analysis was inconclusive but no concrete next command "
+                        "could be derived. Please refine the question or add devices.")
+            else:
+                # DIAGNOSIS_COMPLETE (or untagged) — strip any stray tag text
+                result.analysis = result.analysis.replace("DIAGNOSIS_COMPLETE", "").strip()
+
         except Exception as exc:
             logger.error(f"[IntentEngine] execute_plan() error: {exc}", exc_info=True)
             result.error = str(exc)
 
         return result
 
-    # ── Legacy single-stage entry point (kept for compatibility) ───────────────
+    # ── Agentic follow-up helpers ──────────────────────────────────────────────
+
+    def _parse_next_commands(
+        self,
+        analysis: str,
+        plan: DiagnosticPlan,
+        all_devices: List[Any],
+    ) -> Dict[str, List[str]]:
+        """Parse [NEXT] (on <device>) <cmd> lines into {ip: [cmds]}.
+
+        Maps the "(on R1)" token to a device IP by matching hostname or IP. A line
+        with no recognizable device, or addressed to 'all', fans out to every
+        device that was in the prior plan.
+        """
+        # name/ip → ip lookup from the devices we actually have
+        name_to_ip: Dict[str, str] = {}
+        for d in all_devices:
+            ip = getattr(d, "ip", "")
+            if ip:
+                name_to_ip[ip.lower()] = ip
+                hn = (getattr(d, "hostname", "") or "").lower()
+                if hn:
+                    name_to_ip[hn] = ip
+        plan_ips = list(plan.commands_per_device.keys()) or [
+            getattr(d, "ip", "") for d in all_devices if getattr(d, "ip", "")]
+
+        out: Dict[str, List[str]] = {}
+        for raw in analysis.splitlines():
+            line = raw.strip()
+            if "[NEXT]" not in line:
+                continue
+            body = line.split("[NEXT]", 1)[1].strip()
+            target_ips = list(plan_ips)
+            m = re.match(r"\(on\s+([^)]+)\)\s*(.*)", body, re.IGNORECASE)
+            if m:
+                tok = m.group(1).strip().lower()
+                body = m.group(2).strip()
+                if tok in ("all", "all devices", "every device"):
+                    target_ips = list(plan_ips)
+                elif tok in name_to_ip:
+                    target_ips = [name_to_ip[tok]]
+                else:
+                    # token might be an ip substring or partial hostname
+                    match = [ip for key, ip in name_to_ip.items() if tok in key]
+                    target_ips = match or list(plan_ips)
+            cmd = body.strip().strip("`").strip()
+            if not cmd:
+                continue
+            for ip in target_ips:
+                out.setdefault(ip, [])
+                if cmd not in out[ip]:
+                    out[ip].append(cmd)
+        return out
+
+    def _build_followup_plan(
+        self,
+        prior_plan: DiagnosticPlan,
+        result: IntentResult,
+        next_cmds: Dict[str, List[str]],
+    ) -> DiagnosticPlan:
+        """Wrap the parsed next-step commands into an approval-ready plan."""
+        round_index = getattr(prior_plan, "round_index", 1) + 1
+        # short hypothesis line lifted from the analysis (best-effort)
+        hyp = ""
+        for key in ("ROOT CAUSE", "Root cause", "INCONCLUSIVE", "hypothesis"):
+            idx = result.analysis.find(key)
+            if idx != -1:
+                hyp = result.analysis[idx:idx + 200].split("\n")[0]
+                break
+        return DiagnosticPlan(
+            reasoning=(f"Round {round_index}: the previous round was inconclusive. "
+                       "Running targeted follow-up commands to distinguish the remaining "
+                       "candidate root causes before proposing any fix."),
+            commands_per_device=next_cmds,
+            hypothesis=hyp or "Narrowing down the remaining candidate root causes.",
+            expected_outcome=("These commands should expose the discriminating value "
+                              "(e.g. an MTU or timer mismatch) that confirms the cause."),
+            query=prior_plan.query,
+            devices=prior_plan.devices,
+            round_index=round_index,
+        )
 
     def handle(
         self,
@@ -641,14 +746,24 @@ class IntentEngine:
             "   you found (e.g. \"R1 has MTU 1500 on Fa0/0 but R2 has MTU 1400 on Fa0/0\").\n"
             "   Do NOT propose generic fixes like 'change network type' without proving why.\n\n"
             "4. **IMPACT**: One line on what traffic/services are affected.\n\n"
-            "5. **FIX**: ONLY if you have CONCLUSIVE evidence:\n"
-            "   - List exact commands prefixed [CONFIG] or [EXEC]\n"
-            "   - Specify which device each command targets: [CONFIG] (on R1) <cmd>\n"
-            "   - Add rollback after: --- ROLLBACK ---\n"
-            "   - Prefix rollback commands with [ROLLBACK]\n"
-            "   - End with: APPROVAL_REQUIRED\n\n"
-            "   If evidence is INCONCLUSIVE: say so and propose the NEXT diagnostic step. "
-            "   Do NOT propose a fix you're not certain about.\n\n"
+            "5. **FIX or NEXT STEP** — choose exactly ONE and end with its tag:\n"
+            "   (a) If you have CONCLUSIVE evidence AND a config change is needed:\n"
+            "       - List exact commands prefixed [CONFIG] or [EXEC]\n"
+            "       - Specify which device each command targets: [CONFIG] (on R1) <cmd>\n"
+            "       - Add rollback after: --- ROLLBACK --- (prefix each with [ROLLBACK])\n"
+            "       - End with: APPROVAL_REQUIRED\n"
+            "   (b) If evidence is INCONCLUSIVE and you need to run MORE diagnostics:\n"
+            "       - Do NOT propose a fix.\n"
+            "       - List the NEXT commands to run, ONE per line, each prefixed with\n"
+            "         [NEXT] and the target device, e.g.:  [NEXT] (on R1) show interface fa0/0 | include MTU\n"
+            "       - Pick commands that will DISTINGUISH between the remaining causes "
+            "(e.g. for OSPF stuck in EXSTART/EXCHANGE, compare interface MTU on both ends).\n"
+            "       - End with: NEXT_STEP_REQUIRED\n"
+            "   (c) If the root cause is fully identified but NO config change is required:\n"
+            "       - End with: DIAGNOSIS_COMPLETE\n\n"
+            f"   You are on diagnostic round {plan.round_index} of a maximum {result.max_rounds}. "
+            "   Prefer (a) or (c) when the evidence already supports it; only use (b) when another "
+            "   round will genuinely resolve the ambiguity.\n\n"
             "Be technical, precise, and reference specific values from the output."
         )
         return prompt
