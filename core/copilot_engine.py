@@ -7,21 +7,73 @@ image upload, and AI modes. Keeps app.py clean.
 
 import streamlit as st
 import logging
-from typing import List, Dict, Optional, Any
+from uuid import uuid4
+from typing import List, Any
 
 logger = logging.getLogger(__name__)
 
 
 def initialize_session_state():
     """Initialize all copilot-related session state."""
-    if "copilot_chat_messages" not in st.session_state:
-        st.session_state["copilot_chat_messages"] = []
+    if "copilot_conversations" not in st.session_state:
+        st.session_state["copilot_conversations"] = []
+    if "copilot_active_conversation_id" not in st.session_state:
+        st.session_state["copilot_active_conversation_id"] = None
     if "copilot_selected_devices" not in st.session_state:
         st.session_state["copilot_selected_devices"] = []
     if "copilot_uploaded_image" not in st.session_state:
         st.session_state["copilot_uploaded_image"] = None
     if "copilot_ai_mode" not in st.session_state:
         st.session_state["copilot_ai_mode"] = None
+
+
+def _normalize_selected_devices(selected_devices: Any) -> List[str]:
+    normalized: List[str] = []
+    for item in selected_devices or []:
+        if isinstance(item, str):
+            value = item.strip()
+            if " (" in value and value.endswith(")"):
+                maybe_ip = value.rsplit("(", 1)[1][:-1]
+                normalized.append(maybe_ip)
+            else:
+                normalized.append(value)
+        elif isinstance(item, dict):
+            ip = item.get("ip") or item.get("value") or ""
+            if ip:
+                normalized.append(str(ip))
+    return normalized
+
+
+def _device_label(device: Any) -> str:
+    return f"{getattr(device, 'hostname', None) or device.ip} ({device.ip})"
+
+
+def _conversation_title_from_message(message: str) -> str:
+    clean = " ".join(message.split())
+    if len(clean) <= 28:
+        return clean or "New chat"
+    return clean[:25] + "..."
+
+
+def _current_conversation():
+    conversations = st.session_state.get("copilot_conversations", [])
+    active_id = st.session_state.get("copilot_active_conversation_id")
+    if not conversations:
+        new_conversation = {
+            "id": str(uuid4()),
+            "title": "New chat",
+            "messages": [],
+        }
+        conversations.append(new_conversation)
+        st.session_state["copilot_conversations"] = conversations
+        st.session_state["copilot_active_conversation_id"] = new_conversation["id"]
+        return new_conversation
+
+    current = next((c for c in conversations if c.get("id") == active_id), None)
+    if current is None:
+        current = conversations[-1]
+        st.session_state["copilot_active_conversation_id"] = current["id"]
+    return current
 
 
 def load_approved_devices() -> List[Any]:
@@ -36,17 +88,38 @@ def load_approved_devices() -> List[Any]:
 
 
 def render_copilot_page(call_ai_fn):
-    """
-    Main copilot page renderer.
-    
-    Args:
-        call_ai_fn: Function to call AI (from app.py)
-    """
+    """Main copilot page renderer."""
     initialize_session_state()
-    
-    # Load devices
+
     approved_devs = load_approved_devices()
-    
+    conversations = st.session_state.get("copilot_conversations", [])
+    active_conversation = _current_conversation()
+
+    with st.sidebar:
+        st.markdown("## 💬 Copilot History")
+        if st.button("➕ New chat", use_container_width=True):
+            new_conversation = {
+                "id": str(uuid4()),
+                "title": "New chat",
+                "messages": [],
+            }
+            conversations.append(new_conversation)
+            st.session_state["copilot_conversations"] = conversations
+            st.session_state["copilot_active_conversation_id"] = new_conversation["id"]
+            st.rerun()
+
+        st.markdown("---")
+        if not conversations:
+            st.caption("No saved chats yet")
+        else:
+            for conversation in conversations:
+                is_active = conversation.get("id") == active_conversation.get("id")
+                title = conversation.get("title", "New chat")
+                label = f"{'● ' if is_active else ''}{title}"
+                if st.button(label, key=f"conv_{conversation['id']}", use_container_width=True):
+                    st.session_state["copilot_active_conversation_id"] = conversation["id"]
+                    st.rerun()
+
     # ── CSS Styling ────────────────────────────────────────────────────────────
     st.markdown("""
     <style>
@@ -55,129 +128,37 @@ def render_copilot_page(call_ai_fn):
         flex-direction: column;
         align-items: center;
         justify-content: center;
-        min-height: 70vh;
-        padding: 40px 20px;
+        min-height: 56vh;
+        padding: 24px 20px 10px 20px;
         text-align: center;
     }
     .copilot-logo {
-        width: 120px;
-        height: 120px;
+        width: 112px;
+        height: 112px;
         background: linear-gradient(135deg, #3b82f6, #2563eb);
         border-radius: 32px;
         display: flex;
         align-items: center;
         justify-content: center;
-        font-size: 60px;
-        margin-bottom: 40px;
+        font-size: 56px;
+        margin-bottom: 28px;
         box-shadow: 0 20px 60px rgba(37, 99, 235, 0.3);
     }
     .copilot-title {
-        font-size: 42px;
+        font-size: 38px;
         font-weight: 800;
         color: #f0f4fa;
         letter-spacing: -0.02em;
-        margin: 0 0 16px 0;
+        margin: 0 0 12px 0;
         line-height: 1.1;
     }
     .copilot-subtitle {
-        font-size: 18px;
+        font-size: 16px;
         color: #8b95a8;
-        margin: 0 0 48px 0;
-        max-width: 600px;
+        margin: 0 0 20px 0;
+        max-width: 620px;
         line-height: 1.6;
     }
-    
-    /* ── Compact Input Bar ── */
-    .copilot-input-bar {
-        width: 100%;
-        max-width: 900px;
-        background: #0e151f;
-        border: 1px solid #243043;
-        border-radius: 14px;
-        padding: 12px 16px;
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-    }
-    
-    .copilot-btn-icon {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        width: 40px;
-        height: 40px;
-        background: rgba(37, 99, 235, 0.1);
-        border: 1px solid rgba(37, 99, 235, 0.3);
-        border-radius: 10px;
-        cursor: pointer;
-        font-size: 18px;
-        transition: all 0.2s ease;
-        color: #2563eb;
-    }
-    .copilot-btn-icon:hover {
-        background: rgba(37, 99, 235, 0.2);
-        border-color: rgba(37, 99, 235, 0.5);
-    }
-    
-    .copilot-option-box {
-        background: #141d2a;
-        border: 1px solid #243043;
-        border-radius: 10px;
-        padding: 8px 14px;
-        font-size: 13px;
-        color: #f0f4fa;
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        white-space: nowrap;
-        cursor: pointer;
-        transition: all 0.2s ease;
-    }
-    .copilot-option-box:hover {
-        border-color: #2563eb;
-        background: #1a2737;
-    }
-    
-    .copilot-chevron {
-        font-size: 16px;
-        color: #5d6b7e;
-        cursor: pointer;
-    }
-    
-    .copilot-input-field {
-        flex: 1;
-        background: transparent;
-        border: none;
-        color: #f0f4fa;
-        font-size: 15px;
-        outline: none;
-    }
-    .copilot-input-field::placeholder {
-        color: #5d6b7e;
-    }
-    
-    .copilot-send-btn {
-        background: linear-gradient(135deg, #2563eb, #3b82f6);
-        border: none;
-        border-radius: 10px;
-        padding: 10px 20px;
-        color: white;
-        font-weight: 600;
-        font-size: 14px;
-        cursor: pointer;
-        transition: all 0.2s ease;
-        box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25);
-    }
-    .copilot-send-btn:hover {
-        background: linear-gradient(135deg, #1d4ed8, #2563eb);
-        box-shadow: 0 6px 20px rgba(37, 99, 235, 0.35);
-    }
-    .copilot-send-btn:active {
-        transform: scale(0.98);
-    }
-    
-    /* ── Chat Display ── */
     .copilot-msg-user {
         background: #0e151f;
         border-left: 4px solid #2563eb;
@@ -204,6 +185,7 @@ def render_copilot_page(call_ai_fn):
     .copilot-msg-text {
         color: #c8d6e8;
         line-height: 1.6;
+        white-space: pre-wrap;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -217,35 +199,36 @@ def render_copilot_page(call_ai_fn):
     </div>
     """, unsafe_allow_html=True)
 
-    # ── Compact Input Bar with Inline Controls ──────────────────────────────────
-    st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
-    
-    _input_container = st.container()
-    with _input_container:
-        # Row with inline controls
-        _bar_col1, _bar_col2, _bar_col3, _bar_col4 = st.columns([0.5, 1.2, 1.2, 4])
-        
-        # Button 1: Upload Image
-        with _bar_col1:
-            if st.button("➕", key="cp_btn_add", use_container_width=True,
-                        help="Upload image"):
-                st.session_state["cp_show_upload"] = not st.session_state.get("cp_show_upload", False)
-        
-        # Button 2: AI Mode
-        with _bar_col2:
-            _ai_mode = st.session_state.get("copilot_ai_mode", "Net Config")
-            if st.button(f"⚙️ {_ai_mode}", key="cp_btn_mode", use_container_width=True,
-                        help="Select AI mode"):
-                st.session_state["cp_show_mode"] = not st.session_state.get("cp_show_mode", False)
-        
-        # Button 3: Devices
-        with _bar_col3:
-            _dev_count = len(st.session_state.get("copilot_selected_devices", []))
-            if st.button(f"🖧 Devices ({_dev_count})", key="cp_btn_devs", use_container_width=True,
-                        help="Select devices"):
-                st.session_state["cp_show_devs"] = not st.session_state.get("cp_show_devs", False)
-    
-    # ── Show Upload Modal ───────────────────────────────────────────────────────
+    # ── Composer Controls ─────────────────────────────────────────────────────
+    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+    _bar_col1, _bar_col2, _bar_col3, _bar_col4, _bar_col5 = st.columns([0.55, 1.15, 1.35, 4.5, 0.8])
+
+    with _bar_col1:
+        if st.button("➕", key="cp_btn_add", use_container_width=True, help="Upload image"):
+            st.session_state["cp_show_upload"] = not st.session_state.get("cp_show_upload", False)
+
+    with _bar_col2:
+        _ai_mode = st.session_state.get("copilot_ai_mode", "Net Config")
+        if st.button(f"⚙️ {_ai_mode}", key="cp_btn_mode", use_container_width=True, help="Select AI mode"):
+            st.session_state["cp_show_mode"] = not st.session_state.get("cp_show_mode", False)
+
+    with _bar_col3:
+        _dev_count = len(_normalize_selected_devices(st.session_state.get("copilot_selected_devices", [])))
+        if st.button(f"🖧 Devices ({_dev_count})", key="cp_btn_devs", use_container_width=True, help="Select devices"):
+            st.session_state["cp_show_devs"] = not st.session_state.get("cp_show_devs", False)
+
+    with _bar_col4:
+        _input_text = st.text_area(
+            label="copilot_input",
+            label_visibility="collapsed",
+            placeholder="What do you want to do today in your network?",
+            key="copilot_main_input",
+            height=180,
+        )
+
+    with _bar_col5:
+        _send_clicked = st.button("Send", key="cp_send", use_container_width=True)
+
     if st.session_state.get("cp_show_upload"):
         st.markdown("### 📸 Upload Image")
         _uploaded_file = st.file_uploader(
@@ -256,10 +239,9 @@ def render_copilot_page(call_ai_fn):
         )
         if _uploaded_file:
             st.session_state["copilot_uploaded_image"] = _uploaded_file
-            st.success(f"✅ {_uploaded_file.name} uploaded (Max 200MB)")
+            st.success(f"✅ {_uploaded_file.name} uploaded")
             st.session_state["cp_show_upload"] = False
-    
-    # ── Show Mode Selector Modal ────────────────────────────────────────────────
+
     if st.session_state.get("cp_show_mode"):
         st.markdown("### ⚙️ Select Network AI Mode")
         _modes = {
@@ -274,8 +256,7 @@ def render_copilot_page(call_ai_fn):
                     st.session_state["copilot_ai_mode"] = mode_name
                     st.session_state["cp_show_mode"] = False
                     st.rerun()
-    
-    # ── Show Device Selector Modal ──────────────────────────────────────────────
+
     if st.session_state.get("cp_show_devs"):
         st.markdown("### 🖧 Select Devices")
         if not approved_devs:
@@ -287,131 +268,94 @@ def render_copilot_page(call_ai_fn):
                 placeholder="Search by hostname or IP...",
                 key="copilot_device_search_modal",
             )
-            
-            # Filter devices
+
+            selected_ips = _normalize_selected_devices(st.session_state.get("copilot_selected_devices", []))
             _filtered_devices = approved_devs
             if _device_search.strip():
                 _search_lower = _device_search.lower()
                 _filtered_devices = [
                     d for d in approved_devs
-                    if _search_lower in (d.hostname or "").lower() or _search_lower in d.ip.lower()
+                    if _search_lower in (getattr(d, "hostname", "") or "").lower() or _search_lower in d.ip.lower()
                 ]
-            
+
             st.caption(f"Found: {len(_filtered_devices)} device(s)")
-            
-            # Device multiselect
-            _device_options = [f"{d.hostname or d.ip} ({d.ip})" for d in _filtered_devices]
-            _selected_labels = st.multiselect(
-                label="device_multi_select",
-                label_visibility="collapsed",
-                options=_device_options,
-                default=st.session_state.get("copilot_selected_devices", []),
-                key="copilot_device_multiselect_modal",
-            )
-            
-            if _selected_labels:
-                st.session_state["copilot_selected_devices"] = _selected_labels
-                st.success(f"✅ {len(_selected_labels)} device(s) selected")
-                if st.button("Done", key="cp_close_devs"):
-                    st.session_state["cp_show_devs"] = False
-                    st.rerun()
+            for device in _filtered_devices:
+                is_checked = device.ip in selected_ips
+                new_checked = st.checkbox(
+                    _device_label(device),
+                    value=is_checked,
+                    key=f"cp_device_{device.ip}",
+                )
+                if new_checked and device.ip not in selected_ips:
+                    selected_ips.append(device.ip)
+                elif not new_checked and device.ip in selected_ips:
+                    selected_ips.remove(device.ip)
 
-    # ── Input + Send Row ────────────────────────────────────────────────────────
-    st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
-    _input_col, _send_col = st.columns([5, 1])
-    
-    with _input_col:
-        _input_text = st.text_input(
-            label="copilot_input",
-            label_visibility="collapsed",
-            placeholder="What do you want to do today in your network?",
-            key="copilot_main_input",
-        )
-    
-    with _send_col:
-        _send_clicked = st.button("→", key="cp_send", use_container_width=True)
+            st.session_state["copilot_selected_devices"] = selected_ips
+            st.caption(f"{len(selected_ips)} selected")
 
-    # ── Process Input & Call AI ────────────────────────────────────────────────
     if _send_clicked and _input_text and _input_text.strip():
-        _q = _input_text.strip()
-        
-        # Add user message
-        st.session_state["copilot_chat_messages"].append({
-            "role": "user",
-            "content": _q,
-        })
+        user_text = _input_text.strip()
+        conversation = _current_conversation()
+        if not conversation["messages"]:
+            conversation["title"] = _conversation_title_from_message(user_text)
+        conversation["messages"].append({"role": "user", "content": user_text})
 
-        # Build AI context
         _context_parts = []
-        
         if st.session_state.get("copilot_ai_mode"):
             _context_parts.append(f"AI Mode: {st.session_state['copilot_ai_mode']}")
-        
-        if st.session_state.get("copilot_selected_devices"):
-            _dev_list = ", ".join(st.session_state["copilot_selected_devices"])
-            _context_parts.append(f"Target devices: {_dev_list}")
-        
+
+        selected_ips = _normalize_selected_devices(st.session_state.get("copilot_selected_devices", []))
+        if selected_ips:
+            _context_parts.append(f"Target devices: {', '.join(selected_ips)}")
         if st.session_state.get("copilot_uploaded_image"):
             _img_name = st.session_state["copilot_uploaded_image"].name
             _context_parts.append(f"[Image: {_img_name}]")
 
         _context_str = " | ".join(_context_parts)
-        
         _system_prompt = f"""You are Network Intelligence Copilot, an expert network operations AI.
 
 {_context_str}
 
 Provide technically accurate, concise responses. Include specific CLI commands when relevant.
 For configuration tasks, show step-by-step guidance. Be professional and enterprise-grade."""
-
-        _full_prompt = f"{_system_prompt}\n\nUser: {_q}\n\nCopilot:"
+        _full_prompt = f"{_system_prompt}\n\nUser: {user_text}\n\nCopilot:"
 
         with st.spinner("✨ Network Copilot is thinking…"):
             try:
-                _ai_reply = call_ai_fn(_full_prompt)
+                ai_reply = call_ai_fn(_full_prompt)
             except Exception as _e:
-                _ai_reply = f"❌ Error: {str(_e)}"
+                ai_reply = f"❌ Error: {str(_e)}"
 
-        # Add AI response
-        st.session_state["copilot_chat_messages"].append({
-            "role": "assistant",
-            "content": _ai_reply,
-        })
-
+        conversation["messages"].append({"role": "assistant", "content": ai_reply})
+        st.session_state["copilot_main_input"] = ""
         st.rerun()
 
-    # ── Display Chat History ───────────────────────────────────────────────────
-    if st.session_state["copilot_chat_messages"]:
+    messages = active_conversation.get("messages", [])
+    if messages:
         st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
         st.markdown("---")
         st.markdown("### 💬 Conversation")
-        
-        for _msg in st.session_state["copilot_chat_messages"]:
-            if _msg["role"] == "user":
+        for message in messages:
+            if message["role"] == "user":
                 st.markdown(f"""
                 <div class="copilot-msg-user">
                     <div class="copilot-msg-label">👤 You</div>
-                    <div class="copilot-msg-text">{_msg['content']}</div>
+                    <div class="copilot-msg-text">{message['content']}</div>
                 </div>
                 """, unsafe_allow_html=True)
             else:
                 st.markdown(f"""
                 <div class="copilot-msg-ai">
                     <div class="copilot-msg-label">🤖 Copilot</div>
-                    <div class="copilot-msg-text">{_msg['content']}</div>
+                    <div class="copilot-msg-text">{message['content']}</div>
                 </div>
                 """, unsafe_allow_html=True)
-        
-        # Clear button
+
         st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
         _clear_col1, _clear_col2, _clear_col3 = st.columns([2, 1, 2])
         with _clear_col2:
             if st.button("🗑 Clear", key="cp_clear_all", use_container_width=True):
-                st.session_state["copilot_chat_messages"] = []
-                st.session_state["copilot_selected_devices"] = []
-                st.session_state["copilot_uploaded_image"] = None
-                st.session_state["copilot_ai_mode"] = None
-                st.session_state["cp_show_upload"] = False
-                st.session_state["cp_show_mode"] = False
-                st.session_state["cp_show_devs"] = False
+                active_conversation["messages"] = []
+                active_conversation["title"] = "New chat"
                 st.rerun()
