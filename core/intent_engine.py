@@ -1546,14 +1546,14 @@ class IntentEngine:
                 f"\n**📚 Knowledge Sources:**\n\n{citations_md}\n\n"
             )
 
+        # Operator-facing card shows ONLY the proposed commands + the action
+        # prompt. Hypothesis, reasoning, expected outcome, knowledge sources and
+        # confidence are still computed in the backend (on `plan` / citations) but
+        # are intentionally not rendered — they were noise on the GUI.
         return (
-            f"**🧠 AI Hypothesis:**\n{plan.hypothesis}\n\n"
-            f"**📋 Reasoning:**\n{plan.reasoning}\n\n"
-            f"**🎯 Expected Outcome:**\n{plan.expected_outcome}\n\n"
             f"**🔌 Proposed Diagnostic Commands:**\n\n"
             + "\n".join(cmd_lines)
-            + citation_block
-            + f"\n⚠️ **Review the plan above. Click ✅ Run Plan to execute, or ❌ Cancel.**"
+            + f"\n⚠️ **Review the commands above. Click ✅ Run Plan to execute, or ❌ Cancel.**"
         )
 
     @staticmethod
