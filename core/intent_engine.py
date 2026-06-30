@@ -269,7 +269,15 @@ class IntentEngine:
                 dev = ip_to_dev.get(ip)
                 if not dev:
                     continue
-                dr = self._ssh_collect(dev, cmds)
+                # DEFENSE-IN-DEPTH: never run debug/monitor/clear/reload/test, even
+                # if one slipped into the plan. Diagnostics are show/display only.
+                safe_cmds = [c for c in cmds if not self.is_dangerous(c)]
+                blocked = [c for c in cmds if self.is_dangerous(c)]
+                if blocked:
+                    logger.warning("Blocked dangerous commands on %s: %s", ip, blocked)
+                if not safe_cmds:
+                    continue
+                dr = self._ssh_collect(dev, safe_cmds)
                 result.device_results.append(dr)
 
             # AI now does deep analysis with REAL output from ALL devices
@@ -746,41 +754,29 @@ class IntentEngine:
             f"YOUR EXPECTED OUTCOME: {plan.expected_outcome}\n"
             f"{grounding_block}\n"
             f"LIVE ROUTER OUTPUT FROM ALL DEVICES:\n\n{all_output}\n\n"
-            "ANALYSIS TASK — be rigorous and specific:\n\n"
-            "1. **VERIFY HYPOTHESIS**: State whether the output CONFIRMS or REJECTS your initial "
-            "   hypothesis. Quote specific values from the output.\n\n"
-            "2. **CROSS-DEVICE CORRELATION**: For protocol issues (OSPF/BGP/EIGRP), COMPARE "
-            "   the relevant parameters across devices side-by-side. List mismatches explicitly:\n"
-            "   - MTU on each interface\n"
-            "   - OSPF network type (broadcast/point-to-point)\n"
-            "   - Hello/Dead timers\n"
-            "   - Area numbers\n"
-            "   - Authentication\n"
-            "   - Router IDs\n"
-            "   For BGP: AS numbers, neighbor IPs, timers, password.\n\n"
-            "3. **ROOT CAUSE**: State the EXACT root cause. Reference the precise mismatch "
-            "   you found (e.g. \"R1 has MTU 1500 on Fa0/0 but R2 has MTU 1400 on Fa0/0\").\n"
-            "   Do NOT propose generic fixes like 'change network type' without proving why.\n\n"
-            "4. **IMPACT**: One line on what traffic/services are affected.\n\n"
-            "5. **FIX or NEXT STEP** — choose exactly ONE and end with its tag:\n"
-            "   (a) If you have CONCLUSIVE evidence AND a config change is needed:\n"
-            "       - List exact commands prefixed [CONFIG] or [EXEC]\n"
-            "       - Specify which device each command targets: [CONFIG] (on R1) <cmd>\n"
-            "       - Add rollback after: --- ROLLBACK --- (prefix each with [ROLLBACK])\n"
-            "       - End with: APPROVAL_REQUIRED\n"
-            "   (b) If evidence is INCONCLUSIVE and you need to run MORE diagnostics:\n"
-            "       - Do NOT propose a fix.\n"
-            "       - List the NEXT commands to run, ONE per line, each prefixed with\n"
-            "         [NEXT] and the target device, e.g.:  [NEXT] (on R1) show interface fa0/0 | include MTU\n"
-            "       - Pick commands that will DISTINGUISH between the remaining causes "
-            "(e.g. for OSPF stuck in EXSTART/EXCHANGE, compare interface MTU on both ends).\n"
-            "       - End with: NEXT_STEP_REQUIRED\n"
-            "   (c) If the root cause is fully identified but NO config change is required:\n"
-            "       - End with: DIAGNOSIS_COMPLETE\n\n"
-            f"   You are on diagnostic round {plan.round_index} of a maximum {result.max_rounds}. "
-            "   Prefer (a) or (c) when the evidence already supports it; only use (b) when another "
-            "   round will genuinely resolve the ambiguity.\n\n"
-            "Be technical, precise, and reference specific values from the output."
+            "Analyze the output and reply in this EXACT compact format. Be terse — a "
+            "network engineer must grasp it in seconds. Do NOT restate commands or paste "
+            "output. Keep everything before the action tag under ~120 words.\n\n"
+            "VERDICT: <HEALTHY|PROBLEM|INCONCLUSIVE>\n"
+            "FINDINGS:\n"
+            "- [CRIT|WARN|OK] <one short factual finding, include the specific value>\n"
+            "  (2-4 findings maximum, most important first)\n"
+            "ROOT_CAUSE: <one sentence — the precise cause, or 'unconfirmed'>\n"
+            "IMPACT: <one short sentence>\n\n"
+            "Then choose EXACTLY ONE action and end with its tag:\n"
+            "(a) A config change is needed → list [CONFIG] (on <dev>) <cmd> lines, then a line "
+            "'--- ROLLBACK ---' followed by [ROLLBACK] (on <dev>) <cmd> lines, then end with: "
+            "APPROVAL_REQUIRED\n"
+            "(b) You need MORE read-only checks → list [NEXT] (on <dev>) <command> lines, then end "
+            "with: NEXT_STEP_REQUIRED\n"
+            "(c) Healthy / no change required → end with: DIAGNOSIS_COMPLETE\n\n"
+            "HARD SAFETY RULES (non-negotiable):\n"
+            "- NEVER propose `debug`, `clear`, `reload`, `test`, or any disruptive command. "
+            "Diagnostics use ONLY non-disruptive `show`/`display` commands.\n"
+            "- For protocol issues, compare the discriminating values across peers (MTU, network "
+            "type, timers, area, authentication, subnet/mask) and name the precise mismatch in "
+            "ROOT_CAUSE. Different Router-IDs are NORMAL — never call that a fault.\n"
+            f"   (Round {plan.round_index} of {result.max_rounds}; prefer a conclusion over another round.)"
         )
         return prompt
 
@@ -957,17 +953,42 @@ class IntentEngine:
         return ("LIVE TOPOLOGY (from the knowledge graph):\n" + "\n".join(lines)) if lines else ""
 
     # ── Command safety classifier — the enabler for read-only autonomy ─────────
+    # Commands that MUST NEVER be auto-run, even though they don't change config.
+    # debug/monitor can flood the CPU and take a router down under load; test/clear/
+    # reload are disruptive. These are blocked from autonomous execution outright.
+    DANGEROUS_VERBS = ("debug", "undebug", "u all", "monitor", "test", "clear",
+                       "reload", "terminal monitor", "tclsh", "send", "verify /")
     READ_VERBS = ("show", "ping", "traceroute", "trace", "display", "dir", "more",
-                  "monitor", "test", "verify", "who", "terminal length")
+                  "who", "terminal length")
     WRITE_MARKERS = ("configure", "conf t", "interface ", "ip ", "no ", "shutdown",
                      "no shutdown", "clear ", "reload", "write", "copy ", "erase",
                      "delete", "crypto ", "router ", "switchport", "vlan ", "boot ",
                      "username ", "snmp-server", "line ", "logging ", "ntp ", "hostname ")
 
+    @staticmethod
+    def _normalize_cmd(command: str) -> str:
+        """Strip internal routing markers ([CONFIG]/[EXEC]/[NEXT]/[ROLLBACK] and
+        '(on R1)') as PREFIXES — not as characters — then lower-case. (Using
+        str.lstrip on a marker string would wrongly strip individual letters,
+        which previously let 'clear' slip through as 'lear'.)"""
+        import re
+        c = (command or "").strip()
+        c = re.sub(r"^\[(exec|config|rollback|next)\]\s*", "", c, flags=re.I)
+        c = re.sub(r"^\(on [^)]+\)\s*", "", c, flags=re.I)
+        return c.strip().lower()
+
+    @classmethod
+    def is_dangerous(cls, command: str) -> bool:
+        c = cls._normalize_cmd(command)
+        return bool(c) and c.startswith(cls.DANGEROUS_VERBS)
+
     @classmethod
     def is_read_only(cls, command: str) -> bool:
-        c = (command or "").strip().lower().lstrip("[exec] ").lstrip("[config] ")
+        c = cls._normalize_cmd(command)
         if not c:
+            return False
+        # HARD BLOCK: debug/monitor/test/clear/reload are NEVER auto-runnable
+        if cls.is_dangerous(c):
             return False
         if c.startswith(cls.READ_VERBS):
             # 'show' et al never mutate state
@@ -980,6 +1001,8 @@ class IntentEngine:
 
     @classmethod
     def _filter_read_only(cls, cmds_per_device: Dict[str, List[str]]) -> Dict[str, List[str]]:
+        """Keep ONLY read-only commands for autonomous execution. Dangerous
+        commands (debug/monitor/clear/reload/test) are dropped — never auto-run."""
         out: Dict[str, List[str]] = {}
         for ip, cmds in cmds_per_device.items():
             safe = [c for c in cmds if cls.is_read_only(c)]
@@ -1551,37 +1574,33 @@ class IntentEngine:
 
         parts: List[str] = []
 
-        # Show commands + output per device
+        # Read-only diagnostics run in the BACKGROUND — we do NOT dump raw output
+        # to the operator (that's the wall-of-text problem). Show a one-line note
+        # plus any connection failures, then a short colour-coded summary.
+        ran = sum(len(dr.commands_run) for dr in result.device_results)
+        ndev = len([dr for dr in result.device_results if dr.connected])
         for dr in result.device_results:
             if not dr.outputs and dr.error:
                 parts.append(f"🔴 **{dr.hostname} ({dr.ip})** — SSH failed: `{dr.error}`")
-                continue
-            if dr.outputs:
-                cmd_out_block = "\n".join(
-                    f"$ {cmd}\n{out}" for cmd, out in dr.outputs.items()
-                )
-                parts.append(
-                    f"**🔌 Live output from {dr.hostname} ({dr.ip}):**\n"
-                    f"```\n{cmd_out_block}\n```"
-                )
+        if ran:
+            parts.append(
+                f"<span style='color:#64748b;font-size:.8rem'>🔍 Ran {ran} read-only "
+                f"check(s) on {ndev} device(s) in the background — summary below.</span>"
+            )
 
-        # AI analysis
+        # AI analysis → rendered as a short, colour-coded summary (no raw output)
         if result.analysis:
-            parts.append(f"**🧠 AI Analysis:**\n\n{result.analysis}")
+            parts.append(IntentEngine._render_summary(result.analysis))
 
         # Config fix + validation
         if result.needs_approval and result.fix_commands:
-            # Display the commands cleanly, exactly as an engineer would enter
-            # them. The [CONFIG]/[EXEC] markers are internal routing hints for
-            # the deploy path (which mode each line runs in) -- they must NOT
-            # leak into the display as a fake "cfg>" prompt, which looks broken
-            # and confuses (real IOS shows "R2(config)#", never "cfg>").
             cmd_display = "\n".join(
                 c.replace("[CONFIG]", "").replace("[EXEC]", "").strip()
                 for c in result.fix_commands
             )
             fix_block = (
-                f"**⚙️ Proposed Fix Commands:**\n"
+                "<div style='margin-top:.4rem;font-weight:600;color:#f59e0b'>"
+                "⚙️ Proposed fix (awaiting your approval):</div>"
                 f"```\n{cmd_display}\n```"
             )
             if result.validation_md:
@@ -1590,3 +1609,42 @@ class IntentEngine:
             parts.append(fix_block)
 
         return "\n\n".join(parts) if parts else result.analysis or "No result."
+
+    @staticmethod
+    def _render_summary(analysis: str) -> str:
+        """Turn the model's compact VERDICT/FINDINGS/ROOT_CAUSE/IMPACT block into a
+        short, colour-coded HTML summary. Falls back to trimmed text if the model
+        didn't follow the format. Never shows raw command output."""
+        import re
+        text = analysis or ""
+        for tag in ("APPROVAL_REQUIRED", "NEXT_STEP_REQUIRED", "DIAGNOSIS_COMPLETE"):
+            text = text.replace(tag, "")
+        verdict = ""
+        m = re.search(r"VERDICT:\s*([A-Z]+)", text, re.I)
+        if m:
+            verdict = m.group(1).upper()
+        findings = re.findall(r"-\s*\[(CRIT|WARN|OK)\]\s*(.+)", text, re.I)
+        rc = re.search(r"ROOT_CAUSE:\s*(.+)", text, re.I)
+        im = re.search(r"IMPACT:\s*(.+)", text, re.I)
+        if not (verdict or findings or rc):
+            return text.strip()[:800]      # model didn't comply — show trimmed text only
+
+        vcolor = {"PROBLEM": "#f87171", "HEALTHY": "#34d399",
+                  "INCONCLUSIVE": "#fbbf24"}.get(verdict, "#93c5fd")
+        vlabel = {"PROBLEM": "⛔ PROBLEM", "HEALTHY": "✅ HEALTHY",
+                  "INCONCLUSIVE": "🟡 INCONCLUSIVE"}.get(verdict, verdict or "RESULT")
+        html = [f"<div style='font-weight:700;color:{vcolor};font-size:1rem'>{vlabel}</div>"]
+        sev = {"CRIT": ("#f87171", "🔴"), "WARN": ("#fbbf24", "🟡"), "OK": ("#34d399", "🟢")}
+        if findings:
+            html.append("<ul style='margin:.35rem 0 .2rem 0;padding-left:1.1rem'>")
+            for s, f in findings[:4]:
+                c, dot = sev.get(s.upper(), ("#93c5fd", "🔹"))
+                html.append(f"<li style='color:{c};margin:.12rem 0'>{dot} {f.strip()}</li>")
+            html.append("</ul>")
+        if rc:
+            html.append(f"<div style='margin:.2rem 0'>🎯 <b>Root cause:</b> "
+                        f"<span style='color:#e2e8f0'>{rc.group(1).strip()}</span></div>")
+        if im:
+            html.append(f"<div style='margin:.15rem 0;color:#94a3b8'>📉 <b>Impact:</b> "
+                        f"{im.group(1).strip()}</div>")
+        return "".join(html)
