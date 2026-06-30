@@ -4504,687 +4504,113 @@ elif workspace == "nlp":
 # ── NETWORK COPILOT ───────────────────────────────────────────────────────────
 if workspace == "copilot":
 
-    # ── Copilot CSS ──────────────────────────────────────────────────────────
+    # ── Copilot CSS ────────────────────────────────────────────────────────────
     st.markdown("""
     <style>
-    /* Hide default streamlit padding for clean canvas */
-    .copilot-canvas { background: transparent; }
-
-    /* ── Device Selector Table ── */
-    .device-table {
-        background: #0e151f;
-        border: 1px solid #1b2533;
-        border-radius: 14px;
-        overflow: hidden;
-        margin-bottom: 0;
-    }
-    .device-table-header {
-        display: grid;
-        grid-template-columns: 40px 1fr 1fr 90px;
-        padding: 10px 16px;
-        background: #141d2a;
-        border-bottom: 1px solid #1b2533;
-        font-size: 11px;
-        font-weight: 700;
-        letter-spacing: .08em;
-        text-transform: uppercase;
-        color: #5d6b7e;
-    }
-    .device-row {
-        display: grid;
-        grid-template-columns: 40px 1fr 1fr 90px;
-        padding: 10px 16px;
-        border-bottom: 1px solid #111827;
-        align-items: center;
-        font-size: 13px;
-        transition: background .15s;
-    }
-    .device-row:last-child { border-bottom: none; }
-    .device-row:hover { background: #141d2a; }
-    .device-status-dot {
-        width: 8px; height: 8px;
-        border-radius: 50%;
-        display: inline-block;
-        margin-right: 6px;
-    }
-
-    /* ── Chat Window ── */
-    .copilot-chat-window {
-        background: #0a0f18;
-        border: 1px solid #1b2533;
-        border-radius: 18px;
-        padding: 24px 28px 16px 28px;
-        min-height: 420px;
-        display: flex;
-        flex-direction: column;
-        gap: 16px;
-        position: relative;
-    }
-    .copilot-msg-user {
-        align-self: flex-end;
-        background: linear-gradient(135deg, #2563eb, #4c8dff);
-        color: #fff;
-        border-radius: 18px 18px 4px 18px;
-        padding: 12px 18px;
-        max-width: 72%;
-        font-size: 14px;
-        line-height: 1.55;
-        box-shadow: 0 4px 20px rgba(76,141,255,.25);
-    }
-    .copilot-msg-ai {
-        align-self: flex-start;
-        background: #141d2a;
-        border: 1px solid #1b2533;
-        color: #c8d6e8;
-        border-radius: 18px 18px 18px 4px;
-        padding: 14px 18px;
-        max-width: 82%;
-        font-size: 14px;
-        line-height: 1.6;
-        box-shadow: 0 4px 16px rgba(0,0,0,.3);
-    }
-    .copilot-msg-ai code {
-        background: #0e151f;
-        border: 1px solid #243043;
-        border-radius: 6px;
-        padding: 1px 6px;
-        font-size: 12.5px;
-        color: #4c8dff;
-        font-family: 'JetBrains Mono', monospace;
-    }
-    .copilot-msg-ai pre {
-        background: #070b12;
-        border: 1px solid #243043;
-        border-radius: 10px;
-        padding: 12px 16px;
-        overflow-x: auto;
-        font-size: 12px;
-        color: #7dd3a8;
-        margin: 8px 0 0 0;
-        font-family: 'JetBrains Mono', monospace;
-    }
-    .copilot-label-user {
-        font-size: 10.5px;
-        font-weight: 700;
-        color: #4c8dff;
-        letter-spacing: .06em;
-        text-align: right;
-        margin-bottom: 4px;
-        margin-right: 2px;
-    }
-    .copilot-label-ai {
-        font-size: 10.5px;
-        font-weight: 700;
-        color: #3fd27a;
-        letter-spacing: .06em;
-        margin-bottom: 4px;
-        margin-left: 2px;
-    }
-    .copilot-empty {
+    .copilot-container {
         display: flex;
         flex-direction: column;
         align-items: center;
         justify-content: center;
-        flex: 1;
-        gap: 12px;
-        padding: 60px 0 40px 0;
-        opacity: .55;
-    }
-    .copilot-empty-icon {
-        font-size: 48px;
-        filter: drop-shadow(0 0 20px rgba(76,141,255,.4));
-    }
-    .copilot-empty-text {
-        font-size: 15px;
-        color: #5d6b7e;
-        font-weight: 500;
+        min-height: 100vh;
+        padding: 40px 20px;
         text-align: center;
-        line-height: 1.5;
     }
-
-    /* ── Input bar ── */
-    .copilot-input-wrap {
-        background: #0e151f;
-        border: 1px solid #243043;
-        border-radius: 16px;
-        padding: 4px 6px 4px 16px;
+    .copilot-logo {
+        width: 120px;
+        height: 120px;
+        background: linear-gradient(135deg, #3b82f6, #2563eb);
+        border-radius: 32px;
         display: flex;
         align-items: center;
-        gap: 8px;
-        margin-top: 8px;
-        box-shadow: 0 0 0 0 rgba(76,141,255,0);
-        transition: box-shadow .2s;
-    }
-    .copilot-input-wrap:focus-within {
-        border-color: #4c8dff !important;
-        box-shadow: 0 0 0 3px rgba(76,141,255,.18) !important;
-    }
-    /* Selected device chip */
-    .copilot-chip {
-        display: inline-flex;
-        align-items: center;
-        gap: 5px;
-        background: rgba(76,141,255,.15);
-        border: 1px solid rgba(76,141,255,.3);
-        border-radius: 20px;
-        padding: 3px 10px 3px 8px;
-        font-size: 12px;
-        color: #7ab3ff;
-        font-weight: 600;
-        white-space: nowrap;
-    }
-    .copilot-no-device-warn {
-        background: rgba(245,185,66,.08);
-        border: 1px solid rgba(245,185,66,.25);
-        border-radius: 10px;
-        padding: 10px 14px;
-        font-size: 13px;
-        color: #f5b942;
-        display: flex;
-        align-items: center;
-        gap: 8px;
-    }
-    .copilot-approval-box {
-        background: #0e151f;
-        border: 1px solid #243043;
-        border-left: 4px solid #f5b942;
-        border-radius: 12px;
-        padding: 14px 18px;
-        margin-top: 8px;
+        justify-content: center;
+        font-size: 60px;
+        margin-bottom: 40px;
+        box-shadow: 0 20px 60px rgba(37, 99, 235, 0.3);
     }
     .copilot-title {
-        font-size: 26px;
+        font-size: 42px;
         font-weight: 800;
         color: #f0f4fa;
-        letter-spacing: -.03em;
-        margin: 0;
+        letter-spacing: -0.02em;
+        margin: 0 0 16px 0;
         line-height: 1.1;
     }
-    .copilot-sub {
-        font-size: 13.5px;
+    .copilot-subtitle {
+        font-size: 18px;
+        color: #8b95a8;
+        margin: 0 0 48px 0;
+        max-width: 600px;
+        line-height: 1.6;
+    }
+    .copilot-input-container {
+        width: 100%;
+        max-width: 700px;
+        display: flex;
+        gap: 12px;
+        align-items: center;
+    }
+    .copilot-input-box {
+        flex: 1;
+        background: #0e151f;
+        border: 1px solid #243043;
+        border-radius: 14px;
+        padding: 16px 20px;
+        font-size: 16px;
+        color: #f0f4fa;
+        font-family: inherit;
+        transition: all 0.2s ease;
+    }
+    .copilot-input-box:focus {
+        outline: none;
+        border-color: #2563eb;
+        box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
+    }
+    .copilot-input-box::placeholder {
         color: #5d6b7e;
-        margin-top: 4px;
+    }
+    .copilot-send-btn {
+        background: linear-gradient(135deg, #2563eb, #3b82f6);
+        color: white;
+        border: none;
+        border-radius: 12px;
+        padding: 14px 28px;
+        font-size: 16px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        box-shadow: 0 8px 20px rgba(37, 99, 235, 0.25);
+    }
+    .copilot-send-btn:hover {
+        background: linear-gradient(135deg, #1d4ed8, #2563eb);
+        box-shadow: 0 12px 28px rgba(37, 99, 235, 0.35);
+        transform: translateY(-2px);
+    }
+    .copilot-send-btn:active {
+        transform: translateY(0);
     }
     </style>
     """, unsafe_allow_html=True)
 
-    # ── Session state init ────────────────────────────────────────────────────
-    if "copilot_messages"       not in st.session_state: st.session_state["copilot_messages"]       = []
-    if "copilot_selected_devs"  not in st.session_state: st.session_state["copilot_selected_devs"]  = []
-    if "copilot_pending_cmds"   not in st.session_state: st.session_state["copilot_pending_cmds"]   = {}
-    if "copilot_snapshots"      not in st.session_state: st.session_state["copilot_snapshots"]      = {}
-    if "copilot_last_input"     not in st.session_state: st.session_state["copilot_last_input"]     = ""
-    if "copilot_rollback"       not in st.session_state: st.session_state["copilot_rollback"]       = {}
+    # ── Page Content ───────────────────────────────────────────────────────────
+    st.markdown("""
+    <div class="copilot-container">
+        <div class="copilot-logo">🧠</div>
+        <h1 class="copilot-title">Network Intelligence Copilot</h1>
+        <p class="copilot-subtitle">Describe what you want to analyze, validate, deploy, or troubleshoot.</p>
+    </div>
+    """, unsafe_allow_html=True)
 
-    # ── Load approved devices ─────────────────────────────────────────────────
-    try:
-        from core.device_discovery import get_discovery_engine
-        _cp_disc   = get_discovery_engine()
-        _cp_devs   = _cp_disc.get_approved() or []
-    except Exception:
-        _cp_devs = []
-
-    # ── Page header ───────────────────────────────────────────────────────────
-    _hdr_l, _hdr_r = st.columns([3, 1])
-    with _hdr_l:
-        st.markdown("""
-        <div style="padding:8px 0 20px 0">
-          <div class="copilot-title">✨ Network Copilot</div>
-          <div class="copilot-sub">
-            Select devices, then talk to your network in plain English.
-          </div>
-        </div>""", unsafe_allow_html=True)
-    with _hdr_r:
-        _sel_count = len(st.session_state["copilot_selected_devs"])
-        if _sel_count:
-            st.markdown(f"""
-            <div style="text-align:right;padding-top:14px">
-              <span style="font-size:22px;font-weight:800;color:#4c8dff">{_sel_count}</span>
-              <span style="font-size:13px;color:#5d6b7e;margin-left:4px">device{"s" if _sel_count!=1 else ""} selected</span>
-            </div>""", unsafe_allow_html=True)
-
-    # ── Main layout: device panel + chat ─────────────────────────────────────
-    _left_col, _right_col = st.columns([1, 2], gap="large")
-
-    # ════════════════════════════════════════════
-    # LEFT — Device Selector
-    # ════════════════════════════════════════════
-    with _left_col:
-        st.markdown("""
-        <div style="font-size:11px;font-weight:700;letter-spacing:.1em;
-                    text-transform:uppercase;color:#5d6b7e;margin-bottom:10px">
-          🖧 Approved Devices — Select targets
-        </div>""", unsafe_allow_html=True)
-
-        if not _cp_devs:
-            st.markdown("""
-            <div style="background:#0e151f;border:1px dashed #1b2533;border-radius:12px;
-                        padding:24px;text-align:center;color:#5d6b7e;font-size:13px">
-              No approved devices yet.<br>
-              <span style="font-size:11px">Go to <b>Dashboard</b> → approve a device first.</span>
-            </div>""", unsafe_allow_html=True)
-        else:
-            # Select All / Clear All
-            _sa_col, _ca_col = st.columns(2)
-            with _sa_col:
-                if st.button("☑ Select All", key="cp_sel_all", use_container_width=True):
-                    st.session_state["copilot_selected_devs"] = [d.ip for d in _cp_devs]
-                    st.rerun()
-            with _ca_col:
-                if st.button("✕ Clear All", key="cp_clr_all", use_container_width=True):
-                    st.session_state["copilot_selected_devs"] = []
-                    st.rerun()
-
-            st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-
-            # Device rows — drag-and-drop-style checklist
-            for _cpd in _cp_devs:
-                _is_sel = _cpd.ip in st.session_state["copilot_selected_devs"]
-                _hn     = getattr(_cpd, "hostname", None) or _cpd.ip
-                _dtype  = getattr(_cpd, "device_type", "cisco_ios") or "cisco_ios"
-                _sess   = _cp_disc.get_session(_cpd.ip)
-                _online = _sess is not None and getattr(_sess, "status", "") == "complete"
-                _dot_color = "#3fd27a" if _online else "#5d6b7e"
-                _bg     = "rgba(76,141,255,.08)" if _is_sel else "transparent"
-                _border = "rgba(76,141,255,.35)" if _is_sel else "#1b2533"
-
-                st.markdown(f"""
-                <div style="background:{_bg};border:1px solid {_border};border-radius:10px;
-                            padding:10px 14px;margin-bottom:6px;transition:all .15s">
-                  <div style="display:flex;align-items:center;justify-content:space-between">
-                    <div>
-                      <span style="color:#f0f4fa;font-weight:700;font-size:13px">{_hn}</span>
-                      <span style="display:block;font-size:11px;color:#5d6b7e;
-                                   font-family:'JetBrains Mono',monospace;margin-top:2px">
-                        <span style="display:inline-block;width:8px;height:8px;
-                                     border-radius:50%;background:{_dot_color};
-                                     margin-right:5px;vertical-align:middle"></span>
-                        {_cpd.ip} · {_dtype}
-                      </span>
-                    </div>
-                  </div>
-                </div>""", unsafe_allow_html=True)
-
-                _tog_label = "✓ Selected" if _is_sel else "+ Select"
-                _tog_type  = "primary" if _is_sel else "secondary"
-                if st.button(_tog_label, key=f"cp_tog_{_cpd.ip}", use_container_width=True):
-                    _sel = st.session_state["copilot_selected_devs"]
-                    if _cpd.ip in _sel:
-                        _sel.remove(_cpd.ip)
-                    else:
-                        _sel.append(_cpd.ip)
-                    st.session_state["copilot_selected_devs"] = _sel
-                    st.rerun()
-
-        # Rollback section in left panel
-        _rb_devs = [ip for ip, snap in st.session_state["copilot_rollback"].items() if snap]
-        if _rb_devs:
-            st.markdown("<hr style='border-color:#1b2533;margin:16px 0'>", unsafe_allow_html=True)
-            st.markdown("""
-            <div style="font-size:11px;font-weight:700;letter-spacing:.1em;
-                        text-transform:uppercase;color:#f5b942;margin-bottom:8px">
-              ↩️ Rollback Available
-            </div>""", unsafe_allow_html=True)
-            for _rb_ip in _rb_devs:
-                _rb_hn = next((getattr(d,"hostname",d.ip) for d in _cp_devs if d.ip == _rb_ip), _rb_ip)
-                st.markdown(f"""
-                <div style="font-size:12px;color:#9aa9bd;margin-bottom:6px">
-                  📸 {_rb_hn} ({_rb_ip})
-                </div>""", unsafe_allow_html=True)
-                _rb1, _rb2 = st.columns(2)
-                with _rb1:
-                    if st.button("↩️ Undo", key=f"cp_rb_{_rb_ip}", use_container_width=True):
-                        _snap = st.session_state["copilot_rollback"].get(_rb_ip, "")
-                        if _snap:
-                            _rb_creds = {
-                                "username":      os.environ.get("GNS3_SSH_USER","admin"),
-                                "password":      os.environ.get("GNS3_SSH_PASS","admin"),
-                                "enable_secret": os.environ.get("GNS3_SSH_SECRET",""),
-                            }
-                            _rb_dev_obj = next((d for d in _cp_devs if d.ip == _rb_ip), None)
-                            try:
-                                from netmiko import ConnectHandler
-                                _rb_cfg = dict(
-                                    device_type=getattr(_rb_dev_obj,"device_type","cisco_ios"),
-                                    host=_rb_ip,
-                                    port=22, username=_rb_creds["username"],
-                                    password=_rb_creds["password"],
-                                    timeout=60, auth_timeout=60,
-                                    fast_cli=False, global_delay_factor=4,
-                                )
-                                if _rb_creds["enable_secret"]:
-                                    _rb_cfg["secret"] = _rb_creds["enable_secret"]
-                                with st.spinner(f"↩️ Restoring {_rb_ip}…"):
-                                    _skip = ("!","Building configuration","Current configuration",
-                                             "version ","boot-","no service","service ",
-                                             "hostname ","logging ","enable secret","enable password",
-                                             "username ","aaa ","crypto ","spanning-tree ","end")
-                                    _rb_lines = [l.strip() for l in _snap.splitlines()
-                                                 if l.strip() and not any(l.strip().startswith(s) for s in _skip)]
-                                    if _rb_lines:
-                                        from core.execution_pipeline import get_execution_pipeline
-                                        _pipe = get_execution_pipeline(fixer, tracker, call_ai)
-                                        _pipe.deploy(
-                                            device=_rb_hn or _rb_ip,
-                                            device_config=_rb_cfg,
-                                            fix_commands=_rb_lines,
-                                            save=True,
-                                        )
-                                st.session_state["copilot_rollback"].pop(_rb_ip, None)
-                                st.session_state["copilot_messages"].append({
-                                    "role": "assistant",
-                                    "content": f"↩️ **Rollback completed on {_rb_hn} ({_rb_ip})** — pre-change config restored.",
-                                    "devices": [_rb_ip],
-                                })
-                                st.rerun()
-                            except Exception as _rbe:
-                                st.error(f"Rollback failed: {_rbe}")
-                with _rb2:
-                    if st.button("🗑 Discard", key=f"cp_rb_dis_{_rb_ip}", use_container_width=True):
-                        st.session_state["copilot_rollback"].pop(_rb_ip, None)
-                        st.rerun()
-
-    # ════════════════════════════════════════════
-    # RIGHT — Chat Window
-    # ════════════════════════════════════════════
-    with _right_col:
-        # ── Chat messages ─────────────────────────────────────────────────
-        _msgs = st.session_state["copilot_messages"]
-
-        if not _msgs:
-            # Empty state
-            st.markdown("""
-            <div style="background:#0a0f18;border:1px solid #1b2533;border-radius:18px;
-                        padding:0 28px;min-height:420px;display:flex;flex-direction:column;
-                        align-items:center;justify-content:center;gap:12px">
-              <div style="font-size:52px;filter:drop-shadow(0 0 24px rgba(76,141,255,.45))">✨</div>
-              <div style="font-size:17px;font-weight:700;color:#f0f4fa;text-align:center;
-                          letter-spacing:-.01em">What do you want to do today in your network?</div>
-              <div style="font-size:13px;color:#5d6b7e;text-align:center;max-width:340px;
-                          line-height:1.6">
-                Select devices on the left, then type a question or command below.<br>
-                AI will plan, show you the commands, and wait for your approval.
-              </div>
-              <div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:8px">
-                <span style="background:#0e151f;border:1px solid #1b2533;border-radius:20px;
-                             padding:6px 14px;font-size:12px;color:#5d6b7e">configure OSPF</span>
-                <span style="background:#0e151f;border:1px solid #1b2533;border-radius:20px;
-                             padding:6px 14px;font-size:12px;color:#5d6b7e">check BGP neighbors</span>
-                <span style="background:#0e151f;border:1px solid #1b2533;border-radius:20px;
-                             padding:6px 14px;font-size:12px;color:#5d6b7e">add loopback interface</span>
-                <span style="background:#0e151f;border:1px solid #1b2533;border-radius:20px;
-                             padding:6px 14px;font-size:12px;color:#5d6b7e">show routing table</span>
-              </div>
-            </div>""", unsafe_allow_html=True)
-        else:
-            # Messages
-            st.markdown('<div class="copilot-chat-window">', unsafe_allow_html=True)
-            import html as _html_mod
-            for _cm in _msgs[-20:]:
-                _cr  = _cm["role"]
-                _ctxt = _cm.get("content","")
-                _cdevs = _cm.get("devices", [])
-                _dev_chips = ""
-                if _cdevs:
-                    _dev_chips = "".join(
-                        f'<span class="copilot-chip">🖧 {next((getattr(d,"hostname",d.ip) for d in _cp_devs if d.ip==ip), ip)}</span>'
-                        for ip in _cdevs
-                    )
-                if _cr == "user":
-                    st.markdown(f"""
-                    <div style="display:flex;flex-direction:column;align-items:flex-end;margin-bottom:4px">
-                      <div class="copilot-label-user">👤 You</div>
-                      {"<div style='display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;margin-bottom:6px'>" + _dev_chips + "</div>" if _dev_chips else ""}
-                      <div class="copilot-msg-user">{_html_mod.escape(_ctxt)}</div>
-                    </div>""", unsafe_allow_html=True)
-                else:
-                    st.markdown(f'<div class="copilot-label-ai">✨ Network Copilot</div>', unsafe_allow_html=True)
-                    st.markdown(f'<div class="copilot-msg-ai">', unsafe_allow_html=True)
-                    st.markdown(_ctxt)
-                    st.markdown("</div>", unsafe_allow_html=True)
-            st.markdown("</div>", unsafe_allow_html=True)
-
-        # ── Pending approval boxes ─────────────────────────────────────────
-        _cp_pending = st.session_state.get("copilot_pending_cmds", {})
-        if _cp_pending:
-            st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
-            for _pdev_ip, _pcmds in list(_cp_pending.items()):
-                _pdev_hn = next((getattr(d,"hostname",d.ip) for d in _cp_devs if d.ip==_pdev_ip), _pdev_ip)
-                _strip_c = {"end","exit","write memory","wr","wr mem"}
-                _cfg_c   = [c.replace("[CONFIG]","").strip() for c in _pcmds
-                            if "[CONFIG]" in c and c.replace("[CONFIG]","").strip().lower() not in _strip_c]
-                _exec_c  = [c.replace("[EXEC]","").strip() for c in _pcmds if "[EXEC]" in c]
-                _all_display = _cfg_c + _exec_c
-
-                st.markdown(f"""
-                <div class="copilot-approval-box">
-                  <div style="font-size:12px;font-weight:700;color:#f5b942;margin-bottom:8px">
-                    ⚠️ Ready to deploy on <span style="color:#f0f4fa">{_pdev_hn}</span>
-                    <span style="color:#5d6b7e;font-weight:400"> ({_pdev_ip})</span>
-                  </div>
-                  <pre style="background:#070b12;border:1px solid #243043;border-radius:8px;
-                              padding:10px 14px;font-size:12px;color:#7dd3a8;
-                              font-family:'JetBrains Mono',monospace;margin:0 0 12px 0;
-                              overflow-x:auto">{chr(10).join(_all_display)}</pre>
-                </div>""", unsafe_allow_html=True)
-
-                # Show snapshot info
-                _snap_val = st.session_state.get("copilot_snapshots", {}).get(_pdev_ip, "")
-                if _snap_val:
-                    with st.expander(f"📸 Pre-change snapshot — {len(_snap_val.splitlines())} lines (click to review)", expanded=False):
-                        _trunc = _snap_val[:3000] + ("\n... (truncated)" if len(_snap_val)>3000 else "")
-                        st.code(_trunc, language="text")
-
-                _ap_col, _ca_col2 = st.columns(2)
-                with _ap_col:
-                    if st.button(f"✅ Deploy on {_pdev_hn}", key=f"cp_deploy_{_pdev_ip}", type="primary", use_container_width=True):
-                        _d_creds = {
-                            "username":      os.environ.get("GNS3_SSH_USER","admin"),
-                            "password":      os.environ.get("GNS3_SSH_PASS","admin"),
-                            "enable_secret": os.environ.get("GNS3_SSH_SECRET",""),
-                        }
-                        _d_dev = next((d for d in _cp_devs if d.ip==_pdev_ip), None)
-                        _d_log = []
-                        try:
-                            from netmiko import ConnectHandler
-                            _dcfg = dict(
-                                device_type=getattr(_d_dev,"device_type","cisco_ios"),
-                                host=_pdev_ip, port=22,
-                                username=_d_creds["username"], password=_d_creds["password"],
-                                timeout=60, auth_timeout=60, fast_cli=False, global_delay_factor=4,
-                            )
-                            if _d_creds["enable_secret"]: _dcfg["secret"] = _d_creds["enable_secret"]
-                            with st.spinner(f"⚙️ Deploying on {_pdev_hn}…"):
-                                from core.execution_pipeline import get_execution_pipeline
-                                _pipe = get_execution_pipeline(fixer, tracker, call_ai)
-                                _er = _pipe.deploy(
-                                    device=_pdev_hn or _pdev_ip,
-                                    device_config=_dcfg,
-                                    exec_commands=_exec_c or [],
-                                    fix_commands=_cfg_c or [],
-                                    save=True,
-                                )
-                                _d_log.extend(_er.logs)
-                                if not _er.success:
-                                    raise RuntimeError(_er.error or "deployment failed")
-                            _d_result = (
-                                f"✅ **Deployed successfully on {_pdev_hn} ({_pdev_ip})**\n\n"
-                                f"```\n" + "\n".join(_d_log) + "\n```"
-                            )
-                            if _snap_val:
-                                st.session_state["copilot_rollback"][_pdev_ip] = _snap_val
-                                _d_result += "\n\n🔄 **Rollback available** — click ↩️ Undo in the left panel."
-                        except Exception as _de:
-                            _d_result = f"❌ Deployment failed on {_pdev_hn}: {_de}"
-                        st.session_state["copilot_pending_cmds"].pop(_pdev_ip, None)
-                        st.session_state["copilot_snapshots"].pop(_pdev_ip, None)
-                        st.session_state["copilot_messages"].append({
-                            "role": "assistant", "content": _d_result, "devices": [_pdev_ip],
-                        })
-                        st.rerun()
-                with _ca_col2:
-                    if st.button(f"❌ Cancel", key=f"cp_cancel_{_pdev_ip}", use_container_width=True):
-                        st.session_state["copilot_pending_cmds"].pop(_pdev_ip, None)
-                        st.session_state["copilot_snapshots"].pop(_pdev_ip, None)
-                        st.session_state["copilot_messages"].append({
-                            "role": "assistant",
-                            "content": f"❌ Cancelled — no changes made to **{_pdev_hn}** ({_pdev_ip}).",
-                            "devices": [_pdev_ip],
-                        })
-                        st.rerun()
-
-        # ── Input bar ─────────────────────────────────────────────────────
-        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-
-        # Show selected device chips above input
-        _sel_ips = st.session_state["copilot_selected_devs"]
-        if _sel_ips:
-            _chips_html = "".join(
-                f'<span class="copilot-chip">🖧 {next((getattr(d,"hostname",d.ip) for d in _cp_devs if d.ip==ip), ip)}</span>'
-                for ip in _sel_ips
-            )
-            st.markdown(f"""
-            <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;
-                        padding:8px 12px;background:#0e151f;border:1px solid #1b2533;
-                        border-radius:10px">
-              <span style="font-size:11px;color:#5d6b7e;margin-right:4px;align-self:center">Targeting:</span>
-              {_chips_html}
-            </div>""", unsafe_allow_html=True)
-        else:
-            st.markdown("""
-            <div class="copilot-no-device-warn">
-              ⚠️ No devices selected — select at least one device on the left before sending a command.
-            </div>""", unsafe_allow_html=True)
-
-        # Input + send
-        _inp_col, _btn_col2 = st.columns([5, 1])
-        with _inp_col:
-            _cp_input = st.text_input(
-                label="copilot_input",
-                label_visibility="collapsed",
-                placeholder="What do you want to do today in your network?",
-                key="copilot_text_input",
-                disabled=len(_sel_ips) == 0,
-            )
-        with _btn_col2:
-            _cp_send = st.button("Send ➤", key="copilot_send", type="primary",
-                                 use_container_width=True, disabled=len(_sel_ips)==0)
-
-        # Clear chat
-        if _msgs:
-            if st.button("🗑 Clear conversation", key="cp_clear", use_container_width=False):
-                st.session_state["copilot_messages"]     = []
-                st.session_state["copilot_pending_cmds"] = {}
-                st.session_state["copilot_snapshots"]    = {}
-                st.rerun()
-
-        # ── Process input ──────────────────────────────────────────────────
-        if _cp_send and _cp_input and _cp_input.strip():
-            _q = _cp_input.strip()
-
-            # Guard: must have devices selected
-            if not _sel_ips:
-                st.warning("⚠️ Please select at least one device first.")
-                st.stop()
-
-            # Add user message
-            st.session_state["copilot_messages"].append({
-                "role": "user", "content": _q, "devices": list(_sel_ips),
-            })
-
-            # Build device context for AI
-            _dev_ctx_parts = []
-            for _dip in _sel_ips:
-                _dd = next((d for d in _cp_devs if d.ip==_dip), None)
-                if _dd:
-                    _dhn = getattr(_dd,"hostname",_dip) or _dip
-                    _dty = getattr(_dd,"device_type","cisco_ios")
-                    _dev_ctx_parts.append(f"- {_dhn} ({_dip})  type={_dty}")
-            _dev_ctx = "\n".join(_dev_ctx_parts)
-
-            _cp_sys = f"""You are Network Copilot — an expert AI network engineer with LIVE SSH access.
-
-SELECTED DEVICES (you can ONLY act on these):
-{_dev_ctx}
-
-RULES:
-1. For READ-ONLY queries (show, check, verify, explain, what is, why) — answer directly. No commands needed.
-2. For CONFIGURATION requests — for each device separately:
-   a. Explain what you will do in 1-2 sentences.
-   b. List commands prefixed with [CONFIG] for config-mode or [EXEC] for exec-mode.
-   c. End the command block for each device with: DEPLOY_DEVICE:<ip>
-3. NEVER act on any device not in the selected list above.
-4. NEVER generate: reload, erase, write erase, no ip routing, no router (destructive commands).
-5. Be concise and technically precise."""
-
-            with st.spinner("✨ Network Copilot is thinking…"):
-                try:
-                    _cp_reply = call_ai(_cp_sys + f"\n\nOperator: {_q}\nNetwork Copilot:")
-                except Exception as _cpe:
-                    _cp_reply = f"AI Error: {_cpe}"
-
-            if not _cp_reply:
-                _cp_reply = "AI is unavailable. Please check your GROQ_API_KEY in .streamlit/secrets.toml"
-
-            # Parse response for per-device deploy blocks
-            _cp_final_msg = _cp_reply
-            _has_deploy   = "DEPLOY_DEVICE:" in _cp_reply
-
-            if _has_deploy:
-                import re as _re_cp
-                # Split by DEPLOY_DEVICE markers
-                _cp_blocks = _re_cp.split(r"DEPLOY_DEVICE:(\S+)", _cp_reply)
-                # _cp_blocks = [text_before, ip, text_after, ip2, text_after2, ...]
-                _cp_clean_msg = _cp_blocks[0].strip()
-
-                for _bi in range(1, len(_cp_blocks)-1, 2):
-                    _block_ip  = _cp_blocks[_bi].strip()
-                    _block_txt = _cp_blocks[_bi+1] if _bi+1 < len(_cp_blocks) else ""
-
-                    # Only act on selected devices
-                    if _block_ip not in _sel_ips:
-                        continue
-
-                    # Extract commands
-                    _b_cmds = [l.strip() for l in (_cp_blocks[0] + _block_txt).splitlines()
-                               if l.strip().startswith("[CONFIG]") or l.strip().startswith("[EXEC]")]
-
-                    if _b_cmds:
-                        # Take snapshot before storing pending
-                        _snap_creds = {
-                            "username":      os.environ.get("GNS3_SSH_USER","admin"),
-                            "password":      os.environ.get("GNS3_SSH_PASS","admin"),
-                            "enable_secret": os.environ.get("GNS3_SSH_SECRET",""),
-                        }
-                        _snap_dev = next((d for d in _cp_devs if d.ip==_block_ip), None)
-                        try:
-                            from netmiko import ConnectHandler
-                            _scfg2 = dict(
-                                device_type=getattr(_snap_dev,"device_type","cisco_ios"),
-                                host=_block_ip, port=22,
-                                username=_snap_creds["username"],
-                                password=_snap_creds["password"],
-                                timeout=60, auth_timeout=60,
-                                fast_cli=False, global_delay_factor=4,
-                            )
-                            if _snap_creds["enable_secret"]: _scfg2["secret"] = _snap_creds["enable_secret"]
-                            _sc2 = ConnectHandler(**_scfg2)
-                            try: _sc2.enable()
-                            except: pass
-                            _snap2 = _sc2.send_command("show running-config", read_timeout=30, expect_string=r"#")
-                            _sc2.disconnect()
-                            st.session_state["copilot_snapshots"][_block_ip] = _snap2
-                        except Exception:
-                            st.session_state["copilot_snapshots"][_block_ip] = ""
-
-                        st.session_state["copilot_pending_cmds"][_block_ip] = _b_cmds
-
-                # Clean up the message shown to user
-                _cp_final_msg = _re_cp.sub(r"DEPLOY_DEVICE:\S+", "", _cp_clean_msg).strip()
-                if st.session_state["copilot_pending_cmds"]:
-                    _cp_final_msg += "\n\n⚠️ **Review the commands above and click Deploy to apply.**"
-
-            st.session_state["copilot_messages"].append({
-                "role": "assistant", "content": _cp_final_msg, "devices": list(_sel_ips),
-            })
-            st.rerun()
+    # ── Input Section ──────────────────────────────────────────────────────────
+    _col_spacer1, _col_input, _col_spacer2 = st.columns([1, 3, 1])
+    with _col_input:
+        _input_text = st.text_input(
+            label="copilot_command",
+            label_visibility="collapsed",
+            placeholder="Analyze OSPF changes in Branch-101...",
+            key="copilot_input_field",
+        )
+        
+        if _input_text and _input_text.strip():
+            st.info(f"📝 Query received: {_input_text}")
+            st.success("✅ Ready to process your request")
