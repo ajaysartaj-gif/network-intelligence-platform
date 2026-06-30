@@ -390,6 +390,45 @@ def call_ai(prompt: str) -> str:
 
 # ── PINGPY / TUNNEL CONFIG ────────────────────────────────────────────────────
 
+def _format_autonomous_chat(res, scope_label: str) -> str:
+    """Render the autonomous agent's round-by-round trace + fix outcome for chat."""
+    lines = [f"🤖 **Autonomous diagnosis on {scope_label}**", ""]
+    for t in res.trace:
+        rnd = t.get("round")
+        if rnd == "fix":
+            if "applied" in t:
+                lines.append(f"  ⚙️ Applied on {t.get('device','?')}: `{'; '.join(t['applied'])}`")
+            elif "error" in t:
+                lines.append(f"  ⚠️ Apply error on {t.get('device','?')}: {t['error']}")
+            continue
+        verdict = {"next": "↪️ inconclusive — continuing",
+                   "fix": "✅ root cause found",
+                   "complete": "✅ diagnosis complete"}.get(t.get("verdict"), "")
+        cmds = "; ".join(c for cl in t.get("commands", {}).values() for c in cl)
+        lines.append(f"**Round {rnd}** — {verdict}")
+        if cmds:
+            lines.append(f"  🔍 ran (read-only): `{cmds}`")
+        if t.get("hypothesis"):
+            lines.append(f"  💭 {t['hypothesis']}")
+        lines.append("")
+    if res.analysis:
+        lines += ["**Analysis:**", res.analysis, ""]
+    if res.needs_approval and res.fix_commands:
+        if res.applied:
+            status = ("✅ **fix applied & verified**" if res.verified else
+                      "↩️ **fix applied but verification failed — auto-rolled back**"
+                      if res.reverted else "⚙️ **fix applied** (verification pending)")
+        else:
+            status = ("🔒 **Root cause found. A configuration change is required — "
+                      "review and approve it below to apply.** (Read-only diagnostics ran "
+                      "automatically; writes always need your approval.)")
+        lines.append(status)
+        lines.append("Proposed fix: " + "; ".join(f"`{c}`" for c in res.fix_commands))
+    elif not res.needs_approval:
+        lines.append("✅ No configuration change required.")
+    return "\n".join(lines)
+
+
 def _resolve_gns3_endpoint() -> tuple[str, int]:
     """
     Returns (host, port) for GNS3.
@@ -2304,6 +2343,23 @@ GROQ_API_KEY = "your-key-here"
                 unsafe_allow_html=True,
             )
 
+            # ── Autonomous mode + Clear chat controls ─────────────────────
+            _actl, _actr = st.columns([4, 1])
+            with _actl:
+                _auto_mode = st.checkbox(
+                    "🤖 Autonomous mode — agent runs read-only diagnostics itself "
+                    "(no per-step approval) and auto-applies the fix with verify + rollback",
+                    key="devices_ai_autonomous",
+                )
+            with _actr:
+                if st.button("🗑️ Clear chat", key="devices_ai_clear",
+                             use_container_width=True):
+                    for _k in ("devices_ai_input", "devices_ai_last_q",
+                               "devices_ai_last_ans", "devices_ai_last_result",
+                               "devices_ai_plan"):
+                        st.session_state.pop(_k, None)
+                    st.rerun()
+
             # ── AI submission — STAGE 1: Propose Plan ─────────────────────
             if _ai_q and _ai_q != st.session_state.get("devices_ai_last_q"):
                 st.session_state["devices_ai_last_q"] = _ai_q
@@ -2330,28 +2386,53 @@ GROQ_API_KEY = "your-key-here"
                             if len(_targets) <= 5
                             else f"{len(_targets)} devices"
                         )
-                        with st.spinner(f"🧠 NetBrain AI thinking about {_scope_label}…"):
-                            _ie_res = _ie_scope.propose_plan(
-                                query=_ai_q,
-                                devices=_targets,
+
+                        # ── AUTONOMOUS MODE: agent runs the whole loop itself ──
+                        if st.session_state.get("devices_ai_autonomous"):
+                            with st.spinner(f"🤖 Autonomous agent diagnosing {_scope_label} "
+                                            "(read-only commands run automatically)…"):
+                                _ie_res = _ie_scope.run_autonomous(
+                                    query=_ai_q, devices=_targets, max_rounds=4, auto_fix=True,
+                                )
+                            st.session_state["devices_ai_last_ans"] = (
+                                _format_autonomous_chat(_ie_res, _scope_label)
                             )
-                        st.session_state["devices_ai_last_ans"] = (
-                            IntentEngine.format_for_chat(_ie_res, _scope_label)
-                        )
-                        # Save plan + result for stage 2
-                        st.session_state["devices_ai_plan"] = (
-                            _ie_res.plan if _ie_res.plan_pending else None
-                        )
-                        st.session_state["devices_ai_last_result"] = {
-                            "plan_pending":   _ie_res.plan_pending,
-                            "needs_approval": _ie_res.needs_approval,
-                            "fix_commands":   _ie_res.fix_commands,
-                            "commands_per_device": _ie_res.commands_per_device,
-                            "verify_commands": _ie_res.verify_commands,
-                            "target_ips":     [d.ip for d in _targets],
-                            "scope_label":    _scope_label,
-                            "query":          _ai_q,
-                        }
+                            # Read-only diagnostics ran autonomously. Any WRITE/fix is
+                            # held for explicit human approval (policy) → surface the
+                            # existing Deploy-Fix gate with the AI-generated commands.
+                            st.session_state["devices_ai_plan"] = None
+                            st.session_state["devices_ai_last_result"] = {
+                                "plan_pending": False,
+                                "needs_approval": _ie_res.needs_approval,
+                                "fix_commands": _ie_res.fix_commands,
+                                "commands_per_device": _ie_res.commands_per_device,
+                                "verify_commands": _ie_res.verify_commands,
+                                "target_ips": [d.ip for d in _targets],
+                                "scope_label": _scope_label, "query": _ai_q,
+                            }
+                        else:
+                            with st.spinner(f"🧠 NetBrain AI thinking about {_scope_label}…"):
+                                _ie_res = _ie_scope.propose_plan(
+                                    query=_ai_q,
+                                    devices=_targets,
+                                )
+                            st.session_state["devices_ai_last_ans"] = (
+                                IntentEngine.format_for_chat(_ie_res, _scope_label)
+                            )
+                            # Save plan + result for stage 2
+                            st.session_state["devices_ai_plan"] = (
+                                _ie_res.plan if _ie_res.plan_pending else None
+                            )
+                            st.session_state["devices_ai_last_result"] = {
+                                "plan_pending":   _ie_res.plan_pending,
+                                "needs_approval": _ie_res.needs_approval,
+                                "fix_commands":   _ie_res.fix_commands,
+                                "commands_per_device": _ie_res.commands_per_device,
+                                "verify_commands": _ie_res.verify_commands,
+                                "target_ips":     [d.ip for d in _targets],
+                                "scope_label":    _scope_label,
+                                "query":          _ai_q,
+                            }
                     except Exception as _ie_err:
                         st.session_state["devices_ai_last_ans"] = (
                             f"⚠️ Engine error: {_ie_err}"
