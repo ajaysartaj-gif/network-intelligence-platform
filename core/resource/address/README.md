@@ -205,3 +205,45 @@ clear note that NRIE plans/allocates only and deployment remains the platform's.
 ### Out of scope (unchanged)
 vendor config/CLI/Terraform/Ansible generation · device deployment · cloud
 provisioning · DHCP/DNS server implementation.
+
+---
+
+## AI-Native Autonomy — Intent → Hierarchy → Plan → Live IP Discovery
+
+Makes IP Intelligence truly autonomous and AI-native. Reuses the platform Groq
+client (`core.ai_engine.ask_ai`) and the device discovery engine
+(`core.device_discovery`); introduces no new LLM or scanner.
+
+```
+ai/assistant.py            reuses Groq (ask_ai); strict-JSON parse, per-IP descriptions,
+                           graceful deterministic fallback when offline
+intent/intent_parser.py    NL → SiteIntent ("deploy a 20 users site in Mumbai" →
+                           users=20, location=Mumbai, site_type) + per-profile demand derivation
+location/location_map.py   place → Region>Country>State>City (map + AI fallback)
+location/hierarchy_builder.py  builds Region>Country>State>City>Campus>Site>Building>Floor
+                               (reuses the foundation service; idempotent-ish)
+discovery/ip_scanner.py    active-IP scan — REUSES DeviceDiscoveryEngine (ICMP/GNS3/range)
+discovery/ip_inventory.py  Subnet>IP leaf — per-IP status + AI description + "engaged as"
+                           (MemoryStore-backed)
+autonomy/site_designer.py  orchestrator: intent → location → hierarchy → derive demands →
+                           plan/allocate (reused PR-003) → record subnets under Floor →
+                           optional scan → inventory IPs with descriptions
+api/autonomy_api.py        design_site() · scan_subnet() · ip_inventory()
+tests/test_autonomy.py     4 tests (intent, location, full-chain design, profile differences)
+```
+
+### What it does
+1. **Intent → decision** — "deploy a 20 users site in Mumbai" is parsed (AI + fallback);
+   NRIE derives the site profile and decides subnets/VLANs/VRFs automatically.
+2. **Active-IP scan + descriptions** — scans a subnet (reusing the platform engine),
+   identifies active IPs, infers where each is engaged (router/CCTV/server/managed host…)
+   and writes a description against every IP.
+3. **Full hierarchy** — Region > Country > State > City > Campus > Site > Building > Floor >
+   Subnet > IP details, built automatically from the intent's location.
+4. **Real AI** — wired to Groq; the UI shows 🟢/🟡 AI status and degrades gracefully.
+
+### UI
+Admin → **🧮 IP Intelligence** → **🌐 Intent & Autonomy**: type an intent, click
+*Design site autonomously*, and see the parsed intent, the auto-built hierarchy,
+the planned subnets, and the discovered active IPs with descriptions. NRIE
+plans/allocates/inventories only — deployment stays with the platform.
