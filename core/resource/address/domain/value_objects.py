@@ -69,6 +69,7 @@ class ResourceType(str, Enum):
     TRANSIT_NETWORK = "transit_network"
     TUNNEL = "tunnel"
     OVERLAY = "overlay"
+    IP_ADDRESS = "ip_address"
 
 
 class ResourceStatus(str, Enum):
