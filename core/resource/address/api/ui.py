@@ -61,8 +61,9 @@ def render_nrie_panel() -> None:
         except Exception as e:
             st.error(f"Could not seed demo data: {e}")
 
-    foundation, intelligence, planning = st.tabs(
-        ["📚 Knowledge Foundation", "🧠 Intelligence Explorer", "🤖 Autonomous Planning"])
+    foundation, intelligence, planning, autonomy = st.tabs(
+        ["📚 Knowledge Foundation", "🧠 Intelligence Explorer",
+         "🤖 Autonomous Planning", "🌐 Intent & Autonomy"])
 
     # ── Foundation (read-only knowledge) ─────────────────────────────────────
     with foundation:
@@ -94,6 +95,8 @@ def render_nrie_panel() -> None:
         _render_intelligence_tab(st, svc)
     with planning:
         _render_planning_tab(st, svc)
+    with autonomy:
+        _render_autonomy_tab(st, svc)
 
 
 def _render_intelligence_tab(st, svc) -> None:
@@ -238,3 +241,60 @@ def _render_planning_tab(st, svc) -> None:
 
         st.info("NRIE plans and allocates only. Existing deployment components remain "
                 "responsible for execution — no configuration was generated.")
+
+
+def _render_autonomy_tab(st, svc) -> None:
+    """AI-native: NL intent → full hierarchy + autonomous plan + live IP scan."""
+    from ..ai.assistant import available as ai_available
+
+    st.markdown("#### 🌐 Autonomous, AI-native site design")
+    st.caption("Type what you want in plain English. NRIE decides the subnets/VLANs/VRFs, "
+               "builds Region → Country → State → City → Campus → Site → Building → Floor → "
+               "Subnet → IP, and can scan for active IPs with a description against each.")
+    st.write(f"**AI status:** {'🟢 Groq connected' if ai_available() else '🟡 offline — deterministic fallback active'}")
+
+    intent_text = st.text_input("Intent", value="deploy a 20 users site in Mumbai",
+                                key="nrie_auto_intent")
+    col1, col2 = st.columns(2)
+    space = col1.text_input("Address space", value="10.40.0.0/16", key="nrie_auto_space")
+    do_scan = col2.checkbox("Scan first subnet for active IPs", value=True, key="nrie_auto_scan")
+
+    if st.button("🚀 Design site autonomously", key="nrie_auto_go"):
+        from ..api.autonomy_api import get_autonomy_api
+        api = get_autonomy_api()
+        with st.spinner("Parsing intent, building hierarchy, planning resources…"):
+            res = api.design_site(intent_text, address_space=space, scan=do_scan)
+
+        si, loc = res.intent, res.location
+        st.success(f"Parsed: **{si.users} users**, **{si.site_type}**, "
+                   f"**{loc.city or '—'}** ({loc.state}, {loc.country}, {loc.region}) "
+                   f"· intent via {si.source}, location via {loc.source}")
+
+        st.markdown("##### 🏢 Enterprise hierarchy (auto-built)")
+        st.dataframe([{"Level": n["level"].title(), "Name": n["name"]}
+                      for n in res.hierarchy.ordered()], use_container_width=True)
+
+        if res.plan and res.plan.plan.subnets:
+            st.markdown("##### 📐 Auto-planned subnets")
+            st.dataframe([{"Purpose": s.purpose, "CIDR": s.cidr, "Gateway": s.gateway,
+                           "VLAN": s.vlan, "VRF": s.vrf, "Hosts": s.usable_hosts}
+                          for s in res.plan.plan.subnets], use_container_width=True)
+            st.caption(f"VRFs: {', '.join(res.plan.plan.vrfs)} · "
+                       f"DHCP pools: {len(res.plan.plan.dhcp_pools)} · "
+                       f"DNS zones: {len(res.plan.plan.dns_zones)} · "
+                       f"validation: {'✅' if res.plan.validation.valid else '⚠️ ' + str(len(res.plan.validation.issues)) + ' issue(s)'}")
+
+        if res.scanned_ips:
+            st.markdown("##### 🔎 Active IPs discovered (with description)")
+            st.dataframe([{"IP": d.ip, "Engaged as": d.engaged_as,
+                           "Description": d.description, "Hostname": d.hostname or "—",
+                           "Vendor": d.vendor or "—", "Ports": ", ".join(map(str, d.open_ports)) or "—"}
+                          for d in res.scanned_ips], use_container_width=True)
+        elif do_scan:
+            st.info("No active IPs harvested in this environment. In production the scanner "
+                    "reuses the platform discovery engine (ICMP + GNS3 + range scan).")
+
+        for n in res.notes:
+            st.caption(f"• {n}")
+        st.info("NRIE planned, allocated and inventoried autonomously. Deployment remains "
+                "with the existing platform components — no device configuration was generated.")
