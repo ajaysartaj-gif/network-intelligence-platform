@@ -921,14 +921,27 @@ class IntentEngine:
         if not KNOWLEDGE_OK:
             return ""
 
+        from core.knowledge.vendor_router import supported_vendors
+
         contexts: List[str] = []
         seen_vendors = set()
+
+        # Use vendors from the selected devices first, but allow broader vendor
+        # coverage if no device-specific vendor is detected.
+        vendor_candidates: List[str] = []
         for device in devices:
             vendor = detect_vendor(getattr(device, "device_type", None))
-            platform = detect_platform(getattr(device, "device_type", None))
-            if not vendor or vendor == "unknown" or vendor in seen_vendors:
-                continue
-            seen_vendors.add(vendor)
+            if vendor and vendor != "unknown" and vendor not in seen_vendors:
+                seen_vendors.add(vendor)
+                vendor_candidates.append(vendor)
+
+        if not vendor_candidates:
+            vendor_candidates = supported_vendors()
+
+        for vendor in vendor_candidates:
+            platform = None
+            if devices:
+                platform = detect_platform(getattr(devices[0], "device_type", None))
             try:
                 entry = get_orchestrator().lookup(vendor, query, platform)
                 if not entry or entry.citation.confidence == ConfidenceLevel.UNVERIFIED:
