@@ -115,7 +115,9 @@ def render_copilot_page(call_ai_fn):
     conversations = st.session_state.get("copilot_conversations", [])
     active_conversation = _current_conversation()
 
-    with st.sidebar:
+    main_col, right_col = st.columns([3, 1])
+
+    with right_col:
         st.markdown("## 💬 Copilot History")
         col_new, col_clear = st.columns([1, 1])
         with col_new:
@@ -160,9 +162,10 @@ def render_copilot_page(call_ai_fn):
         if st.session_state.get("copilot_uploaded_image"):
             st.markdown(f"**Image:** {st.session_state['copilot_uploaded_image'].name}")
 
-    # ── CSS Styling ────────────────────────────────────────────────────────────
-    st.markdown("""
-    <style>
+    with main_col:
+        # ── CSS Styling ────────────────────────────────────────────────────────────
+        st.markdown("""
+        <style>
     .copilot-container {
         display: flex;
         flex-direction: column;
