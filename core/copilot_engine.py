@@ -19,6 +19,7 @@ DEFAULT_COPILOT_SUGGESTIONS = [
 
 logger = logging.getLogger(__name__)
 
+
 def initialize_session_state():
     """Initialize all copilot-related session state."""
     if "copilot_conversations" not in st.session_state:
