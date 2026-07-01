@@ -317,8 +317,27 @@ class IntentEngine:
                         "\n\n⚠️ The analysis was inconclusive but no concrete next command "
                         "could be derived. Please refine the question or add devices.")
             else:
-                # DIAGNOSIS_COMPLETE (or untagged) — strip any stray tag text
-                result.analysis = result.analysis.replace("DIAGNOSIS_COMPLETE", "").strip()
+                # If the model returned fix commands without the approval tag, hold them for review.
+                fallback_fix_cmds, fallback_fix_expl, fallback_rollback = self._extract_fix_from_analysis(result.analysis)
+                if fallback_fix_cmds:
+                    logger.warning(
+                        "[IntentEngine] execute_plan: fix commands detected without explicit APPROVAL_REQUIRED tag."
+                    )
+                    result.needs_approval = True
+                    result.fix_commands = fallback_fix_cmds
+                    result.fix_explanation = fallback_fix_expl
+                    result.rollback_commands = fallback_rollback
+                    result.analysis = fallback_fix_expl or result.analysis
+                    if KNOWLEDGE_OK and result.fix_commands and all_devices:
+                        try:
+                            result.validation_md = self._validate_fix_commands(
+                                result.fix_commands, all_devices, result.device_results,
+                            )
+                        except Exception as ve:
+                            logger.debug(f"Validation failed: {ve}")
+                else:
+                    # DIAGNOSIS_COMPLETE (or untagged) — strip any stray tag text
+                    result.analysis = result.analysis.replace("DIAGNOSIS_COMPLETE", "").strip()
 
         except Exception as exc:
             logger.error(f"[IntentEngine] execute_plan() error: {exc}", exc_info=True)
@@ -1447,9 +1466,9 @@ class IntentEngine:
                 continue
             if stripped == "--- RISK ---":
                 break  # stop before risk section
-            if in_rollback:
-                if stripped.startswith("[ROLLBACK]"):
-                    rollback_cmds.append(stripped.replace("[ROLLBACK]", "").strip())
+            if stripped.startswith("[ROLLBACK]"):
+                rollback_cmds.append(stripped.replace("[ROLLBACK]", "").strip())
+                in_rollback = True
             elif stripped.startswith("[CONFIG]") or stripped.startswith("[EXEC]"):
                 fix_cmds.append(stripped)
             else:

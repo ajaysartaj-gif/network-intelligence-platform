@@ -54,6 +54,43 @@ def test_execute_plan_blocks_debug_even_if_planned():
     assert "show ip ospf neighbor" in ran["cmds"]
 
 
+def test_execute_plan_detects_fix_commands_without_approval_tag():
+    dev = types.SimpleNamespace(ip="10.0.0.1", hostname="R1", device_type="cisco_ios")
+    ran = {"cmds": []}
+
+    def fake_ai(_):
+        return (
+            "VERDICT: PROBLEM\n"
+            "FINDINGS:\n"
+            "- [CRIT] ospf neighbor count 0\n"
+            "ROOT_CAUSE: OSPF adjacency is not forming\n"
+            "IMPACT: OSPF routes are not learned\n"
+            "[CONFIG] interface GigabitEthernet0/1\n"
+            "[ROLLBACK] interface GigabitEthernet0/1\n"
+        )
+
+    eng = IntentEngine(ai_call=fake_ai, approved_devices=[dev])
+
+    def _collect(d, cmds):
+        ran["cmds"] += list(cmds)
+        return DeviceResult(ip=d.ip, hostname=d.hostname, commands_run=list(cmds),
+                            outputs={c: "..." for c in cmds}, connected=True)
+    eng._ssh_collect = _collect
+
+    plan = DiagnosticPlan(query="why ospf is down",
+                          commands_per_device={"10.0.0.1": ["show ip ospf neighbor"]},
+                          devices=[{"ip": "10.0.0.1", "hostname": "R1"}])
+    res = eng.execute_plan(plan, [dev])
+
+    assert res.needs_approval is True
+    assert res.fix_commands == ["[CONFIG] interface GigabitEthernet0/1"]
+    assert res.rollback_commands == ["interface GigabitEthernet0/1"]
+
+    rendered = IntentEngine.format_for_chat(res, "selected devices")
+    assert "⚙️ Proposed fix (awaiting your approval):" in rendered
+    assert "APPROVAL_REQUIRED" not in res.analysis
+
+
 def test_summary_is_short_and_colour_coded_no_raw_output():
     analysis = (
         "VERDICT: PROBLEM\n"
