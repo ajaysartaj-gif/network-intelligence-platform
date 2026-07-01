@@ -268,7 +268,7 @@ def render_copilot_page(call_ai_fn):
             )
 
         with _bar_col5:
-            _send_clicked = st.form_submit_button("Send", use_container_width=True)
+            _send_clicked = st.form_submit_button("Send")
             _send_status = "Ready" if _input_text else "Type a message"
             st.caption(_send_status)
 
