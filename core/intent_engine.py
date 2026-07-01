@@ -916,15 +916,47 @@ class IntentEngine:
             logger.debug(f"RAG context lookup failed: {exc}")
             return ""
 
+    def _vendor_doc_context(self, query: str, devices: List[Any]) -> str:
+        """Supplement grounding with vendor docs / MCP when RAG has no strong hit."""
+        if not KNOWLEDGE_OK:
+            return ""
+
+        contexts: List[str] = []
+        seen_vendors = set()
+        for device in devices:
+            vendor = detect_vendor(getattr(device, "device_type", None))
+            platform = detect_platform(getattr(device, "device_type", None))
+            if not vendor or vendor == "unknown" or vendor in seen_vendors:
+                continue
+            seen_vendors.add(vendor)
+            try:
+                entry = get_orchestrator().lookup(vendor, query, platform)
+                if not entry or entry.citation.confidence == ConfidenceLevel.UNVERIFIED:
+                    continue
+                url = entry.citation.source_url or ""
+                title = entry.citation.source_title or entry.citation.source_name
+                snippet = (entry.description or "").strip()[:1200]
+                if snippet:
+                    contexts.append(
+                        f"[{vendor.upper()} DOC/MCP] {title}{' — ' + url if url else ''}\n{snippet}"
+                    )
+            except Exception as exc:
+                logger.debug(f"Vendor doc/MCP context lookup failed for {vendor}: {exc}")
+
+        return "VENDOR DOCUMENTS / MCP CONTEXT:\n" + "\n\n".join(contexts) if contexts else ""
+
     # ── RAG-FIRST grounding: enterprise knowledge + topology before any LLM call ──
     def _ground(self, query: str, devices: List[Any]) -> str:
-        """Assemble grounding for the model: (1) your RAG knowledge FIRST, then
-        (2) live topology/neighbor facts for the devices in scope. MCP/vendor docs
-        are intentionally NOT consulted here — they are a syntax fallback only."""
+        """Assemble grounding for the model: RAG + vendor docs/MCP + live topology."""
         parts: List[str] = []
         rag = self._rag_context_for(query)
         if rag:
             parts.append(rag)
+
+        vendor_docs = self._vendor_doc_context(query, devices)
+        if vendor_docs:
+            parts.append(vendor_docs)
+
         topo = self._topology_facts(devices)
         if topo:
             parts.append(topo)
