@@ -44,6 +44,8 @@ def initialize_session_state():
         st.session_state["cp_show_mode"] = False
     if "cp_show_devs" not in st.session_state:
         st.session_state["cp_show_devs"] = False
+    if "copilot_action_state" not in st.session_state:
+        st.session_state["copilot_action_state"] = {}
 
 
 def _normalize_selected_devices(selected_devices: Any) -> List[str]:
@@ -189,6 +191,19 @@ def build_copilot_prompt(
     return f"{sys_prompt}\n\nUser question: {user_text}"
 
 
+def _resolve_target_devices(approved_devs: List[Any], selected_ips: List[str]) -> List[Any]:
+    if selected_ips:
+        selected_set = set(selected_ips)
+        return [dev for dev in approved_devs if getattr(dev, "ip", None) in selected_set]
+    return approved_devs
+
+
+def _build_intent_engine(call_ai_fn, devices: List[Any]):
+    from core.intent_engine import IntentEngine
+
+    return IntentEngine(ai_call=call_ai_fn, approved_devices=devices)
+
+
 def render_copilot_page(call_ai_fn):
     """Main copilot page renderer."""
     initialize_session_state()
@@ -197,6 +212,7 @@ def render_copilot_page(call_ai_fn):
     conversations = st.session_state.get("copilot_conversations", [])
     active_conversation = _current_conversation()
     device_context = _load_device_context()
+    action_states = st.session_state.setdefault("copilot_action_state", {})
 
     main_col, right_col = st.columns([3, 1])
 
@@ -213,11 +229,13 @@ def render_copilot_page(call_ai_fn):
                 conversations.append(new_conversation)
                 st.session_state["copilot_conversations"] = conversations
                 st.session_state["copilot_active_conversation_id"] = new_conversation["id"]
+                action_states[new_conversation["id"]] = {}
                 st.rerun()
         with col_clear:
             if st.button("🗑 Clear all", use_container_width=True, key="cp_sidebar_clear"):
                 st.session_state["copilot_conversations"] = []
                 st.session_state["copilot_active_conversation_id"] = None
+                st.session_state["copilot_action_state"] = {}
                 st.rerun()
 
         st.markdown("---")
@@ -466,6 +484,9 @@ def render_copilot_page(call_ai_fn):
         conversation["messages"].append({"role": "user", "content": user_text})
 
         selected_ips = _normalize_selected_devices(st.session_state.get("copilot_selected_devices", []))
+        action_states[conversation["id"]] = {}
+        target_devices = _resolve_target_devices(approved_devs, selected_ips)
+        scope_label = ", ".join(selected_ips) if selected_ips else "selected devices"
         _context_parts = []
         if st.session_state.get("copilot_ai_mode"):
             _context_parts.append(f"AI Mode: {st.session_state['copilot_ai_mode']}")
@@ -486,11 +507,43 @@ def render_copilot_page(call_ai_fn):
 
         with st.spinner("✨ Network Copilot is thinking…"):
             try:
-                ai_reply = call_ai_fn(_full_prompt)
+                if st.session_state.get("copilot_autonomous_mode", False):
+                    engine = _build_intent_engine(call_ai_fn, target_devices)
+                    intent_result = engine.run_autonomous(
+                        query=user_text,
+                        devices=target_devices,
+                        max_rounds=4,
+                        auto_fix=False,
+                    )
+                    ai_reply = ""
+                    if hasattr(engine, "format_for_chat"):
+                        ai_reply = engine.format_for_chat(intent_result, scope_label)
+                else:
+                    engine = _build_intent_engine(call_ai_fn, target_devices)
+                    intent_result = engine.propose_plan(query=user_text, devices=target_devices)
+                    ai_reply = ""
+                    if hasattr(engine, "format_for_chat"):
+                        ai_reply = engine.format_for_chat(intent_result, scope_label)
+                    if intent_result.plan_pending and intent_result.plan:
+                        action_states[conversation["id"]] = {
+                            "kind": "plan",
+                            "plan": intent_result.plan,
+                            "query": user_text,
+                            "devices": target_devices,
+                            "citations_md": getattr(intent_result, "citations_md", ""),
+                        }
+                    elif intent_result.needs_approval and intent_result.fix_commands:
+                        action_states[conversation["id"]] = {
+                            "kind": "fix",
+                            "result": intent_result,
+                            "query": user_text,
+                            "devices": target_devices,
+                        }
             except Exception as _e:
                 ai_reply = f"❌ Error: {str(_e)}"
 
-        conversation["messages"].append({"role": "assistant", "content": ai_reply})
+        conversation["messages"].append({"role": "assistant", "content": ai_reply or call_ai_fn(_full_prompt)})
+        st.session_state["copilot_main_input"] = ""
         st.rerun()
 
     messages = active_conversation.get("messages", [])
@@ -515,9 +568,106 @@ def render_copilot_page(call_ai_fn):
                 """, unsafe_allow_html=True)
 
         st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+
+        pending_state = action_states.get(active_conversation.get("id"), {})
+        if pending_state.get("kind") == "plan":
+            st.markdown("### 🔎 Review proposed plan")
+            from core.intent_engine import IntentEngine
+
+            st.markdown(IntentEngine.format_plan_for_chat(pending_state["plan"], pending_state.get("citations_md", "")))
+            _plan_col1, _plan_col2 = st.columns(2)
+            with _plan_col1:
+                if st.button("✅ Run Plan", key=f"cp_run_plan_{active_conversation['id']}", use_container_width=True):
+                    engine = _build_intent_engine(call_ai_fn, pending_state.get("devices", []))
+                    result = engine.execute_plan(plan=pending_state["plan"], all_devices=pending_state.get("devices", []))
+                    conversation_reply = IntentEngine.format_for_chat(result, ", ".join(_normalize_selected_devices(st.session_state.get("copilot_selected_devices", []))) or "selected devices")
+                    active_conversation["messages"].append({"role": "assistant", "content": conversation_reply})
+                    if getattr(result, "needs_followup", False) and getattr(result, "next_plan", None):
+                        action_states[active_conversation["id"]] = {
+                            "kind": "followup",
+                            "plan": result.next_plan,
+                            "query": pending_state.get("query", ""),
+                            "devices": pending_state.get("devices", []),
+                        }
+                    elif getattr(result, "needs_approval", False) and getattr(result, "fix_commands", None):
+                        action_states[active_conversation["id"]] = {
+                            "kind": "fix",
+                            "result": result,
+                            "query": pending_state.get("query", ""),
+                            "devices": pending_state.get("devices", []),
+                        }
+                    else:
+                        action_states[active_conversation["id"]] = {}
+                    st.rerun()
+            with _plan_col2:
+                if st.button("❌ Cancel", key=f"cp_cancel_plan_{active_conversation['id']}", use_container_width=True):
+                    action_states[active_conversation["id"]] = {}
+                    st.rerun()
+        elif pending_state.get("kind") == "fix":
+            st.markdown("### ⚙️ Review fix")
+            from core.intent_engine import IntentEngine
+
+            result = pending_state.get("result")
+            if result:
+                st.markdown(IntentEngine.format_for_chat(result, "selected devices"))
+            _fix_col1, _fix_col2 = st.columns(2)
+            with _fix_col1:
+                if st.button("✅ Deploy Fix", key=f"cp_deploy_fix_{active_conversation['id']}", use_container_width=True):
+                    engine = _build_intent_engine(call_ai_fn, pending_state.get("devices", []))
+                    summary_lines = []
+                    for dev in pending_state.get("devices", []):
+                        cfg = [
+                            c.replace("[CONFIG]", "").strip()
+                            for c in (getattr(result, "commands_per_device", {}) or {}).get(dev.ip, getattr(result, "fix_commands", []))
+                            if "[CONFIG]" in c
+                        ]
+                        if not cfg:
+                            continue
+                        try:
+                            engine._ssh_apply(dev, cfg)
+                            summary_lines.append(f"✅ Applied on {getattr(dev, 'hostname', None) or dev.ip}")
+                        except Exception as exc:
+                            summary_lines.append(f"⚠️ Apply failed on {getattr(dev, 'hostname', None) or dev.ip}: {exc}")
+                    if not summary_lines:
+                        summary_lines.append("ℹ️ No config commands were available to apply.")
+                    active_conversation["messages"].append({"role": "assistant", "content": "\n".join(summary_lines)})
+                    action_states[active_conversation["id"]] = {}
+                    st.rerun()
+            with _fix_col2:
+                if st.button("❌ Discard", key=f"cp_discard_fix_{active_conversation['id']}", use_container_width=True):
+                    action_states[active_conversation["id"]] = {}
+                    st.rerun()
+        elif pending_state.get("kind") == "followup":
+            st.markdown("### 🔁 Continue with next step")
+            from core.intent_engine import IntentEngine
+
+            st.markdown(IntentEngine.format_plan_for_chat(pending_state["plan"], ""))
+            _follow_col1, _follow_col2 = st.columns(2)
+            with _follow_col1:
+                if st.button("✅ Continue", key=f"cp_continue_followup_{active_conversation['id']}", use_container_width=True):
+                    engine = _build_intent_engine(call_ai_fn, pending_state.get("devices", []))
+                    result = engine.execute_plan(plan=pending_state["plan"], all_devices=pending_state.get("devices", []))
+                    active_conversation["messages"].append({"role": "assistant", "content": IntentEngine.format_for_chat(result, "selected devices")})
+                    if getattr(result, "needs_followup", False) and getattr(result, "next_plan", None):
+                        action_states[active_conversation["id"]] = {
+                            "kind": "followup",
+                            "plan": result.next_plan,
+                            "query": pending_state.get("query", ""),
+                            "devices": pending_state.get("devices", []),
+                        }
+                    else:
+                        action_states[active_conversation["id"]] = {}
+                    st.rerun()
+            with _follow_col2:
+                if st.button("❌ Stop", key=f"cp_stop_followup_{active_conversation['id']}", use_container_width=True):
+                    action_states[active_conversation["id"]] = {}
+                    st.rerun()
+
+        st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
         _clear_col1, _clear_col2, _clear_col3 = st.columns([2, 1, 2])
         with _clear_col2:
             if st.button("🗑 Clear", key="cp_clear_all", use_container_width=True):
                 active_conversation["messages"] = []
                 active_conversation["title"] = "New chat"
+                action_states[active_conversation["id"]] = {}
                 st.rerun()
