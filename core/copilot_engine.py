@@ -34,10 +34,8 @@ def initialize_session_state():
         st.session_state["copilot_uploaded_image"] = None
     if "copilot_ai_mode" not in st.session_state:
         st.session_state["copilot_ai_mode"] = None
-<<<<<<< HEAD
     if "copilot_autonomous_mode" not in st.session_state:
         st.session_state["copilot_autonomous_mode"] = False
-=======
     if "copilot_main_input" not in st.session_state:
         st.session_state["copilot_main_input"] = ""
     if "cp_show_upload" not in st.session_state:
@@ -46,7 +44,6 @@ def initialize_session_state():
         st.session_state["cp_show_mode"] = False
     if "cp_show_devs" not in st.session_state:
         st.session_state["cp_show_devs"] = False
->>>>>>> d5c8488704f44e136849677d3409b5e4744a2916
 
 
 def _normalize_selected_devices(selected_devices: Any) -> List[str]:
