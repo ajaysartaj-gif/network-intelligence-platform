@@ -10,6 +10,15 @@ import logging
 from uuid import uuid4
 from typing import List, Any
 
+
+DEFAULT_COPILOT_SUGGESTIONS = [
+    "Show me the health of all approved devices",
+    "What is BGP and when should I use it?",
+    "Generate OSPF config for R1 on 192.168.1.0/24",
+    "What does 'show ip interface brief' output tell me?",
+    "How do I configure SSH on a Cisco router?",
+]
+
 logger = logging.getLogger(__name__)
 
 
@@ -25,6 +34,8 @@ def initialize_session_state():
         st.session_state["copilot_uploaded_image"] = None
     if "copilot_ai_mode" not in st.session_state:
         st.session_state["copilot_ai_mode"] = None
+    if "copilot_autonomous_mode" not in st.session_state:
+        st.session_state["copilot_autonomous_mode"] = False
 
 
 def _normalize_selected_devices(selected_devices: Any) -> List[str]:
@@ -87,6 +98,77 @@ def load_approved_devices() -> List[Any]:
         return []
 
 
+def _load_device_context() -> str:
+    """Build a compact device inventory context for the copilot prompt."""
+    try:
+        from core.device_discovery import get_discovery_engine
+
+        disc = get_discovery_engine()
+        approved_devs = disc.get_approved() or []
+    except Exception as exc:
+        logger.warning(f"Failed to build device context: {exc}")
+        return ""
+
+    if not approved_devs:
+        return ""
+
+    lines = []
+    for device in approved_devs:
+        hostname = getattr(device, "hostname", None) or getattr(device, "name", None) or device.ip
+        device_type = getattr(device, "device_type", None) or "unknown"
+        open_ports = getattr(device, "open_ports", None) or []
+        lines.append(f"- {hostname} ({device.ip}) type={device_type} ports={open_ports}")
+
+    return "Approved network devices:\n" + "\n".join(lines)
+
+
+def build_copilot_prompt(
+    user_text: str,
+    ai_mode: str | None = None,
+    selected_devices: List[str] | None = None,
+    device_context: str = "",
+    conversation_history: List[dict] | None = None,
+    autonomous_mode: bool = False,
+) -> str:
+    """Construct a rich prompt for the copilot chat using assistant-style context."""
+    context_parts: List[str] = []
+    if ai_mode:
+        context_parts.append(f"AI Mode: {ai_mode}")
+
+    selected = selected_devices or []
+    if selected:
+        context_parts.append(f"Target devices: {', '.join(selected)}")
+
+    if device_context:
+        context_parts.append(device_context)
+
+    context_parts.append(
+        "Autonomous mode: enabled" if autonomous_mode else "Autonomous mode: disabled"
+    )
+
+    history_lines: List[str] = []
+    for message in (conversation_history or [])[-8:]:
+        role = message.get("role", "")
+        if role == "user":
+            history_lines.append(f"User: {message.get('content', '')}")
+        elif role == "assistant":
+            history_lines.append(f"Assistant: {message.get('content', '')}")
+
+    sys_prompt = (
+        "You are Network Intelligence Copilot, an expert network operations AI. "
+        "Provide technically accurate, concise responses. Include specific CLI commands when relevant. "
+        "For configuration tasks, show step-by-step guidance. Be professional and enterprise-grade."
+    )
+
+    if context_parts:
+        sys_prompt = f"{sys_prompt}\n\n" + "\n\n".join(context_parts)
+
+    if history_lines:
+        sys_prompt = f"{sys_prompt}\n\nConversation so far:\n" + "\n".join(history_lines)
+
+    return f"{sys_prompt}\n\nUser question: {user_text}"
+
+
 def render_copilot_page(call_ai_fn):
     """Main copilot page renderer."""
     initialize_session_state()
@@ -94,6 +176,7 @@ def render_copilot_page(call_ai_fn):
     approved_devs = load_approved_devices()
     conversations = st.session_state.get("copilot_conversations", [])
     active_conversation = _current_conversation()
+    device_context = _load_device_context()
 
     with st.sidebar:
         st.markdown("## 💬 Copilot History")
@@ -199,6 +282,42 @@ def render_copilot_page(call_ai_fn):
     </div>
     """, unsafe_allow_html=True)
 
+    if not active_conversation.get("messages"):
+        st.info("Use the same assistant-style context as the AI Assistant workspace: device scope, helpful prompts, and recent conversation history are all included in the response context.")
+        st.markdown("**Quick actions:**")
+        quick_cols = st.columns(3)
+        for idx, suggestion in enumerate(DEFAULT_COPILOT_SUGGESTIONS):
+            with quick_cols[idx % 3]:
+                if st.button(suggestion, key=f"cp_sg_{idx}", use_container_width=True):
+                    active_conversation.setdefault("messages", []).append({"role": "user", "content": suggestion})
+                    st.session_state["copilot_active_conversation_id"] = active_conversation["id"]
+                    st.rerun()
+
+    selected_ips = _normalize_selected_devices(st.session_state.get("copilot_selected_devices", []))
+    scope_color = "#16a34a" if selected_ips else "#dc2626"
+    if selected_ips:
+        scope_names = ", ".join(selected_ips)
+        scope_msg = f"🎯 AI Scope: {len(selected_ips)} device(s) selected → {scope_names}"
+    else:
+        scope_msg = "🛑 AI Scope: No devices selected — the copilot will stay generic until you scope it to one or more devices."
+
+    st.markdown(
+        f"<div style='background:#0c1826;border-left:3px solid {scope_color};border-radius:6px;padding:.55rem .9rem;margin:.4rem 0 .8rem 0;color:#cbd5e1;font-size:.85rem'>{scope_msg}</div>",
+        unsafe_allow_html=True,
+    )
+
+    _ctrl_col1, _ctrl_col2 = st.columns([4, 1])
+    with _ctrl_col1:
+        st.checkbox(
+            "🤖 Autonomous mode — run the diagnosis flow with verification and safe remediation guidance",
+            key="copilot_autonomous_mode",
+        )
+    with _ctrl_col2:
+        if st.button("🗑 Clear", key="cp_clear_chat", use_container_width=True):
+            active_conversation["messages"] = []
+            active_conversation["title"] = "New chat"
+            st.rerun()
+
     # ── Composer Controls ─────────────────────────────────────────────────────
     st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
     _bar_col1, _bar_col2, _bar_col3, _bar_col4, _bar_col5 = st.columns([0.55, 1.15, 1.35, 4.5, 0.8])
@@ -301,25 +420,24 @@ def render_copilot_page(call_ai_fn):
             conversation["title"] = _conversation_title_from_message(user_text)
         conversation["messages"].append({"role": "user", "content": user_text})
 
+        selected_ips = _normalize_selected_devices(st.session_state.get("copilot_selected_devices", []))
         _context_parts = []
         if st.session_state.get("copilot_ai_mode"):
             _context_parts.append(f"AI Mode: {st.session_state['copilot_ai_mode']}")
-
-        selected_ips = _normalize_selected_devices(st.session_state.get("copilot_selected_devices", []))
         if selected_ips:
             _context_parts.append(f"Target devices: {', '.join(selected_ips)}")
         if st.session_state.get("copilot_uploaded_image"):
             _img_name = st.session_state["copilot_uploaded_image"].name
             _context_parts.append(f"[Image: {_img_name}]")
 
-        _context_str = " | ".join(_context_parts)
-        _system_prompt = f"""You are Network Intelligence Copilot, an expert network operations AI.
-
-{_context_str}
-
-Provide technically accurate, concise responses. Include specific CLI commands when relevant.
-For configuration tasks, show step-by-step guidance. Be professional and enterprise-grade."""
-        _full_prompt = f"{_system_prompt}\n\nUser: {user_text}\n\nCopilot:"
+        _full_prompt = build_copilot_prompt(
+            user_text=user_text,
+            ai_mode=st.session_state.get("copilot_ai_mode"),
+            selected_devices=selected_ips,
+            device_context=device_context,
+            conversation_history=conversation["messages"][:-1],
+            autonomous_mode=st.session_state.get("copilot_autonomous_mode", False),
+        )
 
         with st.spinner("✨ Network Copilot is thinking…"):
             try:
