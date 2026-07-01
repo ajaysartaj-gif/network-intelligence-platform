@@ -9,6 +9,16 @@ import streamlit as st
 from uuid import uuid4
 from typing import List, Any
 
+DEFAULT_COPILOT_SUGGESTIONS = [
+    "Show me the health of all approved devices",
+    "What is BGP and when should I use it?",
+    "Generate OSPF config for R1 on 192.168.1.0/24",
+    "What does 'show ip interface brief' output tell me?",
+    "How do I configure SSH on a Cisco router?",
+]
+
+logger = logging.getLogger(__name__)
+
 def initialize_session_state():
     """Initialize all copilot-related session state."""
     if "copilot_conversations" not in st.session_state:
