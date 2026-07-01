@@ -10,14 +10,6 @@ import streamlit as st
 from uuid import uuid4
 from typing import List, Any
 
-DEFAULT_COPILOT_SUGGESTIONS = [
-    "Show me the health of all approved devices",
-    "What is BGP and when should I use it?",
-    "Generate OSPF config for R1 on 192.168.1.0/24",
-    "What does 'show ip interface brief' output tell me?",
-    "How do I configure SSH on a Cisco router?",
-]
-
 logger = logging.getLogger(__name__)
 
 
@@ -355,14 +347,6 @@ def render_copilot_page(call_ai_fn):
 
     if not active_conversation.get("messages"):
         st.info("Use the same assistant-style context as the AI Assistant workspace: device scope, helpful prompts, and recent conversation history are all included in the response context.")
-        st.markdown("**Quick actions:**")
-        quick_cols = st.columns(3)
-        for idx, suggestion in enumerate(DEFAULT_COPILOT_SUGGESTIONS):
-            with quick_cols[idx % 3]:
-                if st.button(suggestion, key=f"cp_sg_{idx}", use_container_width=True):
-                    active_conversation.setdefault("messages", []).append({"role": "user", "content": suggestion})
-                    st.session_state["copilot_active_conversation_id"] = active_conversation["id"]
-                    st.rerun()
 
     selected_ips = _normalize_selected_devices(st.session_state.get("copilot_selected_devices", []))
     scope_color = "#16a34a" if selected_ips else "#dc2626"
@@ -542,6 +526,7 @@ def render_copilot_page(call_ai_fn):
                             "devices": target_devices,
                             "citations_md": getattr(intent_result, "citations_md", ""),
                         }
+                        ai_reply = "✅ Proposed diagnostic plan created. Review the plan below."
                     elif intent_result.needs_approval and intent_result.fix_commands:
                         action_states[conversation["id"]] = {
                             "kind": "fix",
@@ -549,6 +534,7 @@ def render_copilot_page(call_ai_fn):
                             "query": user_text,
                             "devices": target_devices,
                         }
+                        ai_reply = "⚙️ Proposed fix generated. Review the fix below."
             except Exception as _e:
                 ai_reply = f"❌ Error: {str(_e)}"
 
