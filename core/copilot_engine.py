@@ -63,6 +63,18 @@ def _conversation_title_from_message(message: str) -> str:
     return clean[:25] + "..."
 
 
+def _conversation_snippet(conversation: dict) -> str:
+    messages = conversation.get("messages", [])
+    if not messages:
+        return "Start a new conversation"
+    last = messages[-1]
+    prefix = "You: " if last.get("role") == "user" else "Copilot: "
+    clean = " ".join(last.get("content", "").split())
+    if len(clean) <= 32:
+        return prefix + clean
+    return prefix + clean[:29] + "..."
+
+
 def _current_conversation():
     conversations = st.session_state.get("copilot_conversations", [])
     active_id = st.session_state.get("copilot_active_conversation_id")
@@ -105,16 +117,23 @@ def render_copilot_page(call_ai_fn):
 
     with st.sidebar:
         st.markdown("## 💬 Copilot History")
-        if st.button("➕ New chat", use_container_width=True):
-            new_conversation = {
-                "id": str(uuid4()),
-                "title": "New chat",
-                "messages": [],
-            }
-            conversations.append(new_conversation)
-            st.session_state["copilot_conversations"] = conversations
-            st.session_state["copilot_active_conversation_id"] = new_conversation["id"]
-            st.rerun()
+        col_new, col_clear = st.columns([1, 1])
+        with col_new:
+            if st.button("➕ New chat", use_container_width=True, key="cp_sidebar_new"):
+                new_conversation = {
+                    "id": str(uuid4()),
+                    "title": "New chat",
+                    "messages": [],
+                }
+                conversations.append(new_conversation)
+                st.session_state["copilot_conversations"] = conversations
+                st.session_state["copilot_active_conversation_id"] = new_conversation["id"]
+                st.rerun()
+        with col_clear:
+            if st.button("🗑 Clear all", use_container_width=True, key="cp_sidebar_clear"):
+                st.session_state["copilot_conversations"] = []
+                st.session_state["copilot_active_conversation_id"] = None
+                st.rerun()
 
         st.markdown("---")
         if not conversations:
@@ -123,10 +142,23 @@ def render_copilot_page(call_ai_fn):
             for conversation in conversations:
                 is_active = conversation.get("id") == active_conversation.get("id")
                 title = conversation.get("title", "New chat")
-                label = f"{'● ' if is_active else ''}{title}"
-                if st.button(label, key=f"conv_{conversation['id']}", use_container_width=True):
+                snippet = _conversation_snippet(conversation)
+                button_label = f"{'● ' if is_active else ''}{title}"
+                if st.button(button_label, key=f"conv_{conversation['id']}", use_container_width=True):
                     st.session_state["copilot_active_conversation_id"] = conversation["id"]
                     st.rerun()
+                st.markdown(f"<div style='margin:0 0 10px 12px; color:#94a3b8; font-size:12px;'>{snippet}</div>", unsafe_allow_html=True)
+
+        st.markdown("---")
+        st.markdown("### ⚙️ Current context")
+        st.markdown(f"**Mode:** {st.session_state.get('copilot_ai_mode', 'Net Config')}")
+        selected_ips = _normalize_selected_devices(st.session_state.get("copilot_selected_devices", []))
+        if selected_ips:
+            st.markdown(f"**Devices:** {', '.join(selected_ips)}")
+        else:
+            st.markdown("**Devices:** None selected")
+        if st.session_state.get("copilot_uploaded_image"):
+            st.markdown(f"**Image:** {st.session_state['copilot_uploaded_image'].name}")
 
     # ── CSS Styling ────────────────────────────────────────────────────────────
     st.markdown("""
