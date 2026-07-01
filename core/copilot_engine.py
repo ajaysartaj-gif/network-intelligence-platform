@@ -25,6 +25,14 @@ def initialize_session_state():
         st.session_state["copilot_uploaded_image"] = None
     if "copilot_ai_mode" not in st.session_state:
         st.session_state["copilot_ai_mode"] = None
+    if "copilot_main_input" not in st.session_state:
+        st.session_state["copilot_main_input"] = ""
+    if "cp_show_upload" not in st.session_state:
+        st.session_state["cp_show_upload"] = False
+    if "cp_show_mode" not in st.session_state:
+        st.session_state["cp_show_mode"] = False
+    if "cp_show_devs" not in st.session_state:
+        st.session_state["cp_show_devs"] = False
 
 
 def _normalize_selected_devices(selected_devices: Any) -> List[str]:
@@ -217,17 +225,20 @@ def render_copilot_page(call_ai_fn):
         if st.button(f"🖧 Devices ({_dev_count})", key="cp_btn_devs", use_container_width=True, help="Select devices"):
             st.session_state["cp_show_devs"] = not st.session_state.get("cp_show_devs", False)
 
-    with _bar_col4:
-        _input_text = st.text_area(
-            label="copilot_input",
-            label_visibility="collapsed",
-            placeholder="What do you want to do today in your network?",
-            key="copilot_main_input",
-            height=180,
-        )
+    with st.form(key="copilot_input_form", clear_on_submit=True):
+        with _bar_col4:
+            _input_text = st.text_area(
+                label="copilot_input",
+                label_visibility="collapsed",
+                placeholder="What do you want to do today in your network?",
+                key="copilot_main_input",
+                height=180,
+            )
 
-    with _bar_col5:
-        _send_clicked = st.button("Send", key="cp_send", use_container_width=True)
+        with _bar_col5:
+            _send_clicked = st.form_submit_button("Send", use_container_width=True)
+            _send_status = "Ready" if _input_text else "Type a message"
+            st.caption(_send_status)
 
     if st.session_state.get("cp_show_upload"):
         st.markdown("### 📸 Upload Image")
@@ -328,7 +339,6 @@ For configuration tasks, show step-by-step guidance. Be professional and enterpr
                 ai_reply = f"❌ Error: {str(_e)}"
 
         conversation["messages"].append({"role": "assistant", "content": ai_reply})
-        st.session_state["copilot_main_input"] = ""
         st.rerun()
 
     messages = active_conversation.get("messages", [])
