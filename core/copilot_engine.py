@@ -5,6 +5,7 @@ Standalone copilot chat interface with device integration,
 image upload, and AI modes. Keeps app.py clean.
 """
 
+import logging
 import streamlit as st
 from uuid import uuid4
 from typing import List, Any
