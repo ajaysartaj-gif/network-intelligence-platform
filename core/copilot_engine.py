@@ -6,7 +6,6 @@ image upload, and AI modes. Keeps app.py clean.
 """
 
 import streamlit as st
-import logging
 from uuid import uuid4
 from typing import List, Any
 
