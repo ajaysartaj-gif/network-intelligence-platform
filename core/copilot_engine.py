@@ -538,6 +538,12 @@ def render_copilot_page(call_ai_fn):
             except Exception as _e:
                 ai_reply = f"❌ Error: {str(_e)}"
 
+        pending_kind = action_states.get(conversation["id"], {}).get("kind")
+        if not ai_reply and pending_kind == "plan":
+            ai_reply = "✅ Proposed diagnostic plan created. Review the plan below."
+        elif not ai_reply and pending_kind == "fix":
+            ai_reply = "⚙️ Proposed fix generated. Review the fix below."
+
         conversation["messages"].append({"role": "assistant", "content": ai_reply or call_ai_fn(_full_prompt)})
         clear_copilot_main_input()
         st.rerun()
