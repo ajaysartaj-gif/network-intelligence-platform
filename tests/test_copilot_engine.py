@@ -1,3 +1,10 @@
+import sys
+from pathlib import Path
+
+from streamlit.errors import StreamlitAPIException
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from core.copilot_engine import build_copilot_prompt
 
 
@@ -19,3 +26,20 @@ def test_build_copilot_prompt_includes_context_and_history():
     assert "User: Check interface status" in prompt
     assert "Assistant: I will inspect it" in prompt
     assert "User question: Why is the interface down?" in prompt
+
+
+def test_clear_copilot_main_input_handles_widget_state(monkeypatch):
+    from core import copilot_engine
+
+    class FailingWidgetState(dict):
+        def __setitem__(self, key, value):
+            if key == "copilot_main_input":
+                raise StreamlitAPIException("widget state cannot be set")
+            super().__setitem__(key, value)
+
+    state = FailingWidgetState({"copilot_main_input": "hello"})
+    monkeypatch.setattr(copilot_engine.st, "session_state", state)
+
+    copilot_engine.clear_copilot_main_input()
+
+    assert "copilot_main_input" not in state

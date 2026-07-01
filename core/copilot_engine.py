@@ -46,6 +46,17 @@ def initialize_session_state():
         st.session_state["copilot_action_state"] = {}
 
 
+def clear_copilot_main_input() -> None:
+    """Clear the composer text input without tripping Streamlit widget-state guards."""
+    try:
+        st.session_state.pop("copilot_main_input", None)
+    except Exception:
+        try:
+            st.session_state["copilot_main_input"] = ""
+        except Exception:
+            pass
+
+
 def _normalize_selected_devices(selected_devices: Any) -> List[str]:
     normalized: List[str] = []
     for item in selected_devices or []:
@@ -541,7 +552,7 @@ def render_copilot_page(call_ai_fn):
                 ai_reply = f"❌ Error: {str(_e)}"
 
         conversation["messages"].append({"role": "assistant", "content": ai_reply or call_ai_fn(_full_prompt)})
-        st.session_state["copilot_main_input"] = ""
+        clear_copilot_main_input()
         st.rerun()
 
     messages = active_conversation.get("messages", [])
