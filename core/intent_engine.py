@@ -137,6 +137,8 @@ class DiagnosticPlan:
     query: str = ""
     devices: List[Dict[str, str]] = field(default_factory=list)  # [{ip, hostname, type}]
     round_index: int = 1                             # agentic diagnostic round (1-based)
+    prior_findings: List[str] = field(default_factory=list)   # confirmed facts carried across rounds
+    commands_seen: List[str] = field(default_factory=list)    # normalized cmds already executed
 
 
 @dataclass
@@ -305,17 +307,49 @@ class IntentEngine:
                 # inconclusive — keep going autonomously (approval-gated), up to max_rounds
                 next_cmds = self._parse_next_commands(result.analysis, plan, all_devices)
                 result.analysis = result.analysis.split("NEXT_STEP_REQUIRED")[0].strip()
-                if result.round_index < result.max_rounds and next_cmds:
+
+                # ── Anti-loop guard ─────────────────────────────────────────────
+                # Carry the set of commands already executed (this round + all prior
+                # rounds). If the model's proposed next step only repeats commands we
+                # have already run, another round would learn nothing — so we force a
+                # conclusion instead of looping (this is what caused the 5-round drift).
+                seen = {self._normalize_cmd(c) for c in getattr(plan, "commands_seen", [])}
+                for dr in result.device_results:
+                    for c in dr.outputs.keys():
+                        seen.add(self._normalize_cmd(c))
+                proposed = {self._normalize_cmd(c) for cs in next_cmds.values() for c in cs}
+                new_info = proposed - seen
+                at_cap = result.round_index >= result.max_rounds
+
+                if next_cmds and new_info and not at_cap:
                     result.needs_followup = True
                     result.next_plan = self._build_followup_plan(plan, result, next_cmds)
                 else:
-                    result.analysis += (
-                        f"\n\n⚠️ Reached the diagnostic round limit "
-                        f"({result.max_rounds}) without a conclusive root cause. "
-                        "Consider widening device scope or capturing `debug` output manually."
-                        if result.round_index >= result.max_rounds else
-                        "\n\n⚠️ The analysis was inconclusive but no concrete next command "
-                        "could be derived. Please refine the question or add devices.")
+                    # CONVERGE: hit the round cap, or the next step adds no new signal.
+                    # Force one terminal decision — a fix or an explicit conclusion — so
+                    # troubleshooting never dead-ends on a repeated read-only check.
+                    commit = self._final_commit(plan, result)
+                    fix_cmds, fix_expl, rb = self._extract_fix_from_analysis(commit)
+                    if fix_cmds:
+                        result.needs_approval = True
+                        result.fix_commands, result.fix_explanation, result.rollback_commands = fix_cmds, fix_expl, rb
+                        tail = commit.split("APPROVAL_REQUIRED")[0].strip()
+                        if tail:
+                            result.analysis = (result.analysis + "\n\n" + tail).strip()
+                        if KNOWLEDGE_OK and result.fix_commands and all_devices:
+                            try:
+                                result.validation_md = self._validate_fix_commands(
+                                    result.fix_commands, all_devices, result.device_results,
+                                )
+                            except Exception as ve:
+                                logger.debug(f"Validation failed: {ve}")
+                    else:
+                        why = (f"the {result.max_rounds}-round limit was reached" if at_cap
+                               else "the next checks would only repeat commands already run")
+                        result.analysis += (
+                            f"\n\n⚠️ Diagnostic loop stopped because {why}. The confirmed findings and "
+                            "root cause are above; no safe automatic fix could be derived. Re-run in "
+                            "Autonomous mode or narrow the question to target the named cause directly.")
             else:
                 # If the model returned fix commands without the approval tag, hold them for review.
                 fallback_fix_cmds, fallback_fix_expl, fallback_rollback = self._extract_fix_from_analysis(result.analysis)
@@ -414,6 +448,14 @@ class IntentEngine:
             if idx != -1:
                 hyp = result.analysis[idx:idx + 200].split("\n")[0]
                 break
+        # ── Evidence ledger: carry confirmed findings + executed commands forward so
+        # the next round builds on prior rounds instead of re-diagnosing from scratch.
+        prior_findings = list(getattr(prior_plan, "prior_findings", []))
+        prior_findings.append(self._summarize_round(result.analysis, getattr(prior_plan, "round_index", 1)))
+        commands_seen = set(getattr(prior_plan, "commands_seen", []))
+        for dr in result.device_results:
+            for c in dr.outputs.keys():
+                commands_seen.add(self._normalize_cmd(c))
         return DiagnosticPlan(
             reasoning=(f"Round {round_index}: the previous round was inconclusive. "
                        "Running targeted follow-up commands to distinguish the remaining "
@@ -425,7 +467,63 @@ class IntentEngine:
             query=prior_plan.query,
             devices=prior_plan.devices,
             round_index=round_index,
+            prior_findings=prior_findings,
+            commands_seen=sorted(commands_seen),
         )
+
+    @staticmethod
+    def _summarize_round(analysis: str, round_index: int) -> str:
+        """Condense a round's analysis into a one-line memo for the evidence ledger."""
+        root = ""
+        finds: List[str] = []
+        for raw in (analysis or "").splitlines():
+            s = raw.strip()
+            up = s.upper()
+            if up.startswith("ROOT_CAUSE") or up.startswith("ROOT CAUSE"):
+                root = s.split(":", 1)[-1].strip()
+            elif s.startswith("- [CRIT]") or s.startswith("- [WARN]"):
+                finds.append(s[2:].strip())
+        memo = f"Round {round_index}: " + ("; ".join(finds[:3]) if finds else "no critical findings")
+        if root and root.lower().strip("'\"") not in ("", "unconfirmed"):
+            memo += f" | hypothesized cause: {root}"
+        return memo
+
+    def _final_commit(self, plan: DiagnosticPlan, result: IntentResult) -> str:
+        """Force a terminal decision (fix or done) — no further rounds permitted.
+
+        Called when the loop must converge (round cap hit, or the model keeps
+        proposing checks that repeat already-run commands). Feeds ALL accumulated
+        evidence so the model commits instead of re-diagnosing.
+        """
+        prior = "\n".join(f"- {p}" for p in getattr(plan, "prior_findings", [])) or "(none recorded)"
+        sections: List[str] = []
+        for dr in result.device_results:
+            if dr.error and not dr.connected:
+                sections.append(f"=== {dr.hostname} ({dr.ip}) — SSH FAILED: {dr.error} ===")
+                continue
+            block = [f"=== {dr.hostname} ({dr.ip}) ==="]
+            for cmd, out in dr.outputs.items():
+                block.append(f"\n$ {cmd}\n{out}")
+            sections.append("\n".join(block))
+        latest = "\n\n".join(sections) if sections else "(no output)"
+
+        prompt = (
+            "You are NetBrain AI — a CCIE-level network engineer. Diagnostics have run for "
+            "several rounds and you MUST now CONVERGE. Another diagnostic round is NOT allowed.\n\n"
+            f"OPERATOR QUESTION: {plan.query}\n\n"
+            f"CONFIRMED FINDINGS ACROSS ALL ROUNDS (build on these, do not re-derive):\n{prior}\n\n"
+            f"LATEST DEVICE OUTPUT:\n\n{latest}\n\n"
+            "Give ROOT_CAUSE (one sentence) and IMPACT (one sentence), then choose EXACTLY ONE:\n"
+            "(a) A safe config change is warranted → output [CONFIG] (on <dev>) <cmd> lines, then a "
+            "line '--- ROLLBACK ---' followed by [ROLLBACK] (on <dev>) <cmd> lines, then end with: "
+            "APPROVAL_REQUIRED\n"
+            "(c) Genuinely healthy or no safe automatic change exists → end with: DIAGNOSIS_COMPLETE\n\n"
+            "You may NOT output NEXT_STEP_REQUIRED. Use ONLY non-disruptive changes; never propose "
+            "debug/clear/reload/test. Domain hint: OSPF stuck in EXSTART/EXCHANGE is the classic "
+            "signature of an interface MTU mismatch between neighbors — treat a repeated EXSTART "
+            "finding as confirmation of that class of cause rather than requesting more checks."
+        )
+        return self.ai_call(prompt) or ""
 
     def handle(
         self,
@@ -765,12 +863,26 @@ class IntentEngine:
             for dr in result.device_results])
         grounding_block = ("\n\n" + grounding + "\n") if grounding else ""
 
+        # Evidence carried from earlier rounds so the model builds on prior work
+        # instead of re-diagnosing from scratch (the cause of multi-round drift).
+        prior = getattr(plan, "prior_findings", []) or []
+        prior_block = (
+            "\nESTABLISHED IN PRIOR ROUNDS (treat as confirmed; build on these, do NOT re-discover):\n"
+            + "\n".join(f"- {p}" for p in prior) + "\n"
+        ) if prior else ""
+        seen = getattr(plan, "commands_seen", []) or []
+        seen_block = (
+            "\nCOMMANDS ALREADY RUN (they added their information — do NOT request them again):\n"
+            + ", ".join(sorted(set(seen))) + "\n"
+        ) if seen else ""
+
         prompt = (
             "You are NetBrain AI — a CCIE-level network engineer.\n"
             "You proposed a hypothesis and ran diagnostic commands. Now ANALYZE the results.\n\n"
             f"OPERATOR QUESTION: {plan.query}\n\n"
             f"YOUR INITIAL HYPOTHESIS: {plan.hypothesis}\n"
             f"YOUR EXPECTED OUTCOME: {plan.expected_outcome}\n"
+            f"{prior_block}{seen_block}"
             f"{grounding_block}\n"
             f"LIVE ROUTER OUTPUT FROM ALL DEVICES:\n\n{all_output}\n\n"
             "Analyze the output and reply in this EXACT compact format. Be terse — a "
@@ -795,7 +907,12 @@ class IntentEngine:
             "- For protocol issues, compare the discriminating values across peers (MTU, network "
             "type, timers, area, authentication, subnet/mask) and name the precise mismatch in "
             "ROOT_CAUSE. Different Router-IDs are NORMAL — never call that a fault.\n"
-            f"   (Round {plan.round_index} of {result.max_rounds}; prefer a conclusion over another round.)"
+            "- CONVERGE, don't loop: if a finding has persisted across rounds, or the prior-round "
+            "evidence above already identifies the discriminating value, do NOT pick option (b) — "
+            "commit to a fix (a) or a conclusion (c). Never request a command listed as already run. "
+            "Known signature: OSPF stuck in EXSTART/EXCHANGE almost always means an interface MTU "
+            "mismatch — confirm MTU once, then fix; do not keep re-checking neighbor state.\n"
+            f"   (Round {plan.round_index} of {result.max_rounds}; strongly prefer a conclusion over another round.)"
         )
         return prompt
 
