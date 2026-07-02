@@ -832,6 +832,15 @@ def render_copilot_page(call_ai_fn):
                                 "query": pending_state.get("query", ""),
                                 "devices": pending_state.get("devices", []),
                             }
+                        elif getattr(result, "needs_approval", False) and getattr(result, "fix_commands", None):
+                            # Final round produced a fix — surface the Deploy/Discard review
+                            # instead of silently dropping it (previously cleared to {}).
+                            action_states[active_conversation["id"]] = {
+                                "kind": "fix",
+                                "result": result,
+                                "query": pending_state.get("query", ""),
+                                "devices": pending_state.get("devices", []),
+                            }
                         else:
                             action_states[active_conversation["id"]] = {}
                         st.rerun()
