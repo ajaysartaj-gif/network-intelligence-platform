@@ -174,6 +174,53 @@ class Reasoner:
         obj = _extract_json(self.ai(prompt) or "")
         return obj if isinstance(obj, dict) else {}
 
+    # ── vendor-agnostic variants (used when a VendorGateway is present) ─────────
+    def plan_operations(self, objective: str, active_hypotheses: List[dict],
+                        grounding: str, already_run: List[str],
+                        devices: List[str], operation_catalogue: List[str]) -> List[dict]:
+        """Propose NORMALIZED operations (not vendor commands). The gateway/adapter
+        turns the chosen operation into vendor syntax."""
+        hyp_block = "\n".join(
+            f"- [{h['id']}] {h['statement']} (confidence {h['confidence']:.0%})"
+            for h in active_hypotheses)
+        cat = ", ".join(operation_catalogue)
+        run_block = ("ALREADY COLLECTED (do not repeat):\n" + ", ".join(already_run) + "\n") if already_run else ""
+        prompt = (
+            "Choose the NEXT normalized diagnostic OPERATION(s) that reduce the most "
+            "uncertainty. Do NOT write vendor commands — only normalized operations and "
+            "parameters. Prefer operations that discriminate between multiple hypotheses.\n\n"
+            f"OBJECTIVE: {objective}\n"
+            f"DEVICES (ip): {', '.join(devices)}\n"
+            f"ACTIVE HYPOTHESES:\n{hyp_block}\n"
+            f"KNOWN OPERATIONS (not exhaustive): {cat}\n"
+            f"{run_block}"
+            "\nReturn STRICT JSON only — up to 3 objects, best first:\n"
+            '[{"device": "<ip or \'all\'>", "operation": "<operation name>", '
+            '"params": {"protocol": "<optional>", "interface": "<optional>"}, '
+            '"purpose": "<what it reveals>", "tests_hypotheses": ["<hyp id>"], '
+            '"value": <0-1>}]\n'
+            "JSON array only."
+        )
+        return _as_list(_extract_json(self.ai(prompt) or ""))
+
+    def propose_intent(self, root_cause: str, objective: str,
+                      evidence_summary: str) -> dict:
+        """Propose a vendor-NEUTRAL remediation intent. No vendor syntax."""
+        ev = ("EVIDENCE:\n" + evidence_summary + "\n") if evidence_summary else ""
+        prompt = (
+            "Given the confirmed root cause, describe the remediation as a VENDOR-NEUTRAL "
+            "INTENT — a short intent name plus parameters. Do NOT write any device command "
+            "or vendor configuration; a vendor adapter will translate the intent.\n\n"
+            f"OBJECTIVE: {objective}\nCONFIRMED ROOT CAUSE: {root_cause}\n{ev}"
+            "\nReturn STRICT JSON only:\n"
+            '{"name": "<snake_case intent, e.g. ignore_protocol_mtu>", '
+            '"params": {"protocol": "<e.g. ospf>", "interface": "<optional>"}, '
+            '"rationale": "<why this resolves the root cause>"}\n'
+            "JSON object only."
+        )
+        obj = _extract_json(self.ai(prompt) or "")
+        return obj if isinstance(obj, dict) else {}
+
     def phrase_objective(self, query: str) -> str:
         prompt = (
             "Restate this network troubleshooting request as a single precise objective "

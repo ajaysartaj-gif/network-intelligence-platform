@@ -69,10 +69,16 @@ class TroubleshootingEngine:
         fix_validator: Optional[Callable[[List[str], List[Any], List[Any]], str]] = None,
         config: Optional[TSConfig] = None,
         session_store: Optional[object] = None,
+        gateway: Optional[object] = None,
     ) -> None:
         self.ai = ai_call
         self.devices = devices or []
         self.cfg = config or TSConfig()
+        # Optional Universal Vendor Adapter Framework gateway. When present, the
+        # engine reasons on normalized operations/intents and delegates ALL vendor
+        # specifics to adapters via the SDK. Branching is on gateway PRESENCE only,
+        # never on vendor — the engine stays 100% vendor-agnostic.
+        self.gateway = gateway
         self.reasoner = Reasoner(ai_call)
         self.cmd_memory = ExecutedCommandsMemory()
         self.graph = EvidenceGraph()
@@ -156,26 +162,35 @@ class TroubleshootingEngine:
                       for h in session.ranked()]
 
             already = sorted(self.cmd_memory.all_normalized())
-            candidates = self.reasoner.plan_commands(
-                session.goal.objective, active, grounding, already, device_ips)
 
-            picked = self._pick_command(candidates)
-            if not picked:
+            # 3. collect (reuse memory when possible) — Evidence Collector.
+            #    Gateway-mode uses normalized operations; otherwise raw commands.
+            evidence_label = ""
+            if self.gateway is not None:
+                outputs = self._next_evidence_via_gateway(session, active, grounding, already, device_ips)
+                evidence_label = session.next_best_command
+            else:
+                candidates = self.reasoner.plan_commands(
+                    session.goal.objective, active, grounding, already, device_ips)
+                picked = self._pick_command(candidates)
+                if picked:
+                    device_ip, command, purpose = picked
+                    session.next_best_command = f"(on {device_ip}) {command}"
+                    evidence_label = command
+                    outputs = self._collect(device_ip, command, purpose, session)
+                else:
+                    outputs = None
+
+            if not outputs:
                 session.status = ResolutionStatus.ESCALATE
                 session.escalation_reason = (
-                    "no further non-redundant read-only command adds diagnostic value "
+                    "no further non-redundant evidence adds diagnostic value "
                     "(requesting more evidence rather than guessing).")
                 break
 
-            device_ip, command, purpose = picked
-            session.next_best_command = f"(on {device_ip}) {command}"
-
-            # 3. collect (reuse memory when possible) — Evidence Collector
-            outputs = self._collect(device_ip, command, purpose, session)
-
             # 4. analyze each output — Result Analyzer
             for dev_ip, output in outputs.items():
-                self._ingest_output(command, dev_ip, output, session, hmgr, conf)
+                self._ingest_output(evidence_label, dev_ip, output, session, hmgr, conf)
 
             # 5. lifecycle + contradiction awareness
             hmgr.reap()
@@ -253,6 +268,62 @@ class TroubleshootingEngine:
             outputs[ip] = out
         return outputs
 
+    def _next_evidence_via_gateway(self, session: Session, active: List[dict],
+                                   grounding: str, already: List[str],
+                                   device_ips: List[str]) -> Optional[Dict[str, str]]:
+        """Plan a normalized Operation and collect normalized objects via the SDK.
+
+        The engine never sees a vendor command here — the adapter builds/parses it.
+        """
+        from core.vendor.operations import KNOWN_OPERATIONS, Operation  # local import: framework optional
+
+        cands = self.reasoner.plan_operations(
+            session.goal.objective, active, grounding, already, device_ips,
+            sorted(KNOWN_OPERATIONS))
+        # choose best, non-duplicate operation
+        best = None
+        for c in cands:
+            opname = (c.get("operation") or "").strip()
+            if not opname:
+                continue
+            params = c.get("params") or {}
+            sig = self._op_signature(opname, params)
+            dev = (c.get("device") or "all").strip()
+            targets = ([dev] if dev in self._ip_to_dev else list(self._ip_to_dev.keys()))
+            if all(self.cmd_memory.has(t, sig) for t in targets):
+                continue
+            best = (dev if dev in self._ip_to_dev else "all", opname, params,
+                    c.get("purpose", ""), sig, targets)
+            break
+        if not best:
+            return None
+
+        dev, opname, params, purpose, sig, targets = best
+        session.next_best_command = f"[operation] {opname} {params or ''} → {dev}"
+        outputs: Dict[str, str] = {}
+        for ip in targets:
+            device = self._ip_to_dev.get(ip)
+            if device is None:
+                continue
+            if self.cmd_memory.has(ip, sig):
+                ec = self.cmd_memory.get(ip, sig)
+                outputs[ip] = ec.output
+                session.executed.append(self.cmd_memory.record(ip, sig, ec.output, purpose, reused=True))
+                continue
+            objects, err = self.gateway.collect(device, Operation(opname, params, purpose))
+            if err is not None:
+                text = f"error[{err.error_class.value}]: {err.message}"
+            else:
+                text = "\n".join(o.summary() for o in objects) or "(no normalized objects)"
+            session.executed.append(self.cmd_memory.record(ip, sig, text, purpose, reused=False))
+            outputs[ip] = text
+        return outputs
+
+    @staticmethod
+    def _op_signature(opname: str, params: dict) -> str:
+        parts = ",".join(f"{k}={params[k]}" for k in sorted(params or {}))
+        return f"op:{opname}({parts})"
+
     def _ingest_output(self, command: str, device_ip: str, output: str,
                        session: Session, hmgr: HypothesisManager,
                        conf: ConfidenceCalculator) -> None:
@@ -301,9 +372,51 @@ class TroubleshootingEngine:
         lines = [f"{o.device} {o.subject}.{o.attribute}={o.value}" for o in session.observations[-12:]]
         return "; ".join(lines)
 
+    def _persist(self, session: Session) -> None:
+        try:
+            self.session_memory.save(session)
+        except Exception:
+            pass
+
     # ── conclusion ──────────────────────────────────────────────────────────────
     def _finish(self, session: Session, ranker: RootCauseRanker) -> TroubleshootReport:
         top = session.top()
+
+        if top and ranker.converged(session) and self.gateway is not None:
+            # Vendor-agnostic remediation: engine emits a NEUTRAL intent; the
+            # adapter (via gateway) produces vendor fix + rollback + verification.
+            from core.vendor.operations import RemediationIntent
+
+            intent_raw = self.reasoner.propose_intent(
+                top.statement, session.goal.objective, self._evidence_summary(session))
+            target_ip = (session.goal.devices[0] if session.goal.devices else "")
+            intent = RemediationIntent(
+                name=str(intent_raw.get("name", "")).strip(),
+                params=intent_raw.get("params", {}) or {},
+                target_device=target_ip,
+                rationale=intent_raw.get("rationale", ""),
+            )
+            device = self._ip_to_dev.get(target_ip) or (self.devices[0] if self.devices else None)
+            plan = self.gateway.remediate(device, intent) if (device and intent.name) else None
+            if plan and plan.supported and plan.fix_commands:
+                session.fix = Fix(
+                    root_cause=top.statement, config_commands=plan.fix_commands,
+                    rollback_commands=plan.rollback_commands,
+                    explanation=plan.explanation or intent.rationale, syntax_ok=True,
+                    validation_md=f"Vendor-validated by adapter for intent `{intent.name}`.",
+                )
+                session.verification = VerificationPlan(
+                    commands=plan.verification_commands,
+                    success_criteria="Adapter-defined verification of the applied intent.",
+                    rollback_on_fail=plan.rollback_commands,
+                )
+                session.status = ResolutionStatus.RESOLVED_PENDING_APPROVAL
+                if top.state == HypothesisState.ACTIVE:
+                    top.state = HypothesisState.CONFIRMED
+            else:
+                session.status = ResolutionStatus.LIKELY_CAUSE_PRESENT
+            self._persist(session)
+            return TroubleshootReport(session)
 
         if top and ranker.converged(session):
             # Fix Generator (approval-gated) + Verification Planner
