@@ -110,6 +110,24 @@ class VendorGateway:
             return ValidationResult(ok=False, blocked=commands, detail="no adapter")
         return adapter.validate(commands, profile)
 
+    def supports_operation(self, device: Any, operation_name: str) -> bool:
+        adapter, profile = self.resolve(device)
+        if not adapter:
+            return False
+        try:
+            return adapter.supports_operation(operation_name, profile)
+        except Exception:
+            return True
+
+    def supported_intents(self, device: Any) -> List[str]:
+        adapter, profile = self.resolve(device)
+        if not adapter:
+            return []
+        try:
+            return list(adapter.supported_intents(profile))
+        except Exception:
+            return []
+
     def translate_error(self, device: Any, raw_error: str) -> NormalizedError:
         adapter, _ = self.resolve(device)
         if not adapter:

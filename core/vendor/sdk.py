@@ -106,3 +106,7 @@ class VendorAdapter(ABC):
 
     def supports_intent(self, intent_name: str, profile: VendorProfile) -> bool:
         return True
+
+    def supported_intents(self, profile: VendorProfile) -> List[str]:
+        """Optional: enumerate remediation intents this adapter can translate."""
+        return []
