@@ -41,41 +41,94 @@ class IosLikeAdapter(VendorAdapter):
     def capabilities(self, profile: VendorProfile) -> List[str]:
         return self._caps()
 
+    # operations this adapter cannot express as a safe IOS show are declined
+    _UNSUPPORTED_OPS = {"get_telemetry", "get_inventory"}
+
+    def supports_operation(self, operation_name: str, profile: VendorProfile) -> bool:
+        return operation_name not in self._UNSUPPORTED_OPS
+
     def build_command(self, operation: Operation, profile: VendorProfile) -> List[str]:
+        if operation.name in self._UNSUPPORTED_OPS:
+            return []                                    # never emit an invalid command
         proto = str(operation.params.get("protocol", "")).lower()
         table = {
             (Op.GET_NEIGHBORS, "ospf"): "show ip ospf neighbor",
             (Op.GET_NEIGHBORS, "bgp"): "show ip bgp summary",
-            (Op.GET_INTERFACE_DETAILS, ""): "show interfaces",
+            (Op.GET_INTERFACE_DETAILS, "ospf"): "show ip ospf interface",
+            (Op.GET_INTERFACE_DETAILS, ""): "show ip interface brief",
+            (Op.GET_ROUTING_INFORMATION, "ospf"): "show ip route ospf",
             (Op.GET_ROUTING_INFORMATION, ""): "show ip route",
+            (Op.GET_CONFIGURATION, "ospf"): "show running-config | section router ospf",
             (Op.GET_CONFIGURATION, ""): "show running-config",
         }
-        cmd = table.get((operation.name, proto)) or table.get((operation.name, "")) \
-            or f"show {operation.name.replace('_', ' ')}"
+        cmd = table.get((operation.name, proto)) or table.get((operation.name, ""))
+        if not cmd:
+            return []
         return [cmd]
 
     def parse_output(self, operation: Operation, raw: Dict[str, str],
                      profile: VendorProfile) -> List[NormalizedObject]:
         ip = profile.attributes.get("ip", "")
         out: List[NormalizedObject] = []
-        if operation.name == Op.GET_NEIGHBORS:
-            for text in raw.values():
-                for line in text.splitlines():
-                    m = re.search(r"(\d+\.\d+\.\d+\.\d+)\s+\d+\s+(\w+)", line)
+        for cmd, text in (raw or {}).items():
+            low = cmd.lower()
+            t = text or ""
+            if "invalid input" in t.lower() or "% " in t[:3]:
+                continue                                  # error, not evidence
+            if "ospf neighbor" in low:
+                nbrs = []
+                for line in t.splitlines():
+                    m = re.search(r"(\d+\.\d+\.\d+\.\d+)\s+\d+\s+"
+                                  r"(FULL|2WAY|EXSTART|EXCHANGE|LOADING|INIT|ATTEMPT|DOWN)",
+                                  line, re.I)
                     if m:
+                        nbrs.append(m.group(2).upper())
                         out.append(obj(ObjectType.NEIGHBOR, device=ip, id=m.group(1),
-                                       protocol=operation.params.get("protocol", ""),
-                                       state=m.group(2)))
-        elif operation.name == Op.GET_INTERFACE_DETAILS:
-            for text in raw.values():
-                for m in re.finditer(r"(\S+)\s+is\s+(up|down).*?MTU\s+(\d+)", text, re.I | re.S):
+                                       protocol="ospf", state=m.group(2).upper()))
+                # neighbor_count == 0 is THE signal that OSPF is down on this device
+                out.append(obj(ObjectType.PROTOCOL, device=ip, id="ospf",
+                               neighbor_count=len(nbrs),
+                               adjacency=(",".join(nbrs) if nbrs else "none"),
+                               state=("up" if any(n == "FULL" for n in nbrs) else "down")))
+            elif "ospf interface" in low:
+                for block in re.split(r"\n(?=\S)", t):
+                    mi = re.match(r"(\S+) is (up|down|administratively down)", block)
+                    if not mi:
+                        continue
+                    attrs = {"status": mi.group(2).lower()}
+                    for key, pat in (("mtu", r"MTU[ :]+(\d+)"), ("area", r"Area (\S+)"),
+                                     ("network_type", r"Network Type (\w+)"),
+                                     ("ospf_state", r"State (\S+)"),
+                                     ("hello", r"Hello (\d+)"), ("dead", r"Dead (\d+)"),
+                                     ("neighbor_count", r"Neighbor Count is (\d+)")):
+                        mm = re.search(pat, block)
+                        if mm:
+                            attrs[key] = mm.group(1)
+                    out.append(obj(ObjectType.INTERFACE, device=ip, id=mi.group(1),
+                                   ospf=True, **attrs))
+            elif "interface brief" in low or low.strip() == "show interfaces":
+                for m in re.finditer(r"(\S+)\s+\S+\s+\w+\s+\w+\s+(up|down|administratively down)\s+(up|down)", t):
                     out.append(obj(ObjectType.INTERFACE, device=ip, id=m.group(1),
-                                   status=m.group(2).lower(), mtu=int(m.group(3))))
-        if not out:  # always surface something so evidence is never silently lost
-            for cmd, text in raw.items():
-                out.append(obj(ObjectType.CONFIGURATION, device=ip, id=cmd,
-                               raw=text[:500]))
+                                   status=m.group(2).lower(), line_protocol=m.group(3).lower()))
+            elif "section" in low or "running-config" in low:
+                cfg = [ln.strip() for ln in t.splitlines()
+                       if re.search(r"router ospf|network |area |passive-interface|ip ospf",
+                                    ln, re.I)]
+                if cfg:
+                    out.append(obj(ObjectType.CONFIGURATION, device=ip, id="ospf_config",
+                                   lines="; ".join(cfg[:12])))
+            elif "route" in low:
+                o_routes = sum(1 for ln in t.splitlines() if re.match(r"O[ *]", ln.strip()))
+                out.append(obj(ObjectType.ROUTE, device=ip, id="ospf_routes",
+                               protocol="ospf", count=o_routes))
+        if not out:
+            out.append(obj(ObjectType.EVENT, device=ip, id="no_data",
+                           note="no parseable data for this operation"))
         return out
+
+    def supported_intents(self, profile: VendorProfile) -> List[str]:
+        return ["ignore_protocol_mtu", "set_protocol_network_point_to_point",
+                "configure_ospf_interface", "enable_ospf_on_interface"]
 
     def build_fix(self, intent: RemediationIntent, profile: VendorProfile) -> List[str]:
         proto = str(intent.params.get("protocol", "")).lower()
@@ -87,6 +140,9 @@ class IosLikeAdapter(VendorAdapter):
                                                     f"ip {proto} network point-to-point"),
             "configure_ospf_interface": (f"interface {iface}" if iface else None,
                                          f"ip {proto} {intent.params.get('process', '1')} "
+                                         f"area {intent.params.get('area', '0')}"),
+            "enable_ospf_on_interface": (f"interface {iface}" if iface else None,
+                                         f"ip {proto or 'ospf'} {intent.params.get('process', '1')} "
                                          f"area {intent.params.get('area', '0')}"),
         }
         recipe = recipes.get(intent.name)
@@ -123,4 +179,4 @@ class IosLikeAdapter(VendorAdapter):
         return NormalizedError(ErrorClass.UNKNOWN, raw_error, raw=raw_error, source=self.name)
 
     def supports_intent(self, intent_name: str, profile: VendorProfile) -> bool:
-        return intent_name in {"ignore_protocol_mtu", "set_protocol_network_point_to_point", "configure_ospf_interface"}
+        return intent_name in {"ignore_protocol_mtu", "set_protocol_network_point_to_point", "configure_ospf_interface", "enable_ospf_on_interface"}
