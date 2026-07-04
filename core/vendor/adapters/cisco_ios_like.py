@@ -85,6 +85,9 @@ class IosLikeAdapter(VendorAdapter):
                                     f"ip {proto} mtu-ignore"),
             "set_protocol_network_point_to_point": (f"interface {iface}" if iface else None,
                                                     f"ip {proto} network point-to-point"),
+            "configure_ospf_interface": (f"interface {iface}" if iface else None,
+                                         f"ip {proto} {intent.params.get('process', '1')} "
+                                         f"area {intent.params.get('area', '0')}"),
         }
         recipe = recipes.get(intent.name)
         if not recipe:
@@ -120,4 +123,4 @@ class IosLikeAdapter(VendorAdapter):
         return NormalizedError(ErrorClass.UNKNOWN, raw_error, raw=raw_error, source=self.name)
 
     def supports_intent(self, intent_name: str, profile: VendorProfile) -> bool:
-        return intent_name in {"ignore_protocol_mtu", "set_protocol_network_point_to_point"}
+        return intent_name in {"ignore_protocol_mtu", "set_protocol_network_point_to_point", "configure_ospf_interface"}

@@ -74,6 +74,8 @@ class JunosLikeAdapter(VendorAdapter):
             "ignore_protocol_mtu": [f"set protocols {proto} area 0 interface {iface} no-check-mtu"] if proto else [],
             "set_protocol_network_point_to_point": [
                 f"set protocols {proto} area 0 interface {iface} interface-type p2p"],
+            "configure_ospf_interface": [
+                f"set protocols {proto} area {intent.params.get('area', '0')} interface {iface}"],
         }
         return recipes.get(intent.name, [])
 
@@ -97,4 +99,4 @@ class JunosLikeAdapter(VendorAdapter):
         return NormalizedError(ErrorClass.UNKNOWN, raw_error, raw=raw_error, source=self.name)
 
     def supports_intent(self, intent_name: str, profile: VendorProfile) -> bool:
-        return intent_name in {"ignore_protocol_mtu", "set_protocol_network_point_to_point"}
+        return intent_name in {"ignore_protocol_mtu", "set_protocol_network_point_to_point", "configure_ospf_interface"}
