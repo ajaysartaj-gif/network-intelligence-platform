@@ -838,8 +838,14 @@ def render_copilot_page(call_ai_fn):
                                         "devices": target_devices,
                                     }
                         else:
-                            # Design → advisory, generative persona answer.
-                            ai_reply = call_ai_fn(_full_prompt)
+                            # Design Network Architecture → AI Design Engine
+                            # (Principal-Architect: multiple options + recommendation;
+                            # never vendor CLI/config, never troubleshooting).
+                            from core.design_engine import AIDesignEngine
+
+                            dgw = _make_troubleshooting_gateway(call_ai_fn, target_devices) if target_devices else None
+                            d_eng = AIDesignEngine(ai_call=call_ai_fn, devices=target_devices, gateway=dgw)
+                            ai_reply = d_eng.run(user_text).to_markdown()
                 except Exception as _e:
                     ai_reply = f"❌ Error: {str(_e)}"
 
