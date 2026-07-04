@@ -349,6 +349,51 @@ def _make_troubleshooting_gateway(call_ai_fn, devices: List[Any]):
     return VendorGateway(send=send, hint_provider=hint_provider)
 
 
+def _extract_provided(call_ai_fn, awaiting: List[dict], answer_text: str) -> dict:
+    """Map a user's free-text answer onto the specific missing fields (ask-never-assume).
+    Returns {field: value} for whatever the answer supplies; unknown fields are skipped."""
+    import json as _json
+    fields = ", ".join(a.get("field", "") for a in awaiting)
+    prompt = (
+        "The user was asked for missing configuration inputs. Map their answer to the "
+        "fields. Only include fields the answer actually provides.\n\n"
+        f"FIELDS: {fields}\n"
+        f"QUESTIONS: {_json.dumps(awaiting)}\n"
+        f"USER ANSWER: {answer_text}\n\n"
+        'Return STRICT JSON only: {"<field>": "<value>"} — no prose.'
+    )
+    try:
+        raw = (call_ai_fn(prompt) or "").strip().replace("```json", "").replace("```", "").strip()
+        start, end = raw.find("{"), raw.rfind("}")
+        if start != -1 and end != -1:
+            data = _json.loads(raw[start:end + 1])
+            return {k: v for k, v in data.items() if v not in (None, "", "null")}
+    except Exception:
+        pass
+    return {}
+
+
+def _apply_cfg(call_ai_fn, pending_state) -> List[str]:
+    """Apply an APPROVED configuration package to each target device. Human-gated."""
+    import re as _re
+    devices = pending_state.get("devices", [])
+    ip_to_dev = {getattr(d, "ip", None): d for d in devices}
+    ie = _build_intent_engine(call_ai_fn, devices)
+    summary: List[str] = []
+    for art in pending_state.get("artifacts", []):
+        dev = ip_to_dev.get(art.get("device"))
+        cfg = [_re.sub(r"^\(on [^)]+\)\s*", "", c).strip()
+               for c in art.get("config", []) if c and c.strip()]
+        if dev is None or not cfg:
+            continue
+        try:
+            ie._ssh_apply(dev, cfg)
+            summary.append(f"✅ Applied on {getattr(dev, 'hostname', None) or dev.ip}")
+        except Exception as exc:
+            summary.append(f"⚠️ {getattr(dev, 'hostname', None) or dev.ip}: {exc}")
+    return summary or ["ℹ️ No configuration commands resolved to apply."]
+
+
 def _apply_ts_fix(call_ai_fn, pending_state) -> List[str]:
     """Apply an approved troubleshooting fix to the target device(s). Human-gated."""
     devices = pending_state.get("devices", [])
@@ -752,8 +797,49 @@ def render_copilot_page(call_ai_fn):
                                     "devices": target_devices,
                                 }
                     else:
-                        # Configure / Design → advisory, generative persona answer.
-                        ai_reply = call_ai_fn(_full_prompt)
+                        if mode_key == "configure":
+                            # Configure Network & Services → AI Configuration Engine
+                            # (business intent → normalized config → vendor artifacts →
+                            # approval). Vendor-independent; nothing deploys until approved.
+                            from core.config_engine import AIConfigurationEngine, ConfigStatus
+
+                            cfg_state = st.session_state.setdefault("cfg_state", {})
+                            conv_cfg = cfg_state.get(conversation["id"], {})
+                            gw = _make_troubleshooting_gateway(call_ai_fn, target_devices) if target_devices else None
+                            cfg_eng = AIConfigurationEngine(
+                                ai_call=call_ai_fn, devices=target_devices, gateway=gw)
+
+                            if conv_cfg.get("awaiting"):
+                                provided = dict(conv_cfg.get("provided", {}))
+                                provided.update(_extract_provided(call_ai_fn, conv_cfg["awaiting"], user_text))
+                                base_query = conv_cfg.get("query", user_text)
+                            else:
+                                provided = {}
+                                base_query = user_text
+
+                            report = cfg_eng.run(base_query, provided=provided)
+                            cs = report.session
+                            ai_reply = report.to_markdown()
+
+                            if cs.status == ConfigStatus.NEEDS_INPUT:
+                                cfg_state[conversation["id"]] = {
+                                    "query": base_query, "provided": provided,
+                                    "awaiting": [{"field": m.field, "question": m.question} for m in cs.missing],
+                                }
+                            else:
+                                cfg_state[conversation["id"]] = {}
+                                supported = [a for a in cs.artifacts if a.supported and a.config_commands]
+                                if cs.status == ConfigStatus.NEEDS_APPROVAL and supported:
+                                    action_states[conversation["id"]] = {
+                                        "kind": "cfg_approval",
+                                        "artifacts": [{"device": a.device,
+                                                       "config": a.config_commands,
+                                                       "rollback": a.rollback_commands} for a in supported],
+                                        "devices": target_devices,
+                                    }
+                        else:
+                            # Design → advisory, generative persona answer.
+                            ai_reply = call_ai_fn(_full_prompt)
                 except Exception as _e:
                     ai_reply = f"❌ Error: {str(_e)}"
 
@@ -913,6 +999,31 @@ def render_copilot_page(call_ai_fn):
                         st.rerun()
                 with _ts_col2:
                     if st.button("❌ Discard", key=f"cp_ts_discard_{active_conversation['id']}", use_container_width=True):
+                        action_states[active_conversation["id"]] = {}
+                        st.rerun()
+            elif pending_state.get("kind") == "cfg_approval":
+                st.markdown("### 📦 Approve configuration deployment")
+                st.markdown("The engine has prepared and validated this change. "
+                            "**Nothing is applied until you approve.**")
+                for art in pending_state.get("artifacts", []):
+                    st.markdown(f"**{art['device']}** — config:")
+                    if art.get("config"):
+                        st.code("\n".join(art["config"]))
+                    if art.get("rollback"):
+                        st.caption("Rollback prepared:")
+                        st.code("\n".join(art["rollback"]))
+                _cfg_col1, _cfg_col2 = st.columns(2)
+                with _cfg_col1:
+                    if st.button("✅ Approve & Deploy", key=f"cp_cfg_approve_{active_conversation['id']}", use_container_width=True):
+                        summary = _apply_cfg(call_ai_fn, pending_state)
+                        active_conversation["messages"].append(
+                            {"role": "assistant", "content": "\n".join(summary), "mode": "configure"})
+                        action_states[active_conversation["id"]] = {}
+                        st.rerun()
+                with _cfg_col2:
+                    if st.button("❌ Reject", key=f"cp_cfg_reject_{active_conversation['id']}", use_container_width=True):
+                        active_conversation["messages"].append(
+                            {"role": "assistant", "content": "❌ Configuration rejected — nothing was applied.", "mode": "configure"})
                         action_states[active_conversation["id"]] = {}
                         st.rerun()
 
