@@ -24,6 +24,7 @@ class IosLikeAdapter(VendorAdapter):
 
     def detect(self, probe: DeviceProbe) -> VendorProfile:
         blob = " ".join(str(v) for v in probe.hints.values())
+        blob = re.sub(r"[^a-zA-Z0-9]+", " ", blob)   # cisco_ios -> "cisco ios"
         m = _SIGNATURE.search(blob)
         conf = 0.9 if m else 0.0
         ver = ""
@@ -81,7 +82,7 @@ class IosLikeAdapter(VendorAdapter):
         iface = intent.params.get("interface", "")
         recipes = {
             "ignore_protocol_mtu": (f"interface {iface}" if iface else None,
-                                    f"{proto} mtu-ignore" if proto == "ospf" else f"ip {proto} mtu-ignore"),
+                                    f"ip {proto} mtu-ignore"),
             "set_protocol_network_point_to_point": (f"interface {iface}" if iface else None,
                                                     f"ip {proto} network point-to-point"),
         }

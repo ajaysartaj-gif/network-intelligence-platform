@@ -24,6 +24,7 @@ class JunosLikeAdapter(VendorAdapter):
 
     def detect(self, probe: DeviceProbe) -> VendorProfile:
         blob = " ".join(str(v) for v in probe.hints.values())
+        blob = re.sub(r"[^a-zA-Z0-9]+", " ", blob)   # juniper_junos -> "juniper junos"
         conf = 0.9 if _SIGNATURE.search(blob) else 0.0
         return VendorProfile(vendor="junos-like", os="junos-like", confidence=conf,
                              capabilities=self._caps(),
