@@ -290,6 +290,12 @@ class TroubleshootingEngine:
             sig = self._op_signature(opname, params)
             dev = (c.get("device") or "all").strip()
             targets = ([dev] if dev in self._ip_to_dev else list(self._ip_to_dev.keys()))
+            # skip operations no target adapter can express (avoids invalid commands
+            # like an unsupported 'get_telemetry' being retried forever)
+            targets = [t for t in targets
+                       if self.gateway.supports_operation(self._ip_to_dev.get(t), opname)]
+            if not targets:
+                continue
             if all(self.cmd_memory.has(t, sig) for t in targets):
                 continue
             best = (dev if dev in self._ip_to_dev else "all", opname, params,
@@ -327,6 +333,11 @@ class TroubleshootingEngine:
     def _ingest_output(self, command: str, device_ip: str, output: str,
                        session: Session, hmgr: HypothesisManager,
                        conf: ConfidenceCalculator) -> None:
+        low = (output or "").lower()
+        if (not output.strip() or output.startswith("error[")
+                or "invalid input" in low or "no parseable data" in low
+                or "% " in output[:3]):
+            return                                        # errors are not evidence
         active = [{"id": h.id, "statement": h.statement} for h in session.active_hypotheses()]
         parsed = self.reasoner.analyze(command, device_ip, output, active)
 
@@ -387,16 +398,22 @@ class TroubleshootingEngine:
             # adapter (via gateway) produces vendor fix + rollback + verification.
             from core.vendor.operations import RemediationIntent
 
-            intent_raw = self.reasoner.propose_intent(
-                top.statement, session.goal.objective, self._evidence_summary(session))
             target_ip = (session.goal.devices[0] if session.goal.devices else "")
+            device = self._ip_to_dev.get(target_ip) or (self.devices[0] if self.devices else None)
+            allowed = []
+            try:
+                if device is not None:
+                    allowed = self.gateway.supported_intents(device)
+            except Exception:
+                allowed = []
+            intent_raw = self.reasoner.propose_intent(
+                top.statement, session.goal.objective, self._evidence_summary(session), allowed)
             intent = RemediationIntent(
                 name=str(intent_raw.get("name", "")).strip(),
                 params=intent_raw.get("params", {}) or {},
                 target_device=target_ip,
                 rationale=intent_raw.get("rationale", ""),
             )
-            device = self._ip_to_dev.get(target_ip) or (self.devices[0] if self.devices else None)
             plan = self.gateway.remediate(device, intent) if (device and intent.name) else None
             if plan and plan.supported and plan.fix_commands:
                 session.fix = Fix(

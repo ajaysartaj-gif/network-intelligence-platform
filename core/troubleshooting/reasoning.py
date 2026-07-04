@@ -204,14 +204,18 @@ class Reasoner:
         return _as_list(_extract_json(self.ai(prompt) or ""))
 
     def propose_intent(self, root_cause: str, objective: str,
-                      evidence_summary: str) -> dict:
+                      evidence_summary: str, allowed_intents: Optional[List[str]] = None) -> dict:
         """Propose a vendor-NEUTRAL remediation intent. No vendor syntax."""
         ev = ("EVIDENCE:\n" + evidence_summary + "\n") if evidence_summary else ""
+        allow = ""
+        if allowed_intents:
+            allow = ("\nChoose the intent name from this supported set (pick the closest fit): "
+                     + ", ".join(allowed_intents) + "\n")
         prompt = (
             "Given the confirmed root cause, describe the remediation as a VENDOR-NEUTRAL "
             "INTENT — a short intent name plus parameters. Do NOT write any device command "
             "or vendor configuration; a vendor adapter will translate the intent.\n\n"
-            f"OBJECTIVE: {objective}\nCONFIRMED ROOT CAUSE: {root_cause}\n{ev}"
+            f"OBJECTIVE: {objective}\nCONFIRMED ROOT CAUSE: {root_cause}\n{ev}{allow}"
             "\nReturn STRICT JSON only:\n"
             '{"name": "<snake_case intent, e.g. ignore_protocol_mtu>", '
             '"params": {"protocol": "<e.g. ospf>", "interface": "<optional>"}, '
