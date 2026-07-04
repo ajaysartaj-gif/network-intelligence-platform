@@ -319,6 +319,58 @@ def _build_intent_engine(call_ai_fn, devices: List[Any]):
     return IntentEngine(ai_call=call_ai_fn, approved_devices=devices)
 
 
+def _make_troubleshooting_gateway(call_ai_fn, devices: List[Any]):
+    """Build a VendorGateway wired to the platform SSH transport + detection hints.
+
+    The transport reuses IntentEngine's read-only SSH collector; the hint provider
+    exposes whatever identity attributes a device carries so adapters can detect
+    the vendor. Unknown devices fall back to the generic adapter automatically.
+    """
+    from core.vendor import VendorGateway
+
+    ie = _build_intent_engine(call_ai_fn, devices)
+
+    def send(device, cmds):
+        try:
+            dr = ie._ssh_collect(device, list(cmds))
+            return dict(dr.outputs)
+        except Exception as exc:
+            return {c: f"ERROR: {exc}" for c in cmds}
+
+    def hint_provider(device):
+        hints = {}
+        for attr in ("device_type", "hostname", "os", "vendor", "platform",
+                     "model", "sys_descr", "description", "version"):
+            val = getattr(device, attr, None)
+            if val:
+                hints[attr] = val
+        return hints
+
+    return VendorGateway(send=send, hint_provider=hint_provider)
+
+
+def _apply_ts_fix(call_ai_fn, pending_state) -> List[str]:
+    """Apply an approved troubleshooting fix to the target device(s). Human-gated."""
+    devices = pending_state.get("devices", [])
+    target_ip = pending_state.get("target_ip", "")
+    ie = _build_intent_engine(call_ai_fn, devices)
+    # fix commands are plain config lines; strip any "(on X)" prefix defensively
+    import re as _re
+    cfg = [_re.sub(r"^\(on [^)]+\)\s*", "", c).strip()
+           for c in pending_state.get("fix_commands", []) if c and c.strip()]
+    targets = [d for d in devices if getattr(d, "ip", None) == target_ip] or devices
+    summary: List[str] = []
+    for dev in targets:
+        if not cfg:
+            continue
+        try:
+            ie._ssh_apply(dev, cfg)
+            summary.append(f"✅ Applied on {getattr(dev, 'hostname', None) or dev.ip}")
+        except Exception as exc:
+            summary.append(f"⚠️ {getattr(dev, 'hostname', None) or dev.ip}: {exc}")
+    return summary or ["ℹ️ No config commands resolved from the fix."]
+
+
 def _render_assistant_message(content: str, mode_key: Optional[str]) -> None:
     """Render an assistant bubble with a mode badge + accent so replies are distinguishable."""
     mode = get_mode(mode_key) if mode_key else None
@@ -670,45 +722,35 @@ def render_copilot_page(call_ai_fn):
             with st.spinner(f"{mode['emoji']} Copilot ({mode['short']} mode) is thinking…"):
                 try:
                     if mode["device_facing"]:
-                        # Troubleshoot & Fix → run the diagnostic loop, STRICTLY on selected devices.
+                        # Troubleshoot & Fix → confidence-driven engine, vendor-agnostic
+                        # via the Universal Vendor Adapter Framework, STRICTLY on selected devices.
                         if not target_devices:
                             ai_reply = (
                                 "🛑 **Troubleshoot & Fix runs directly on your devices**, so I won't "
                                 "touch anything until you scope it. Open **🖧 Devices** and select at "
                                 "least one approved device, then send your request again."
                             )
-                        elif st.session_state.get("copilot_autonomous_mode", False):
-                            engine = _build_intent_engine(call_ai_fn, target_devices)
-                            intent_result = engine.run_autonomous(
-                                query=user_text,
-                                devices=target_devices,
-                                max_rounds=4,
-                                auto_fix=False,
-                            )
-                            if hasattr(engine, "format_for_chat"):
-                                ai_reply = engine.format_for_chat(intent_result, scope_label)
                         else:
-                            engine = _build_intent_engine(call_ai_fn, target_devices)
-                            intent_result = engine.propose_plan(query=user_text, devices=target_devices)
-                            if hasattr(engine, "format_for_chat"):
-                                ai_reply = engine.format_for_chat(intent_result, scope_label)
-                            if intent_result.plan_pending and intent_result.plan:
+                            from core.troubleshooting import TroubleshootingEngine, TSConfig
+                            gw = _make_troubleshooting_gateway(call_ai_fn, target_devices)
+                            tse = TroubleshootingEngine(
+                                ai_call=call_ai_fn, devices=target_devices, gateway=gw,
+                                config=TSConfig(max_steps=6),
+                            )
+                            report = tse.run(user_text)
+                            ai_reply = report.to_markdown()
+                            s = report.session
+                            if s.fix and s.fix.config_commands:
+                                target_ip = s.goal.devices[0] if (s.goal and s.goal.devices) else ""
                                 action_states[conversation["id"]] = {
-                                    "kind": "plan",
-                                    "plan": intent_result.plan,
-                                    "query": user_text,
-                                    "devices": target_devices,
-                                    "citations_md": getattr(intent_result, "citations_md", ""),
-                                }
-                                ai_reply = "✅ Proposed diagnostic plan created. Review the plan below."
-                            elif intent_result.needs_approval and intent_result.fix_commands:
-                                action_states[conversation["id"]] = {
-                                    "kind": "fix",
-                                    "result": intent_result,
-                                    "query": user_text,
+                                    "kind": "ts_fix",
+                                    "root_cause": s.fix.root_cause,
+                                    "fix_commands": list(s.fix.config_commands),
+                                    "rollback_commands": list(s.fix.rollback_commands),
+                                    "verification_commands": list(s.verification.commands) if s.verification else [],
+                                    "target_ip": target_ip,
                                     "devices": target_devices,
                                 }
-                                ai_reply = "⚙️ Proposed fix generated. Review the fix below."
                     else:
                         # Configure / Design → advisory, generative persona answer.
                         ai_reply = call_ai_fn(_full_prompt)
@@ -846,6 +888,31 @@ def render_copilot_page(call_ai_fn):
                         st.rerun()
                 with _follow_col2:
                     if st.button("❌ Stop", key=f"cp_stop_followup_{active_conversation['id']}", use_container_width=True):
+                        action_states[active_conversation["id"]] = {}
+                        st.rerun()
+            elif pending_state.get("kind") == "ts_fix":
+                st.markdown("### ⚙️ Review recommended fix")
+                if pending_state.get("root_cause"):
+                    st.markdown(f"**Confirmed root cause:** {pending_state['root_cause']}")
+                st.markdown("**Fix (vendor syntax from adapter):**")
+                st.code("\n".join(pending_state.get("fix_commands", [])))
+                if pending_state.get("rollback_commands"):
+                    st.markdown("**Rollback:**")
+                    st.code("\n".join(pending_state["rollback_commands"]))
+                if pending_state.get("verification_commands"):
+                    st.markdown("**Verification (run after apply):**")
+                    st.code("\n".join(pending_state["verification_commands"]))
+                st.caption("⚠️ Nothing is applied until you approve.")
+                _ts_col1, _ts_col2 = st.columns(2)
+                with _ts_col1:
+                    if st.button("✅ Deploy Fix", key=f"cp_ts_deploy_{active_conversation['id']}", use_container_width=True):
+                        summary = _apply_ts_fix(call_ai_fn, pending_state)
+                        active_conversation["messages"].append(
+                            {"role": "assistant", "content": "\n".join(summary), "mode": "troubleshoot"})
+                        action_states[active_conversation["id"]] = {}
+                        st.rerun()
+                with _ts_col2:
+                    if st.button("❌ Discard", key=f"cp_ts_discard_{active_conversation['id']}", use_container_width=True):
                         action_states[active_conversation["id"]] = {}
                         st.rerun()
 
