@@ -1,0 +1,19 @@
+# VENDOR: juniper_junos   PROTOCOL: ospf
+# THIS FILE IS THE ENTIRE COST OF ADDING JUNIPER OSPF SUPPORT.
+# No adapter code, no strategy code, no engine code was written or changed.
+# The generic engine reads OSPF on Junos because this guide exists.
+
+ENUMERATE ospf_adjacency :: show ospf neighbor
+
+OBSERVE ospf_hello_interval :: show ospf interface {ctx} extensive :: regex :: Hello (\d+)
+OBSERVE ospf_dead_interval  :: show ospf interface {ctx} extensive :: regex :: Dead (\d+)
+OBSERVE ospf_area_id        :: show ospf interface {ctx} extensive :: regex :: Area (\S+?)[,\n]
+OBSERVE ospf_network_type   :: show ospf interface {ctx} extensive :: regex :: Type (\w+)
+OBSERVE ospf_router_id      :: show ospf interface {ctx} extensive :: regex :: Router ID (\S+?)[,\n]
+OBSERVE ospf_auth           :: show ospf interface {ctx} extensive :: regex :: Auth type (\w+)
+OBSERVE ospf_network_mask   :: show ospf interface {ctx} extensive :: regex :: Mask (\S+?)[,\n]
+OBSERVE interface_mtu       :: show ospf interface {ctx} extensive :: regex :: MTU (\d+)
+
+REMEDIATE ospf_hello_interval :: set protocols ospf area {area} interface {ctx} hello-interval {val}
+REMEDIATE ospf_dead_interval  :: set protocols ospf area {area} interface {ctx} dead-interval {val}
+REMEDIATE interface_mtu       :: set interfaces {ctx} mtu {val}

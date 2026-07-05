@@ -1,1 +1,24 @@
+# VENDOR: cisco_ios   PROTOCOL: ospf
+# Stand-in for the Cisco IOS OSPF command reference. In production the resolver
+# RETRIEVES this (RAG) and a grounded-AI pass derives the command + extraction
+# from the doc's example output. Adding a vendor = adding a file like this.
+#
+# Format: OBSERVE <read_intent> :: <command> :: <method> :: <spec>
+#         REMEDIATE <param> :: <config template>
+#         ENUMERATE <relationship_type> :: <command>
 
+ENUMERATE ospf_adjacency :: show ip ospf neighbor
+
+OBSERVE ospf_hello_interval :: show ip ospf interface {ctx} :: regex :: Hello (\d+)
+OBSERVE ospf_dead_interval  :: show ip ospf interface {ctx} :: regex :: Dead (\d+)
+OBSERVE ospf_area_id        :: show ip ospf interface {ctx} :: regex :: Area (\S+?)[,\n]
+OBSERVE ospf_network_type   :: show ip ospf interface {ctx} :: regex :: Network Type (\w+)
+OBSERVE ospf_router_id      :: show ip ospf interface {ctx} :: regex :: Router ID (\S+?)[,\n]
+OBSERVE ospf_auth           :: show ip ospf interface {ctx} :: regex :: Authentication (\w+)
+OBSERVE ospf_network_mask   :: show ip ospf interface {ctx} :: regex :: Netmask (\S+?)[,\n]
+OBSERVE interface_mtu       :: show interface {ctx} :: regex :: MTU (\d+) bytes
+
+REMEDIATE ospf_hello_interval :: interface {ctx}\n ip ospf hello-interval {val}
+REMEDIATE ospf_dead_interval  :: interface {ctx}\n ip ospf dead-interval {val}
+REMEDIATE interface_mtu       :: interface {ctx}\n mtu {val}
+REMEDIATE ospf_network_type   :: interface {ctx}\n ip ospf network {val}
