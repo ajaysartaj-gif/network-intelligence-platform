@@ -1,1 +1,19 @@
+# DOC: net-knowledge-note  SECTION: hsrp-pairing
+# REL: hsrp_pairing
+# Same file shape as OSPF. Adding HSRP to the tool is THIS FILE plus the HSRP
+# read_intents in the adapter's PARAM_MAP. No strategy/engine code changes.
 
+ENUMERATE: list HSRP groups per interface with active/standby state and peer
+HEALTHY: Active, Standby
+
+For two routers to share an HSRP group correctly, these must agree across the pair:
+
+PARAM: hsrp_group_number | must_equal | true | hsrp_group_number | routers form separate groups; no failover; both may go Active |
+PARAM: hsrp_virtual_ip | must_equal | true | hsrp_virtual_ip | clients get inconsistent gateway; forwarding breaks on failover |
+PARAM: hsrp_version | must_equal | true | hsrp_version | v1/v2 speakers ignore each other; both go Active (dual-active) |
+PARAM: hsrp_auth | must_equal | true | hsrp_auth | authentication mismatch is logged; peers reject each other |
+PARAM: hsrp_timers | must_equal | false | hsrp_timers | asymmetric hold/hello causes unnecessary preemption and flapping |
+
+And one value must be DISTINCT so the election has a winner:
+
+PARAM: hsrp_priority | must_differ | false | hsrp_priority | equal priority makes the election tie-break on IP, which is fragile/undeterministic in intent |

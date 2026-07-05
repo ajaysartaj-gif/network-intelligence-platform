@@ -1,0 +1,29 @@
+# DOC: net-knowledge-note  SECTION: ospf-adjacency
+# REL: ospf_adjacency
+# Vendor-neutral note, written in-house, summarizing the conditions two OSPF
+# speakers must satisfy on a shared link to form and hold an adjacency.
+# Real deployments point the retriever at RFC 2328 / vendor OSPF guides instead;
+# this file exists so the pipeline has something to retrieve offline.
+#
+# The ENUMERATE / HEALTHY / PARAM tags below are what the offline StubExtractor
+# keys on. The Groq extractor does not need them -- it reads the prose.
+
+ENUMERATE: list OSPF neighbors with their adjacency state and peer address
+HEALTHY: FULL, 2WAY
+
+For two routers to become OSPF neighbors on a link, several interface-level
+values must agree end to end. If any of the following disagree, the adjacency
+either never forms or fails to reach FULL:
+
+PARAM: ospf_area_id | must_equal | true | ospf_area_id | neighbor never forms; area mismatch is logged and hellos are dropped |
+PARAM: ospf_hello_interval | must_equal | true | ospf_hello_interval | adjacency does not progress past INIT; neighbor is intermittent or flaps |
+PARAM: ospf_dead_interval | must_equal | true | ospf_dead_interval | adjacency does not progress past INIT; neighbor is intermittent or flaps |
+PARAM: ospf_network_mask | must_equal | true | ospf_network_mask | on broadcast/NBMA segments the neighbor is rejected and stays stuck | ospf_network_type != point_to_point
+PARAM: interface_mtu | must_equal | true | interface_mtu | adjacency hangs in EXSTART/EXCHANGE because the database-description exchange fails |
+PARAM: ospf_auth | must_equal | true | ospf_auth | authentication failures are logged and no adjacency forms |
+PARAM: ospf_network_type | must_equal | false | ospf_network_type | DR/BDR election and default timers diverge, causing adjacency or forwarding anomalies |
+
+One value must instead be DISTINCT between the two ends. Two routers that share
+the same OSPF Router ID create instability:
+
+PARAM: ospf_router_id | must_differ | true | ospf_router_id | duplicate router-id causes LSA and adjacency instability across the area |
