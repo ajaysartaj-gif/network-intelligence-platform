@@ -1,0 +1,258 @@
+diff --git a/core/troubleshooting/engine.py b/core/troubleshooting/engine.py
+index 253c2d7..d79c6df 100644
+--- a/core/troubleshooting/engine.py
++++ b/core/troubleshooting/engine.py
+@@ -25,7 +25,9 @@ from dataclasses import dataclass
+ from typing import Any, Callable, Dict, List, Optional
+ 
+ from .evidence_graph import EvidenceGraph
+-from .hypotheses import ConfidenceCalculator, HypothesisManager, RootCauseRanker
++from .hypotheses import (
++    ConfidenceCalculator, HypothesisManager, RootCauseRanker, content_tokens,
++)
+ from .memory import ExecutedCommandsMemory, SessionMemory, normalize_command
+ from .models import (
+     Effect, Evidence, Fix, Goal, HypothesisState, Observation, ResolutionStatus,
+@@ -83,6 +85,7 @@ class TroubleshootingEngine:
+         self.cmd_memory = ExecutedCommandsMemory()
+         self.graph = EvidenceGraph()
+         self.session_memory = SessionMemory(session_store)
++        self._unstable_keys: set = set()   # fact keys with inconsistent values
+ 
+         self._intent = None
+         if collector is None or validator is None or grounder is None or fix_validator is None:
+@@ -142,8 +145,15 @@ class TroubleshootingEngine:
+         conf = ConfidenceCalculator()
+         ranker = RootCauseRanker()
+ 
+-        # 1. seed hypotheses
+-        for h in self.reasoner.generate_hypotheses(session.goal.objective, grounding, "", []):
++        # 0. EVIDENCE-FIRST: observe the objective's own state with one read-only
++        #    probe round BEFORE forming any hypothesis, so causes are anchored in
++        #    what was seen — not in priors. (Fixes the "first incorrect decision":
++        #    hypotheses were generated from an empty evidence argument.)
++        self._observe_initial_state(session, hmgr, conf, grounding, device_ips)
++
++        # 1. seed hypotheses FROM the objective + the state just observed
++        for h in self.reasoner.generate_hypotheses(
++                session.goal.objective, grounding, self._evidence_summary(session), []):
+             hmgr.add(h.get("statement", ""), h.get("rationale", ""),
+                      h.get("discriminating_signals", []), float(h.get("prior", 0.2) or 0.2))
+ 
+@@ -158,7 +168,8 @@ class TroubleshootingEngine:
+         # 2. confidence-driven loop
+         for _step in range(self.cfg.max_steps):
+             session.steps_taken += 1
+-            active = [{"id": h.id, "statement": h.statement, "confidence": h.confidence}
++            active = [{"id": h.id, "statement": h.statement, "confidence": h.confidence,
++                       "discriminating_signals": h.discriminating_signals}
+                       for h in session.ranked()]
+ 
+             already = sorted(self.cmd_memory.all_normalized())
+@@ -194,9 +205,11 @@ class TroubleshootingEngine:
+ 
+             # 5. lifecycle + contradiction awareness
+             hmgr.reap()
+-            contradictions = self.graph.contradictions()
+-            if contradictions:
+-                logger.info("Evidence contradictions noted: %s", contradictions)
++            # Consume the contradiction signal instead of only logging it: fact
++            # keys with inconsistent values must not RAISE confidence (Q5 fix).
++            self._unstable_keys = set(self.graph.contradictory_keys())
++            if self._unstable_keys:
++                logger.info("Unstable fact keys (support suppressed): %s", self._unstable_keys)
+ 
+             top = session.top()
+             best = top.confidence if top else 0.0
+@@ -363,6 +376,17 @@ class TroubleshootingEngine:
+                     effect = Effect.NEUTRAL
+                 if effect == Effect.NEUTRAL:
+                     continue
++                # EVIDENCE GATE: an observation may move a hypothesis ONLY if it
++                # concerns that hypothesis's own declared discriminating signal.
++                # This is what stops an unrelated fact (interface up) from
++                # inflating an unrelated hypothesis (network type). Fail-open when
++                # a hypothesis declared no signals, so nothing is silently starved.
++                if not self._obs_matches_signals(obs, hyp.discriminating_signals):
++                    continue
++                # Never RAISE confidence from a fact that is inconsistent across
++                # reads (flapping / stale) — consumes the contradiction signal.
++                if effect == Effect.SUPPORT and obs.key in self._unstable_keys:
++                    continue
+                 weight = float(imp.get("weight", 0.5) or 0.5)
+                 ev = Evidence(observation_id=obs.id, hypothesis_id=hyp.id,
+                               effect=effect, weight=weight, reason=str(imp.get("reason", "")))
+@@ -371,6 +395,19 @@ class TroubleshootingEngine:
+             # only bind impacts once (to the first/most-specific fact of this analysis)
+             parsed["impacts"] = []
+ 
++    @staticmethod
++    def _obs_matches_signals(obs, signals) -> bool:
++        """True if this observation concerns one of the hypothesis's declared
++        discriminating signals. Matches on SUBJECT tokens (ospf/mtu/area/neighbor
++        …), not on generic attribute words (state/value/up), so 'interface up'
++        does not spuriously match 'ospf neighbor state'."""
++        if not signals:
++            return True
++        ot = content_tokens(f"{getattr(obs, 'subject', '')} {getattr(obs, 'attribute', '')}")
++        if not ot:
++            return True
++        return any(ot & content_tokens(sig) for sig in signals)
++
+     def _widen(self, session: Session, hmgr: HypothesisManager, grounding: str) -> None:
+         ev_summary = self._evidence_summary(session)
+         existing = [h.statement for h in session.hypotheses]
+@@ -379,6 +416,33 @@ class TroubleshootingEngine:
+             hmgr.add(h.get("statement", ""), h.get("rationale", ""),
+                      h.get("discriminating_signals", []), float(h.get("prior", 0.15) or 0.15))
+ 
++    def _observe_initial_state(self, session: Session, hmgr: HypothesisManager,
++                              conf: ConfidenceCalculator, grounding: str,
++                              device_ips: List[str]) -> None:
++        """One read-only probe round derived from the OBJECTIVE (no hypotheses yet)
++        so the first hypotheses are anchored in observed state. Reuses the same
++        plan/collect/analyze path as the main loop — no new capability."""
++        already = sorted(self.cmd_memory.all_normalized())
++        try:
++            if self.gateway is not None:
++                outputs = self._next_evidence_via_gateway(session, [], grounding, already, device_ips)
++            else:
++                candidates = self.reasoner.plan_commands(
++                    session.goal.objective, [], grounding, already, device_ips)
++                picked = self._pick_command(candidates)
++                if not picked:
++                    return
++                device_ip, command, purpose = picked
++                session.next_best_command = f"(on {device_ip}) {command}"
++                outputs = self._collect(device_ip, command, purpose, session)
++        except Exception:
++            return
++        for dev_ip, output in (outputs or {}).items():
++            # no active hypotheses yet -> this records OBSERVATIONS only; nothing
++            # is bound as evidence until hypotheses exist.
++            self._ingest_output(session.next_best_command or "state",
++                                dev_ip, output, session, hmgr, conf)
++
+     def _evidence_summary(self, session: Session) -> str:
+         lines = [f"{o.device} {o.subject}.{o.attribute}={o.value}" for o in session.observations[-12:]]
+         return "; ".join(lines)
+diff --git a/core/troubleshooting/evidence_graph.py b/core/troubleshooting/evidence_graph.py
+index 0a2857e..2005469 100644
+--- a/core/troubleshooting/evidence_graph.py
++++ b/core/troubleshooting/evidence_graph.py
+@@ -58,6 +58,13 @@ class EvidenceGraph:
+                 out.append(f"{key} has conflicting values: {sorted(distinct)}")
+         return out
+ 
++    def contradictory_keys(self) -> List[str]:
++        """Fact keys whose value is inconsistent across reads (flapping / stale /
++        genuinely conflicting). Confidence must not be *raised* from an unstable
++        fact — the engine consumes this to suppress SUPPORT from these keys."""
++        return [k for k, vals in self._facts.items()
++                if len({v for v, _ in vals}) > 1]
++
+     def summary(self) -> str:
+         devs = sum(1 for n in self.nodes.values() if n["type"] == "device")
+         facts = sum(1 for n in self.nodes.values() if n["type"] == "fact")
+diff --git a/core/troubleshooting/hypotheses.py b/core/troubleshooting/hypotheses.py
+index a2f90db..2d9de4d 100644
+--- a/core/troubleshooting/hypotheses.py
++++ b/core/troubleshooting/hypotheses.py
+@@ -13,12 +13,32 @@ move is traceable to an evidence id.
+ """
+ from __future__ import annotations
+ 
++import re
+ from typing import List, Optional
+ 
+ from .models import (
+     ConfidenceDelta, Effect, Evidence, Hypothesis, HypothesisState, Observation,
+ )
+ 
++# Generic tokens carry no diagnostic subject, so they must not create spurious
++# matches between an observation and a hypothesis's discriminating signal, nor
++# spurious similarity between two hypotheses.
++_STOP = {"state", "value", "status", "up", "down", "id", "name", "count",
++         "the", "is", "on", "of", "a", "an", "to", "for", "not", "no", "issue",
++         "problem", "or", "and", "configuration", "configured", "misconfigured"}
++
++
++def content_tokens(s: str) -> set:
++    return set(re.findall(r"[a-z0-9]+", (s or "").lower())) - _STOP
++
++
++def _similar(a: str, b: str, threshold: float = 0.6) -> bool:
++    """Conservative near-duplicate test on subject tokens (Jaccard)."""
++    ta, tb = content_tokens(a), content_tokens(b)
++    if not ta or not tb:
++        return False
++    return len(ta & tb) / len(ta | tb) >= threshold
++
+ 
+ class ConfidenceCalculator:
+     # how many log-odds units a unit-weight piece of evidence is worth
+@@ -54,10 +74,16 @@ class HypothesisManager:
+         statement = (statement or "").strip()
+         if not statement:
+             return None
+-        # de-duplicate near-identical hypotheses
++        # de-duplicate exact AND near-identical hypotheses. Two phrasings of the
++        # same cause must not coexist and split evidence between them (which is
++        # what defeats the convergence margin). On a match we keep the existing
++        # hypothesis and fold in any new discriminating signals.
+         norm = statement.lower()
+         for h in self.session.hypotheses:
+-            if h.statement.lower() == norm:
++            if h.statement.lower() == norm or _similar(h.statement, statement):
++                for sig in (discriminating_signals or []):
++                    if sig not in h.discriminating_signals:
++                        h.discriminating_signals.append(sig)
+                 return h
+         h = Hypothesis(
+             statement=statement, rationale=rationale,
+diff --git a/core/troubleshooting/reasoning.py b/core/troubleshooting/reasoning.py
+index 5add1b3..85f01a3 100644
+--- a/core/troubleshooting/reasoning.py
++++ b/core/troubleshooting/reasoning.py
+@@ -95,6 +95,10 @@ class Reasoner:
+             f"- [{h['id']}] {h['statement']} (confidence {h['confidence']:.0%})"
+             for h in active_hypotheses
+         )
++        sigs = sorted({s for h in active_hypotheses for s in (h.get("discriminating_signals") or [])})
++        sig_block = ("PROBE FOR THESE DISCRIMINATING SIGNALS FIRST — a command is only useful if "
++                     "it reveals one of them; do NOT choose generic 'collect everything' commands:\n- "
++                     + "\n- ".join(sigs) + "\n") if sigs else ""
+         ctx_block = ("PLATFORM CONTEXT:\n" + grounding + "\n") if grounding else ""
+         run_block = ("ALREADY RUN (forbidden to repeat):\n" + ", ".join(already_run) + "\n") if already_run else ""
+         prompt = (
+@@ -105,7 +109,7 @@ class Reasoner:
+             f"OBJECTIVE: {objective}\n"
+             f"DEVICES (ip): {', '.join(devices)}\n"
+             f"ACTIVE HYPOTHESES:\n{hyp_block}\n"
+-            f"{ctx_block}{run_block}"
++            f"{sig_block}{ctx_block}{run_block}"
+             "\nReturn STRICT JSON only — a list of up to 3 objects, best first:\n"
+             '[{"device": "<ip or \'all\'>", "command": "<show ...>", '
+             '"purpose": "<what it reveals>", "tests_hypotheses": ["<hyp id>"], '
+@@ -184,6 +188,13 @@ class Reasoner:
+             f"- [{h['id']}] {h['statement']} (confidence {h['confidence']:.0%})"
+             for h in active_hypotheses)
+         cat = ", ".join(operation_catalogue)
++        sigs = sorted({s for h in active_hypotheses for s in (h.get("discriminating_signals") or [])})
++        sig_block = ("PROBE FOR THESE DISCRIMINATING SIGNALS FIRST — pick the operation that "
++                     "reveals one of them; do NOT choose a generic 'collect_evidence' sweep when "
++                     "a targeted operation exists:\n- " + "\n- ".join(sigs) + "\n") if sigs else ""
++        # Grounding (retrieved runbook / vendor guidance) was previously accepted
++        # as a parameter and never used here — now it informs operation choice.
++        ctx_block = ("RETRIEVED GUIDANCE (follow its investigation order):\n" + grounding + "\n") if grounding else ""
+         run_block = ("ALREADY COLLECTED (do not repeat):\n" + ", ".join(already_run) + "\n") if already_run else ""
+         prompt = (
+             "Choose the NEXT normalized diagnostic OPERATION(s) that reduce the most "
+@@ -192,6 +203,7 @@ class Reasoner:
+             f"OBJECTIVE: {objective}\n"
+             f"DEVICES (ip): {', '.join(devices)}\n"
+             f"ACTIVE HYPOTHESES:\n{hyp_block}\n"
++            f"{sig_block}{ctx_block}"
+             f"KNOWN OPERATIONS (not exhaustive): {cat}\n"
+             f"{run_block}"
+             "\nReturn STRICT JSON only — up to 3 objects, best first:\n"
