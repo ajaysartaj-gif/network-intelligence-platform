@@ -25,7 +25,9 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
 from .evidence_graph import EvidenceGraph
-from .hypotheses import ConfidenceCalculator, HypothesisManager, RootCauseRanker
+from .hypotheses import (
+    ConfidenceCalculator, HypothesisManager, RootCauseRanker, content_tokens,
+)
 from .memory import ExecutedCommandsMemory, SessionMemory, normalize_command
 from .models import (
     Effect, Evidence, Fix, Goal, HypothesisState, Observation, ResolutionStatus,
@@ -83,6 +85,7 @@ class TroubleshootingEngine:
         self.cmd_memory = ExecutedCommandsMemory()
         self.graph = EvidenceGraph()
         self.session_memory = SessionMemory(session_store)
+        self._unstable_keys: set = set()   # fact keys with inconsistent values
 
         self._intent = None
         if collector is None or validator is None or grounder is None or fix_validator is None:
@@ -142,8 +145,15 @@ class TroubleshootingEngine:
         conf = ConfidenceCalculator()
         ranker = RootCauseRanker()
 
-        # 1. seed hypotheses
-        for h in self.reasoner.generate_hypotheses(session.goal.objective, grounding, "", []):
+        # 0. EVIDENCE-FIRST: observe the objective's own state with one read-only
+        #    probe round BEFORE forming any hypothesis, so causes are anchored in
+        #    what was seen — not in priors. (Fixes the "first incorrect decision":
+        #    hypotheses were generated from an empty evidence argument.)
+        self._observe_initial_state(session, hmgr, conf, grounding, device_ips)
+
+        # 1. seed hypotheses FROM the objective + the state just observed
+        for h in self.reasoner.generate_hypotheses(
+                session.goal.objective, grounding, self._evidence_summary(session), []):
             hmgr.add(h.get("statement", ""), h.get("rationale", ""),
                      h.get("discriminating_signals", []), float(h.get("prior", 0.2) or 0.2))
 
@@ -158,7 +168,8 @@ class TroubleshootingEngine:
         # 2. confidence-driven loop
         for _step in range(self.cfg.max_steps):
             session.steps_taken += 1
-            active = [{"id": h.id, "statement": h.statement, "confidence": h.confidence}
+            active = [{"id": h.id, "statement": h.statement, "confidence": h.confidence,
+                       "discriminating_signals": h.discriminating_signals}
                       for h in session.ranked()]
 
             already = sorted(self.cmd_memory.all_normalized())
@@ -194,9 +205,11 @@ class TroubleshootingEngine:
 
             # 5. lifecycle + contradiction awareness
             hmgr.reap()
-            contradictions = self.graph.contradictions()
-            if contradictions:
-                logger.info("Evidence contradictions noted: %s", contradictions)
+            # Consume the contradiction signal instead of only logging it: fact
+            # keys with inconsistent values must not RAISE confidence (Q5 fix).
+            self._unstable_keys = set(self.graph.contradictory_keys())
+            if self._unstable_keys:
+                logger.info("Unstable fact keys (support suppressed): %s", self._unstable_keys)
 
             top = session.top()
             best = top.confidence if top else 0.0
@@ -363,6 +376,17 @@ class TroubleshootingEngine:
                     effect = Effect.NEUTRAL
                 if effect == Effect.NEUTRAL:
                     continue
+                # EVIDENCE GATE: an observation may move a hypothesis ONLY if it
+                # concerns that hypothesis's own declared discriminating signal.
+                # This is what stops an unrelated fact (interface up) from
+                # inflating an unrelated hypothesis (network type). Fail-open when
+                # a hypothesis declared no signals, so nothing is silently starved.
+                if not self._obs_matches_signals(obs, hyp.discriminating_signals):
+                    continue
+                # Never RAISE confidence from a fact that is inconsistent across
+                # reads (flapping / stale) — consumes the contradiction signal.
+                if effect == Effect.SUPPORT and obs.key in self._unstable_keys:
+                    continue
                 weight = float(imp.get("weight", 0.5) or 0.5)
                 ev = Evidence(observation_id=obs.id, hypothesis_id=hyp.id,
                               effect=effect, weight=weight, reason=str(imp.get("reason", "")))
@@ -371,6 +395,19 @@ class TroubleshootingEngine:
             # only bind impacts once (to the first/most-specific fact of this analysis)
             parsed["impacts"] = []
 
+    @staticmethod
+    def _obs_matches_signals(obs, signals) -> bool:
+        """True if this observation concerns one of the hypothesis's declared
+        discriminating signals. Matches on SUBJECT tokens (ospf/mtu/area/neighbor
+        …), not on generic attribute words (state/value/up), so 'interface up'
+        does not spuriously match 'ospf neighbor state'."""
+        if not signals:
+            return True
+        ot = content_tokens(f"{getattr(obs, 'subject', '')} {getattr(obs, 'attribute', '')}")
+        if not ot:
+            return True
+        return any(ot & content_tokens(sig) for sig in signals)
+
     def _widen(self, session: Session, hmgr: HypothesisManager, grounding: str) -> None:
         ev_summary = self._evidence_summary(session)
         existing = [h.statement for h in session.hypotheses]
@@ -378,6 +415,33 @@ class TroubleshootingEngine:
                 session.goal.objective, grounding, ev_summary, existing, max_new=2):
             hmgr.add(h.get("statement", ""), h.get("rationale", ""),
                      h.get("discriminating_signals", []), float(h.get("prior", 0.15) or 0.15))
+
+    def _observe_initial_state(self, session: Session, hmgr: HypothesisManager,
+                              conf: ConfidenceCalculator, grounding: str,
+                              device_ips: List[str]) -> None:
+        """One read-only probe round derived from the OBJECTIVE (no hypotheses yet)
+        so the first hypotheses are anchored in observed state. Reuses the same
+        plan/collect/analyze path as the main loop — no new capability."""
+        already = sorted(self.cmd_memory.all_normalized())
+        try:
+            if self.gateway is not None:
+                outputs = self._next_evidence_via_gateway(session, [], grounding, already, device_ips)
+            else:
+                candidates = self.reasoner.plan_commands(
+                    session.goal.objective, [], grounding, already, device_ips)
+                picked = self._pick_command(candidates)
+                if not picked:
+                    return
+                device_ip, command, purpose = picked
+                session.next_best_command = f"(on {device_ip}) {command}"
+                outputs = self._collect(device_ip, command, purpose, session)
+        except Exception:
+            return
+        for dev_ip, output in (outputs or {}).items():
+            # no active hypotheses yet -> this records OBSERVATIONS only; nothing
+            # is bound as evidence until hypotheses exist.
+            self._ingest_output(session.next_best_command or "state",
+                                dev_ip, output, session, hmgr, conf)
 
     def _evidence_summary(self, session: Session) -> str:
         lines = [f"{o.device} {o.subject}.{o.attribute}={o.value}" for o in session.observations[-12:]]
