@@ -58,6 +58,13 @@ class EvidenceGraph:
                 out.append(f"{key} has conflicting values: {sorted(distinct)}")
         return out
 
+    def contradictory_keys(self) -> List[str]:
+        """Fact keys whose value is inconsistent across reads (flapping / stale /
+        genuinely conflicting). Confidence must not be *raised* from an unstable
+        fact — the engine consumes this to suppress SUPPORT from these keys."""
+        return [k for k, vals in self._facts.items()
+                if len({v for v, _ in vals}) > 1]
+
     def summary(self) -> str:
         devs = sum(1 for n in self.nodes.values() if n["type"] == "device")
         facts = sum(1 for n in self.nodes.values() if n["type"] == "fact")

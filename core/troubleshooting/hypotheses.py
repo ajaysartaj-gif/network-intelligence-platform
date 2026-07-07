@@ -13,11 +13,31 @@ move is traceable to an evidence id.
 """
 from __future__ import annotations
 
+import re
 from typing import List, Optional
 
 from .models import (
     ConfidenceDelta, Effect, Evidence, Hypothesis, HypothesisState, Observation,
 )
+
+# Generic tokens carry no diagnostic subject, so they must not create spurious
+# matches between an observation and a hypothesis's discriminating signal, nor
+# spurious similarity between two hypotheses.
+_STOP = {"state", "value", "status", "up", "down", "id", "name", "count",
+         "the", "is", "on", "of", "a", "an", "to", "for", "not", "no", "issue",
+         "problem", "or", "and", "configuration", "configured", "misconfigured"}
+
+
+def content_tokens(s: str) -> set:
+    return set(re.findall(r"[a-z0-9]+", (s or "").lower())) - _STOP
+
+
+def _similar(a: str, b: str, threshold: float = 0.6) -> bool:
+    """Conservative near-duplicate test on subject tokens (Jaccard)."""
+    ta, tb = content_tokens(a), content_tokens(b)
+    if not ta or not tb:
+        return False
+    return len(ta & tb) / len(ta | tb) >= threshold
 
 
 class ConfidenceCalculator:
@@ -54,10 +74,16 @@ class HypothesisManager:
         statement = (statement or "").strip()
         if not statement:
             return None
-        # de-duplicate near-identical hypotheses
+        # de-duplicate exact AND near-identical hypotheses. Two phrasings of the
+        # same cause must not coexist and split evidence between them (which is
+        # what defeats the convergence margin). On a match we keep the existing
+        # hypothesis and fold in any new discriminating signals.
         norm = statement.lower()
         for h in self.session.hypotheses:
-            if h.statement.lower() == norm:
+            if h.statement.lower() == norm or _similar(h.statement, statement):
+                for sig in (discriminating_signals or []):
+                    if sig not in h.discriminating_signals:
+                        h.discriminating_signals.append(sig)
                 return h
         h = Hypothesis(
             statement=statement, rationale=rationale,

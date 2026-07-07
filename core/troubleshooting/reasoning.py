@@ -95,6 +95,10 @@ class Reasoner:
             f"- [{h['id']}] {h['statement']} (confidence {h['confidence']:.0%})"
             for h in active_hypotheses
         )
+        sigs = sorted({s for h in active_hypotheses for s in (h.get("discriminating_signals") or [])})
+        sig_block = ("PROBE FOR THESE DISCRIMINATING SIGNALS FIRST — a command is only useful if "
+                     "it reveals one of them; do NOT choose generic 'collect everything' commands:\n- "
+                     + "\n- ".join(sigs) + "\n") if sigs else ""
         ctx_block = ("PLATFORM CONTEXT:\n" + grounding + "\n") if grounding else ""
         run_block = ("ALREADY RUN (forbidden to repeat):\n" + ", ".join(already_run) + "\n") if already_run else ""
         prompt = (
@@ -105,7 +109,7 @@ class Reasoner:
             f"OBJECTIVE: {objective}\n"
             f"DEVICES (ip): {', '.join(devices)}\n"
             f"ACTIVE HYPOTHESES:\n{hyp_block}\n"
-            f"{ctx_block}{run_block}"
+            f"{sig_block}{ctx_block}{run_block}"
             "\nReturn STRICT JSON only — a list of up to 3 objects, best first:\n"
             '[{"device": "<ip or \'all\'>", "command": "<show ...>", '
             '"purpose": "<what it reveals>", "tests_hypotheses": ["<hyp id>"], '
@@ -184,6 +188,13 @@ class Reasoner:
             f"- [{h['id']}] {h['statement']} (confidence {h['confidence']:.0%})"
             for h in active_hypotheses)
         cat = ", ".join(operation_catalogue)
+        sigs = sorted({s for h in active_hypotheses for s in (h.get("discriminating_signals") or [])})
+        sig_block = ("PROBE FOR THESE DISCRIMINATING SIGNALS FIRST — pick the operation that "
+                     "reveals one of them; do NOT choose a generic 'collect_evidence' sweep when "
+                     "a targeted operation exists:\n- " + "\n- ".join(sigs) + "\n") if sigs else ""
+        # Grounding (retrieved runbook / vendor guidance) was previously accepted
+        # as a parameter and never used here — now it informs operation choice.
+        ctx_block = ("RETRIEVED GUIDANCE (follow its investigation order):\n" + grounding + "\n") if grounding else ""
         run_block = ("ALREADY COLLECTED (do not repeat):\n" + ", ".join(already_run) + "\n") if already_run else ""
         prompt = (
             "Choose the NEXT normalized diagnostic OPERATION(s) that reduce the most "
@@ -192,6 +203,7 @@ class Reasoner:
             f"OBJECTIVE: {objective}\n"
             f"DEVICES (ip): {', '.join(devices)}\n"
             f"ACTIVE HYPOTHESES:\n{hyp_block}\n"
+            f"{sig_block}{ctx_block}"
             f"KNOWN OPERATIONS (not exhaustive): {cat}\n"
             f"{run_block}"
             "\nReturn STRICT JSON only — up to 3 objects, best first:\n"
