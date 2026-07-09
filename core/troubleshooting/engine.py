@@ -431,25 +431,64 @@ class TroubleshootingEngine:
             # only bind impacts once (to the first/most-specific fact of this analysis)
             parsed["impacts"] = []
 
+    # Matches core.vendor.models.NormalizedObject.summary()'s own format
+    # exactly: f"{type}[{id}]@{device} {{{kv}}}" — the text
+    # _next_evidence_via_gateway() feeds into this same pipeline. Handled
+    # separately from semantic_analyzer's CLI-table extractors (which parse
+    # a fundamentally different text shape) so a gateway-mode neighbor/
+    # protocol object's real id/state is read from its OWN attributes
+    # dict, not guessed from free-form text.
+    _GATEWAY_OBJ_LINE = re.compile(
+        r"^(?P<type>\w+)\[(?P<id>[^\]]*)\]@(?P<device>\S+)\s*\{(?P<kv>.*)\}\s*$")
+
+    def _gateway_object_facts(self, output: str) -> List[Dict[str, str]]:
+        facts: List[Dict[str, str]] = []
+        for line in (output or "").splitlines():
+            m = self._GATEWAY_OBJ_LINE.match(line.strip())
+            if not m:
+                continue
+            otype, oid = m.group("type"), m.group("id")
+            kv: Dict[str, str] = {}
+            for pair in m.group("kv").split(", "):
+                if "=" in pair:
+                    k, v = pair.split("=", 1)
+                    kv[k.strip()] = v.strip()
+            if otype == "neighbor" and kv.get("state"):
+                facts.append({"subject": f"neighbor.{oid or '?'}",
+                             "attribute": "state", "value": kv["state"]})
+            elif otype == "protocol":
+                if kv.get("adjacency"):
+                    facts.append({"subject": f"protocol.{oid or '?'}",
+                                 "attribute": "adjacency", "value": kv["adjacency"]})
+                if kv.get("state"):
+                    facts.append({"subject": f"protocol.{oid or '?'}",
+                                 "attribute": "state", "value": kv["state"]})
+            elif otype == "interface" and kv.get("mtu"):
+                facts.append({"subject": f"interface.{oid or '?'}",
+                             "attribute": "mtu", "value": kv["mtu"]})
+        return facts
+
     def _deterministic_facts(self, output: str) -> List[Dict[str, str]]:
         """Runs Phase 1's deterministic semantic extractors
         (core.knowledge.compiler.semantic_analyzer, built for exactly this
-        kind of line-oriented CLI/show-output text) over raw command output.
-        Returns the same {"subject","attribute","value"} shape analyze()'s
-        LLM output already uses, so callers don't need a second code path.
-        Best-effort: any failure returns [] and the LLM-only path is
-        unaffected."""
+        kind of line-oriented CLI/show-output text) over raw command output,
+        PLUS a dedicated reader for gateway-mode NormalizedObject.summary()
+        lines (a different text shape semantic_analyzer's CLI-table
+        extractors aren't meant to parse). Returns the same
+        {"subject","attribute","value"} shape analyze()'s LLM output already
+        uses, so callers don't need a second code path. Best-effort: any
+        failure returns [] and the LLM-only path is unaffected."""
+        facts: List[Dict[str, str]] = list(self._gateway_object_facts(output))
         try:
             from core.knowledge.compiler.ast_builder import build_ast
             from core.knowledge.compiler.semantic_analyzer import analyze as extract_semantic
         except Exception:
-            return []
+            return facts
         try:
             findings = extract_semantic(build_ast(output or ""))
         except Exception:
-            return []
+            return facts
 
-        facts: List[Dict[str, str]] = []
         for f in findings:
             attrs = f.attributes
             if f.kind == "interface":
@@ -541,12 +580,21 @@ class TroubleshootingEngine:
     def _observed_protocol_state_obs(self, session: Session) -> Optional[Observation]:
         """Best-effort deterministic read of the most recent observation that
         reports an actual protocol/neighbor stuck-state (e.g. 'EXSTART') — the
-        same vocabulary compiled FailureSignatures key off of via stuck_state."""
+        same vocabulary compiled FailureSignatures key off of via stuck_state.
+
+        Prefers a "neighbor.*" fact (the specific per-neighbor FSM state:
+        Down/Attempt/Init/2-Way/ExStart/Exchange/Loading/Full) over a
+        "protocol.*" fact (a coarse up/down summary across ALL neighbors —
+        see IosLikeAdapter's PROTOCOL object). Falling back to the coarse
+        flag only when no neighbor-specific fact exists avoids the coarse
+        "down" (meaning merely "no FULL neighbor yet") outranking the real,
+        specific observed state and being compared against it instead."""
         for o in reversed(session.observations):
-            if o.attribute == "state" and ("neighbor" in o.subject.lower()
-                                           or "protocol" in o.subject.lower()):
-                if o.value:
-                    return o
+            if o.attribute == "state" and "neighbor" in o.subject.lower() and o.value:
+                return o
+        for o in reversed(session.observations):
+            if o.attribute == "state" and "protocol" in o.subject.lower() and o.value:
+                return o
         return None
 
     def _bind_compiled_signature_evidence(self, session: Session, hmgr: HypothesisManager,

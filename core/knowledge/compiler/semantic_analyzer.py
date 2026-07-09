@@ -109,8 +109,18 @@ def interface_extractor(root: ASTNode) -> List[SemanticFinding]:
 # ── 2. Protocol / neighbor / timer extractor ─────────────────────────────
 
 _PROTOCOL_STANZA = re.compile(r"^router\s+(ospf|bgp|eigrp|isis|is-is)\s*(\S*)", re.IGNORECASE)
+# (?<!@) excludes an IP immediately preceded by '@' — that's
+# NormalizedObject.summary()'s own "{type}[{id}]@{device} {...}" device-
+# identity marker (core/vendor/models.py), not a neighbor table's leading IP
+# column. Without this, an INTERFACE object's summary text like
+# "interface[Gi1/0]@192.168.21.2 {status=administratively down}" false-
+# matches as "neighbor 192.168.21.2 state=DOWN" (the device's own management
+# IP misread as a neighbor, "administratively down" misread as the neighbor
+# state) — fabricating a bogus DOWN observation that overrides the real,
+# separately-reported neighbor state and wrongly contradicts the correct
+# hypothesis.
 _NEIGHBOR_ROW = re.compile(
-    r"(?P<ip>\d{1,3}(?:\.\d{1,3}){3})\s+.*?\b"
+    r"(?<![\d.@])(?P<ip>\d{1,3}(?:\.\d{1,3}){3})\s+.*?\b"
     r"(?P<state>FULL|2-WAY|EXSTART|EXCHANGE|LOADING|INIT|ATTEMPT|DOWN|"
     r"ESTABLISHED|IDLE|ACTIVE|CONNECT)\b", re.IGNORECASE)
 _TIMER_LINE = re.compile(r"\b(hello-interval|dead-interval)\s+(\d+)", re.IGNORECASE)
