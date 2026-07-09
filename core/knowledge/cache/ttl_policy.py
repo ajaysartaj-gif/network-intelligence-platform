@@ -18,6 +18,8 @@ VENDOR_TTL_DAYS: Dict[str, int] = {
     "paloalto":  60,   # PAN-OS updates frequently
     "fortinet":  60,
     "huawei":    90,
+    "dell":      90,
+    "extreme":   90,
     "aruba":     90,
     "checkpoint":90,
     "rfc":       365,  # IETF RFCs rarely change

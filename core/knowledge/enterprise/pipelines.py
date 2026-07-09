@@ -21,6 +21,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from core.knowledge.enterprise.knowledge_layer import (
     EnterpriseKnowledgeLayer, KnowledgeRecord, SourceType, get_knowledge_layer,
 )
+from core.knowledge.parsers import extract_text, supported_extensions
 
 logger = logging.getLogger("NetBrain.Knowledge.Pipelines")
 
@@ -30,6 +31,47 @@ _TEXT_EXTS = {".md", ".txt", ".rst", ".text", ".markdown", ".cfg", ".conf"}
 def _read(path: str) -> str:
     with open(path, "r", encoding="utf-8", errors="replace") as f:
         return f.read()
+
+
+def _read_any(path: str) -> Optional[str]:
+    """Read a file as text directly if it's a plain-text format, otherwise
+    dispatch to the parser package (PDF/DOCX/JSON/YAML/XML/CSV/HTML)."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext in _TEXT_EXTS:
+        return _read(path)
+    return extract_text(path)
+
+
+def ingest_file(
+    path: str,
+    source_type: SourceType,
+    vendor: str = "",
+    platform: str = "",
+    tags: Optional[List[str]] = None,
+    layer: Optional[EnterpriseKnowledgeLayer] = None,
+    doc_id: Optional[str] = None,
+    title: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Ingest a single file (any supported format) as the given source type.
+    Returns the layer.ingest() summary, or {"skipped": True, "reason": ...}
+    if the format is unsupported or the file is empty.
+    """
+    layer = layer or get_knowledge_layer()
+    fn = os.path.basename(path)
+    content = _read_any(path)
+    if not content:
+        return {"doc_id": doc_id or fn, "skipped": True,
+                "reason": "unsupported format or empty content"}
+    rec = KnowledgeRecord(
+        doc_id=doc_id or f"{source_type.value}:{fn}",
+        title=title or os.path.splitext(fn)[0],
+        content=content,
+        source_type=source_type,
+        vendor=vendor, platform=platform, tags=tags or [],
+        extra={"path": path},
+    )
+    return layer.ingest(rec)
 
 
 def ingest_directory(
@@ -42,7 +84,9 @@ def ingest_directory(
     recursive: bool = True,
 ) -> Dict[str, Any]:
     """
-    Ingest every text file under `path` as the given source type. Idempotent.
+    Ingest every supported file under `path` as the given source type
+    (plain text read directly; PDF/DOCX/JSON/YAML/XML/CSV/HTML routed
+    through core.knowledge.parsers). Idempotent.
     """
     layer = layer or get_knowledge_layer()
     summary = {"source_type": source_type.value, "ingested": 0, "skipped": 0,
@@ -51,31 +95,52 @@ def ingest_directory(
         summary["errors"].append(f"not a directory: {path}")
         return summary
 
+    all_exts = _TEXT_EXTS | supported_extensions()
     walker = os.walk(path) if recursive else [(path, [], os.listdir(path))]
     for dirpath, _dirs, files in walker:
         for fn in files:
-            if os.path.splitext(fn)[1].lower() not in _TEXT_EXTS:
+            if os.path.splitext(fn)[1].lower() not in all_exts:
                 continue
             fpath = os.path.join(dirpath, fn)
             doc_id = os.path.relpath(fpath, path)
             try:
-                rec = KnowledgeRecord(
+                r = ingest_file(
+                    fpath, source_type, vendor=vendor, platform=platform,
+                    tags=tags, layer=layer,
                     doc_id=f"{source_type.value}:{doc_id}",
                     title=os.path.splitext(fn)[0],
-                    content=_read(fpath),
-                    source_type=source_type,
-                    vendor=vendor, platform=platform, tags=tags or [],
-                    extra={"path": doc_id},
                 )
-                r = layer.ingest(rec)
                 if r.get("skipped"):
                     summary["skipped"] += 1
                 else:
                     summary["ingested"] += 1
-                    summary["versions"][rec.doc_id] = r.get("version")
+                    summary["versions"][r.get("doc_id", doc_id)] = r.get("version")
             except Exception as exc:
                 summary["errors"].append(f"{doc_id}: {exc}")
     return summary
+
+
+def ingest_rfc(
+    number: int,
+    layer: Optional[EnterpriseKnowledgeLayer] = None,
+) -> Dict[str, Any]:
+    """Fetch an RFC by number from rfc-editor.org and ingest it as SourceType.RFC."""
+    from core.knowledge.fetchers.rfc_fetcher import fetch_rfc_text
+
+    layer = layer or get_knowledge_layer()
+    fetched = fetch_rfc_text(number)
+    if not fetched:
+        return {"doc_id": f"rfc:{number}", "skipped": True,
+                "reason": "fetch failed or RFC not found"}
+    rec = KnowledgeRecord(
+        doc_id=f"rfc:{number}",
+        title=fetched["title"],
+        content=fetched["content"],
+        source_type=SourceType.RFC,
+        tags=["rfc"],
+        extra={"rfc_number": number},
+    )
+    return layer.ingest(rec)
 
 
 def ingest_remediation(
@@ -131,11 +196,20 @@ def run_standard_pipelines(
 ) -> Dict[str, Any]:
     """
     Ingest a conventional knowledge tree:
-        base_dir/vendor_docs/   -> VENDOR_DOCS
-        base_dir/rfcs/          -> RFC
-        base_dir/runbooks/      -> RUNBOOK
-        base_dir/standards/     -> CONFIG_STANDARD
-        base_dir/best_practices/-> BEST_PRACTICE
+        base_dir/vendor_docs/    -> VENDOR_DOCS
+        base_dir/rfcs/           -> RFC (local RFC text files; use ingest_rfc()
+                                    to fetch by number instead)
+        base_dir/runbooks/       -> RUNBOOK
+        base_dir/standards/      -> CONFIG_STANDARD
+        base_dir/best_practices/ -> BEST_PRACTICE
+        base_dir/release_notes/  -> RELEASE_NOTES
+        base_dir/bug_reports/    -> BUG_REPORT (TAC cases / bug DB exports)
+        base_dir/design_guides/  -> DESIGN_GUIDE
+        base_dir/whitepapers/    -> WHITEPAPER
+        base_dir/golden_configs/ -> GOLDEN_CONFIG
+        base_dir/yang_models/    -> YANG_MODEL
+        base_dir/customer_docs/  -> CUSTOMER_DOC
+        base_dir/wikis/          -> INTERNAL_WIKI
     Missing folders are simply skipped.
     """
     layer = layer or get_knowledge_layer()
@@ -145,6 +219,14 @@ def run_standard_pipelines(
         "runbooks": SourceType.RUNBOOK,
         "standards": SourceType.CONFIG_STANDARD,
         "best_practices": SourceType.BEST_PRACTICE,
+        "release_notes": SourceType.RELEASE_NOTES,
+        "bug_reports": SourceType.BUG_REPORT,
+        "design_guides": SourceType.DESIGN_GUIDE,
+        "whitepapers": SourceType.WHITEPAPER,
+        "golden_configs": SourceType.GOLDEN_CONFIG,
+        "yang_models": SourceType.YANG_MODEL,
+        "customer_docs": SourceType.CUSTOMER_DOC,
+        "wikis": SourceType.INTERNAL_WIKI,
     }
     out = {}
     for folder, stype in mapping.items():

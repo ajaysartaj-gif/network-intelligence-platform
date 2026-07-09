@@ -225,6 +225,14 @@ NETMIKO_TO_VENDOR: Dict[str, str] = {
     "hp_procurve":     "aruba",
     "hp_comware":      "huawei",
     "checkpoint_gaia": "checkpoint",
+    "dell_os10":       "dell",
+    "dell_os9":        "dell",
+    "dell_force10":    "dell",
+    "dell_powerconnect": "dell",
+    "extreme":         "extreme",
+    "extreme_exos":    "extreme",
+    "extreme_vsp":     "extreme",
+    "extreme_slx":     "extreme",
 }
 
 
@@ -257,5 +265,10 @@ def detect_platform(device_type: Optional[str]) -> str:
         "huawei_vrpv8":    "vrp",
         "aruba_os":        "arubaos",
         "checkpoint_gaia": "gaia",
+        "dell_os10":       "os10",
+        "dell_os9":        "os9",
+        "dell_force10":    "ftos",
+        "extreme_exos":    "exos",
+        "extreme_vsp":     "voss",
     }
     return mapping.get(dt, dt)

@@ -41,24 +41,40 @@ logger = logging.getLogger("NetBrain.Knowledge.Enterprise")
 # ── Source taxonomy + authority ranking ─────────────────────────────────────
 class SourceType(str, Enum):
     CONFIG_STANDARD = "config_standard"   # your mandated standards (highest authority)
+    GOLDEN_CONFIG   = "golden_config"     # known-good reference configs
     VENDOR_DOCS     = "vendor_docs"       # official vendor documentation
+    YANG_MODEL      = "yang_model"        # YANG/OpenConfig schema definitions
     RFC             = "rfc"               # IETF RFCs
+    RELEASE_NOTES   = "release_notes"     # vendor release/bug-fix notes
+    DESIGN_GUIDE    = "design_guide"      # vendor/internal design guides
     BEST_PRACTICE   = "best_practice"     # curated best practices
+    WHITEPAPER      = "whitepaper"        # vendor/industry whitepapers
     REMEDIATION     = "remediation"       # previous SUCCESSFUL remediations
     RUNBOOK         = "runbook"           # internal runbooks / procedures
+    BUG_REPORT      = "bug_report"        # TAC cases / bug-database entries
     INCIDENT        = "incident"          # incident reports (symptom->resolution)
+    CUSTOMER_DOC    = "customer_doc"      # customer-provided documentation
+    INTERNAL_WIKI   = "internal_wiki"     # internal wiki pages
 
 
 # Authority weight per source type (0..1). Higher = more authoritative when
 # results tie. Tunable — this is policy, not a hardcoded truth.
 SOURCE_RANK: Dict[str, float] = {
     SourceType.CONFIG_STANDARD.value: 1.00,
+    SourceType.GOLDEN_CONFIG.value:   0.95,
     SourceType.VENDOR_DOCS.value:     0.90,
+    SourceType.YANG_MODEL.value:      0.88,
     SourceType.RFC.value:             0.85,
+    SourceType.RELEASE_NOTES.value:   0.82,
+    SourceType.DESIGN_GUIDE.value:    0.80,
     SourceType.BEST_PRACTICE.value:   0.75,
+    SourceType.WHITEPAPER.value:      0.70,
     SourceType.REMEDIATION.value:     0.72,
     SourceType.RUNBOOK.value:         0.65,
+    SourceType.BUG_REPORT.value:      0.62,
     SourceType.INCIDENT.value:        0.60,
+    SourceType.CUSTOMER_DOC.value:    0.55,
+    SourceType.INTERNAL_WIKI.value:   0.55,
 }
 _DEFAULT_RANK = 0.50
 
