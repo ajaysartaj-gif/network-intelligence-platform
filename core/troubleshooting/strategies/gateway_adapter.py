@@ -19,15 +19,14 @@ Known scope limits (documented rather than silently guessed around, per this
 platform's own "declare unavailable, never guess" principle):
 
   * Relationship enumeration is driven by the gateway's GET_NEIGHBORS operation.
-    The remote (far-end) interface identity is not directly reported by that
-    operation on every platform, so pairing uses a conservative heuristic
-    (see _infer_remote_interface): unambiguous for the single-link topologies
-    this is being validated against first (Volume 0's "prove OSPF" MVP scope).
-    For multi-homed topologies where the heuristic can't resolve a unique
-    interface, the instance is skipped rather than paired incorrectly. Wiring
-    a real topology/discovery source (core/device_discovery.py or
-    core/topology_engine.py) removes this limit later without touching
-    MismatchStrategy or the KP schema at all.
+    When a real topology graph is supplied (see core.topology.knowledge_graph_bridge,
+    built from CDP/LLDP discovery), interface pairing is exact — the graph edge's
+    metadata carries the real local/remote interface names, resolving multi-homed
+    topologies correctly. Without one (discovery unavailable, netmiko missing,
+    or the caller didn't pass a graph), pairing falls back to a conservative
+    heuristic (see _infer_remote_interface): unambiguous only when a device has
+    exactly one protocol-enabled interface. In that fallback case, topologies the
+    heuristic can't resolve are skipped rather than paired incorrectly.
 """
 from __future__ import annotations
 
@@ -78,7 +77,8 @@ class GatewayDeviceAdapter(DeviceAdapter):
 
     vendor = "gateway-backed"
 
-    def __init__(self, gateway: Any, ip_to_device: Dict[str, Any], relationship_type: str):
+    def __init__(self, gateway: Any, ip_to_device: Dict[str, Any], relationship_type: str,
+                 topology_graph: Any = None):
         self.gateway = gateway
         self._ip_to_dev = ip_to_device
         self.relationship_type = relationship_type
@@ -86,6 +86,10 @@ class GatewayDeviceAdapter(DeviceAdapter):
         self._nbr_cache: Dict[str, list] = {}
         self._iface_cache: Dict[str, Dict[str, Any]] = {}
         self._rid_map: Optional[Dict[str, str]] = None
+        # Real CDP/LLDP-derived adjacency (core.topology.knowledge_graph_bridge),
+        # if the caller built one. When present, interface pairing is exact
+        # instead of heuristic — see module docstring.
+        self.topology_graph = topology_graph
 
     # ── internal: cached, gateway-backed reads ──────────────────────────────
     def _neighbors(self, device_ip: str) -> list:
@@ -152,6 +156,22 @@ class GatewayDeviceAdapter(DeviceAdapter):
         self._rid_map = rid_map
         return rid_map
 
+    def _real_interface_pair(self, local_ip: str, remote_ip: str) -> Optional[tuple]:
+        """Exact pairing from real CDP/LLDP discovery, if a topology graph was
+        supplied. Returns (local_interface, remote_interface) or None if the
+        graph doesn't have this edge (e.g. discovery failed for this pair, or
+        no graph was passed) — callers fall back to the heuristic in that case."""
+        if self.topology_graph is None:
+            return None
+        try:
+            from core.topology.knowledge_graph_bridge import neighbor_interfaces
+        except Exception:
+            return None
+        pair = neighbor_interfaces(self.topology_graph, local_ip, remote_ip)
+        if not pair or not pair[0] or not pair[1]:
+            return None
+        return pair
+
     # ── DeviceAdapter interface ──────────────────────────────────────────────
     def enumerate_relationship(self, relationship_type: str,
                                enumerate_intent: str) -> List[RelationshipInstance]:
@@ -167,12 +187,16 @@ class GatewayDeviceAdapter(DeviceAdapter):
                 pair_key = tuple(sorted((local_ip, remote_ip)))
                 if pair_key in seen_pairs:
                     continue
-                local_ctx = self._infer_local_interface(local_ip)
-                remote_ctx = self._infer_remote_interface(remote_ip)
+                real_pair = self._real_interface_pair(local_ip, remote_ip)
+                if real_pair:
+                    local_ctx, remote_ctx = real_pair
+                else:
+                    local_ctx = self._infer_local_interface(local_ip)
+                    remote_ctx = self._infer_remote_interface(remote_ip)
                 if not local_ctx or not remote_ctx:
                     logger.info(
                         "Mismatch investigation: skipping %s<->%s — interface pairing "
-                        "is ambiguous (multi-homed?). Wire a topology source to resolve.",
+                        "is ambiguous (multi-homed?) and no topology graph resolved it.",
                         local_ip, remote_ip)
                     continue
                 seen_pairs.add(pair_key)

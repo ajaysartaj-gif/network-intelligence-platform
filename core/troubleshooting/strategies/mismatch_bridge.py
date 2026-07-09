@@ -118,9 +118,18 @@ def run_mismatch_investigation(
     from strategies.mismatch import MismatchStrategy
     from core.troubleshooting.models import ConfidenceDelta, Effect, Evidence, Observation
 
+    topology_graph = None
+    try:
+        from core.topology.knowledge_graph_bridge import build_knowledge_graph
+        topology_graph = build_knowledge_graph(devices)
+    except Exception as exc:
+        logger.info("Real topology graph unavailable (%s); adapter will use its "
+                    "single-interface fallback heuristic instead.", exc)
+
     try:
         ke = _build_knowledge_engine(ai_call)
-        adapter = GatewayDeviceAdapter(gateway, ip_to_device, relationship_type)
+        adapter = GatewayDeviceAdapter(gateway, ip_to_device, relationship_type,
+                                       topology_graph=topology_graph)
         seed_device = next(iter(ip_to_device.keys()))
         findings = MismatchStrategy(lambda _dev: adapter, ke).investigate(
             relationship_type, seed_device)
