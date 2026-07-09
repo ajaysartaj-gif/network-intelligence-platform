@@ -97,13 +97,21 @@ class HypothesisManager:
         return next((h for h in self.session.hypotheses if h.id == hypothesis_id), None)
 
     def reap(self) -> None:
-        """Eliminate disproven hypotheses; confirm strongly-supported ones."""
+        """Eliminate disproven hypotheses; confirm strongly-supported ones.
+
+        Both branches require h.evidence_ids — a hypothesis seeded with a
+        high prior (e.g. a compiled failure signature at 0.85) must not
+        auto-confirm before any real evidence has ever touched it. Without
+        this guard, such a hypothesis is marked CONFIRMED on the very first
+        reap() call, permanently excluded from active_hypotheses(), and so
+        can never be bound to (or revised by) the actual observed evidence —
+        freezing the report on an unverified textbook prior forever."""
         for h in self.session.hypotheses:
             if h.state != HypothesisState.ACTIVE:
                 continue
             if h.confidence < self.ELIMINATE_BELOW and h.evidence_ids:
                 h.state = HypothesisState.ELIMINATED
-            elif h.confidence >= self.CONFIRM_AT:
+            elif h.confidence >= self.CONFIRM_AT and h.evidence_ids:
                 h.state = HypothesisState.CONFIRMED
 
 
