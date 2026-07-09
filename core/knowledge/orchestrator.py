@@ -348,15 +348,38 @@ class KnowledgeOrchestrator:
         for the AI chat to pull grounding context (runbooks, past incidents)
         for an arbitrary question, not just a command lookup. Returns raw
         RAGHits (empty list if RAG unavailable or nothing relevant).
+
+        Backed by EnterpriseKnowledgeLayer.search() — hybrid semantic+keyword
+        retrieval (RRF-fused) weighted by source authority and recency —
+        instead of the bare RAGEngine's pure cosine-similarity ranking. A
+        high-authority runbook now outranks an equally-similar low-authority
+        doc. Results are adapted back into RAGHit (score := EnterpriseHit's
+        fused confidence) so every existing caller, which duck-types on
+        .text/.source/.title, is unaffected by this swap. Falls back to the
+        bare RAGEngine if the enterprise layer import/search fails for any
+        reason, so a single misconfiguration never zeroes out all grounding.
         """
         if not self.enable_rag:
             return []
+        threshold = _RAG_MIN_SCORE if min_score is None else min_score
+        try:
+            from core.knowledge.enterprise.knowledge_layer import get_knowledge_layer
+            layer = get_knowledge_layer()
+            hits = layer.search(query, top_k=top_k, vendor=vendor,
+                                source_types=[source] if source else None)
+            return [
+                RAGHit(text=h.text, score=h.confidence, source=h.source_type,
+                      title=h.title, doc_id=h.doc_id, vendor=h.vendor,
+                      platform=h.platform, metadata=h.metadata)
+                for h in hits if h.confidence >= threshold
+            ]
+        except Exception as exc:
+            logger.debug(f"rag_query via EnterpriseKnowledgeLayer failed, "
+                        f"falling back to bare RAGEngine: {exc}")
         try:
             engine = get_rag_engine()
             return engine.search(
-                query, top_k=top_k,
-                min_score=_RAG_MIN_SCORE if min_score is None else min_score,
-                vendor=vendor, source=source,
+                query, top_k=top_k, min_score=threshold, vendor=vendor, source=source,
             )
         except Exception as exc:
             logger.debug(f"rag_query failed: {exc}")

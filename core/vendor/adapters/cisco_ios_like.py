@@ -51,10 +51,19 @@ class IosLikeAdapter(VendorAdapter):
         if operation.name in self._UNSUPPORTED_OPS:
             return []                                    # never emit an invalid command
         proto = str(operation.params.get("protocol", "")).lower()
+        # "all" and "" both mean "every OSPF-enabled interface" — neither
+        # narrows the command, so both normalize to no suffix. A genuine
+        # interface name DOES narrow the command, which also makes two
+        # different `interface` params produce genuinely different command
+        # text (previously they collapsed to the same command regardless,
+        # defeating the engine's operation-signature dedup).
+        iface = str(operation.params.get("interface", "")).strip()
+        scoped = iface if iface and iface.lower() != "all" else ""
+        suffix = f" {scoped}" if scoped else ""
         table = {
             (Op.GET_NEIGHBORS, "ospf"): "show ip ospf neighbor",
             (Op.GET_NEIGHBORS, "bgp"): "show ip bgp summary",
-            (Op.GET_INTERFACE_DETAILS, "ospf"): "show ip ospf interface",
+            (Op.GET_INTERFACE_DETAILS, "ospf"): f"show ip ospf interface{suffix}",
             (Op.GET_INTERFACE_DETAILS, ""): "show ip interface brief",
             (Op.GET_ROUTING_INFORMATION, "ospf"): "show ip route ospf",
             (Op.GET_ROUTING_INFORMATION, ""): "show ip route",
@@ -64,7 +73,17 @@ class IosLikeAdapter(VendorAdapter):
         cmd = table.get((operation.name, proto)) or table.get((operation.name, ""))
         if not cmd:
             return []
-        return [cmd]
+        commands = [cmd]
+        # `show ip ospf interface` reports area/network-type/timers/neighbor
+        # count — it does NOT report MTU (confirmed against real IOS output).
+        # MTU mismatch is THE textbook cause of a neighbor stuck in ExStart
+        # (see core/knowledge/compiler/failure_signatures.py's compiled
+        # signature, confidence 0.85), so without this second command it was
+        # structurally unreachable regardless of how many times the engine
+        # asked for interface details.
+        if operation.name == Op.GET_INTERFACE_DETAILS and proto == "ospf":
+            commands.append(f"show interface{suffix}")
+        return commands
 
     def parse_output(self, operation: Operation, raw: Dict[str, str],
                      profile: VendorProfile) -> List[NormalizedObject]:
@@ -106,6 +125,21 @@ class IosLikeAdapter(VendorAdapter):
                             attrs[key] = mm.group(1)
                     out.append(obj(ObjectType.INTERFACE, device=ip, id=mi.group(1),
                                    ospf=True, **attrs))
+            elif low.strip() == "show interface" or low.strip().startswith("show interface "):
+                # Long-form "show interface [name]" — singular, deliberately
+                # distinct from "show interfaces" (plural) below, which is a
+                # different tabular format. This is the ONLY command in this
+                # adapter that reports MTU (confirmed: "show ip ospf interface"
+                # does not).
+                for block in re.split(r"\n(?=\S)", t):
+                    mi = re.match(r"(\S+) is (up|down|administratively down)", block)
+                    if not mi:
+                        continue
+                    attrs = {"status": mi.group(2).lower()}
+                    mtu_m = re.search(r"MTU (\d+) bytes", block)
+                    if mtu_m:
+                        attrs["mtu"] = mtu_m.group(1)
+                    out.append(obj(ObjectType.INTERFACE, device=ip, id=mi.group(1), **attrs))
             elif "interface brief" in low or low.strip() == "show interfaces":
                 for m in re.finditer(r"(\S+)\s+\S+\s+\w+\s+\w+\s+(up|down|administratively down)\s+(up|down)", t):
                     out.append(obj(ObjectType.INTERFACE, device=ip, id=m.group(1),

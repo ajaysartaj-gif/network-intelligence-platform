@@ -1114,10 +1114,19 @@ class IntentEngine:
     def _topology_facts(self, devices: List[Any]) -> str:
         """Neighbor/adjacency facts from the platform Knowledge Graph (best-effort).
         Lets the agent reason about the OTHER end of an adjacency, not just the
-        devices the operator happened to select."""
+        devices the operator happened to select.
+
+        Reuses core.topology.knowledge_graph_bridge.build_knowledge_graph() —
+        the SAME live-CDP/LLDP-populated graph builder
+        core.troubleshooting.strategies.mismatch_bridge already calls — instead
+        of constructing a fresh, permanently-empty KnowledgeGraph(). This is a
+        different graph from the NKC's compiled core.knowledge.compiler graph
+        (physical adjacency vs. compiled interface/protocol objects); kept
+        distinct deliberately, per this repo's "family of typed graphs"
+        principle."""
         try:
-            from core.knowledge_graph import KnowledgeGraph  # reused, not new
-            kg = KnowledgeGraph()
+            from core.topology.knowledge_graph_bridge import build_knowledge_graph
+            kg = build_knowledge_graph(devices)
         except Exception:
             return ""
         lines: List[str] = []

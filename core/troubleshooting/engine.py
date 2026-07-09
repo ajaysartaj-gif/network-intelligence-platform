@@ -21,6 +21,7 @@ Stopping rules (spec "stop when confidence no longer improves"):
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
@@ -151,9 +152,20 @@ class TroubleshootingEngine:
         #    hypotheses were generated from an empty evidence argument.)
         self._observe_initial_state(session, hmgr, conf, grounding, device_ips)
 
-        # 1. seed hypotheses FROM the objective + the state just observed
+        # 0.5. DETERMINISTIC SEEDING — before any LLM hypothesis call. Two
+        #      previously-unwired, already-built sources: the Mismatch
+        #      Investigation (deterministic cross-device parameter compare)
+        #      and the NKC's compiled FailureSignature library (textbook
+        #      root causes with real confidence, not a 0.05-0.4 LLM guess).
+        self._seed_deterministic_hypotheses(session, hmgr, query)
+
+        # 1. seed hypotheses FROM the objective + the state just observed —
+        #    the LLM EXTENDS the deterministic seed above, it never replaces it
+        #    (existing statements are passed so it doesn't duplicate them).
+        existing_statements = [h.statement for h in session.hypotheses]
         for h in self.reasoner.generate_hypotheses(
-                session.goal.objective, grounding, self._evidence_summary(session), []):
+                session.goal.objective, grounding, self._evidence_summary(session),
+                existing_statements):
             hmgr.add(h.get("statement", ""), h.get("rationale", ""),
                      h.get("discriminating_signals", []), float(h.get("prior", 0.2) or 0.2))
 
@@ -351,6 +363,28 @@ class TroubleshootingEngine:
                 or "invalid input" in low or "no parseable data" in low
                 or "% " in output[:3]):
             return                                        # errors are not evidence
+        # DETERMINISTIC EXTRACTION FIRST — Phase 1's compiler extractors
+        # (core.knowledge.compiler.semantic_analyzer) run over the same raw
+        # output before the LLM does. These facts are recorded as
+        # observations unconditionally: guaranteed-correct regex extraction
+        # (mtu, timers, neighbor state, ...) supplements the LLM's free-form
+        # analyze() call below rather than depending on it to notice and
+        # correctly phrase the same thing. Deliberately NOT wired into the
+        # impact/evidence-binding below (that logic is inherently tied to
+        # the LLM's own per-analysis judgment about which hypothesis a fact
+        # supports/contradicts) — this only guarantees the fact enters
+        # session.observations/the evidence graph, available to every
+        # evidence-gate check and every subsequent LLM call's context.
+        for det in self._deterministic_facts(output):
+            det_obs = Observation(device=device_ip, subject=det["subject"],
+                                  attribute=det["attribute"], value=det["value"],
+                                  source_command=command, raw_snippet=output[:200])
+            session.observations.append(det_obs)
+            try:
+                self.graph.add_observation(det_obs)
+            except Exception:
+                pass
+
         active = [{"id": h.id, "statement": h.statement} for h in session.active_hypotheses()]
         parsed = self.reasoner.analyze(command, device_ip, output, active)
 
@@ -394,6 +428,55 @@ class TroubleshootingEngine:
                 conf.update(hyp, ev, obs)
             # only bind impacts once (to the first/most-specific fact of this analysis)
             parsed["impacts"] = []
+
+    def _deterministic_facts(self, output: str) -> List[Dict[str, str]]:
+        """Runs Phase 1's deterministic semantic extractors
+        (core.knowledge.compiler.semantic_analyzer, built for exactly this
+        kind of line-oriented CLI/show-output text) over raw command output.
+        Returns the same {"subject","attribute","value"} shape analyze()'s
+        LLM output already uses, so callers don't need a second code path.
+        Best-effort: any failure returns [] and the LLM-only path is
+        unaffected."""
+        try:
+            from core.knowledge.compiler.ast_builder import build_ast
+            from core.knowledge.compiler.semantic_analyzer import analyze as extract_semantic
+        except Exception:
+            return []
+        try:
+            findings = extract_semantic(build_ast(output or ""))
+        except Exception:
+            return []
+
+        facts: List[Dict[str, str]] = []
+        for f in findings:
+            attrs = f.attributes
+            if f.kind == "interface":
+                name = attrs.get("name", "?")
+                for key in ("mtu", "area", "admin_state", "vrf", "vlan",
+                           "acl_ref", "qos_policy", "ip", "mask"):
+                    if attrs.get(key) not in (None, ""):
+                        facts.append({"subject": f"interface.{name}", "attribute": key,
+                                     "value": str(attrs[key])})
+            elif f.kind == "neighbor":
+                if attrs.get("state"):
+                    facts.append({"subject": f"neighbor.{attrs.get('neighbor_ip','?')}",
+                                 "attribute": "state", "value": str(attrs["state"])})
+            elif f.kind == "protocol":
+                if attrs.get("areas"):
+                    facts.append({"subject": f"protocol.{attrs.get('protocol','?')}",
+                                 "attribute": "areas",
+                                 "value": ",".join(str(a) for a in attrs["areas"])})
+            elif f.kind == "timer":
+                facts.append({"subject": f"timer.{attrs.get('context','?')}",
+                             "attribute": str(attrs.get("timer_type", "value")),
+                             "value": str(attrs.get("value", ""))})
+            elif f.kind == "acl_rule":
+                facts.append({"subject": f"acl.{attrs.get('acl_name','?')}",
+                             "attribute": "action", "value": str(attrs.get("action", ""))})
+            elif f.kind in ("error", "warning"):
+                facts.append({"subject": f.kind, "attribute": "message",
+                             "value": str(attrs.get("message", attrs.get("code", "")))})
+        return facts
 
     @staticmethod
     def _obs_matches_signals(obs, signals) -> bool:
@@ -447,6 +530,98 @@ class TroubleshootingEngine:
         lines = [f"{o.device} {o.subject}.{o.attribute}={o.value}" for o in session.observations[-12:]]
         return "; ".join(lines)
 
+    # ── deterministic seeding (runs BEFORE any LLM hypothesis call) ─────────────
+    def _detect_protocol(self, query: str) -> str:
+        """Reuses IntentEngine._detect_scenario when available (the real
+        production path — copilot_engine.py always constructs one); falls
+        back to a minimal keyword check for callers that supply their own
+        collector/validator/grounder/fix_validator and so never build an
+        IntentEngine (e.g. this package's own unit tests)."""
+        if self._intent is not None:
+            try:
+                return self._intent._detect_scenario(query)
+            except Exception:
+                pass
+        q = (query or "").lower()
+        for p in ("ospf", "bgp", "eigrp", "stp", "vlan", "acl", "nat"):
+            if p in q:
+                return p
+        return "general"
+
+    def _seed_deterministic_hypotheses(self, session: Session, hmgr: HypothesisManager,
+                                       query: str) -> None:
+        """Seeds hypotheses deterministically, before any LLM call, from two
+        already-built sources that were never wired into this engine:
+
+          1. The Mismatch Investigation
+             (core.troubleshooting.strategies.mismatch_bridge) — deterministic
+             cross-device parameter comparison. Its own module docstring says
+             it's "the single entry point core/troubleshooting/engine.py
+             calls" — it wasn't actually called anywhere; this is that call.
+          2. Compiled FailureSignatures
+             (core.knowledge.compiler.failure_signatures) for the detected
+             protocol — textbook root causes with real, non-arbitrary
+             confidence, seeded as a genuine prior instead of an LLM guessing
+             blind inside a fixed 0.05-0.4 band.
+
+        Both are best-effort: any failure is caught and logged, and the
+        LLM-driven path in run() proceeds unaffected either way — this
+        function only ever ADDS hypotheses, never blocks the existing flow.
+        """
+        try:
+            from core.troubleshooting.strategies.mismatch_bridge import (
+                detect_relationship_type, run_mismatch_investigation,
+            )
+            rel_type = detect_relationship_type(query)
+            if rel_type and self.gateway is not None and self._ip_to_dev:
+                run_mismatch_investigation(
+                    relationship_type=rel_type, devices=self.devices,
+                    ip_to_device=self._ip_to_dev, gateway=self.gateway,
+                    ai_call=self.ai, session=session, hmgr=hmgr, graph=self.graph,
+                )
+        except Exception as exc:
+            logger.debug("Mismatch investigation seeding skipped: %s", exc)
+
+        try:
+            from core.knowledge.compiler.failure_signatures import compile_failure_signatures
+            protocol = self._detect_protocol(query)
+            signatures = compile_failure_signatures(protocol)
+            if signatures:
+                # If the query names a specific stuck state (e.g. "EXSTART"),
+                # seed only that signature — otherwise seed all known
+                # signatures for the protocol and let confidence sort them.
+                def _norm(s: str) -> str:
+                    return re.sub(r"[^A-Z0-9]", "", (s or "").upper())
+                q_norm = _norm(query)
+                named = [s for s in signatures if _norm(s.stuck_state) in q_norm]
+                signatures = named or signatures
+
+            existing = {h.statement for h in session.hypotheses}
+            for sig in signatures:
+                if sig.likely_cause in existing:
+                    continue
+                hmgr.add(
+                    sig.likely_cause,
+                    rationale=(f"Compiled failure signature: {protocol} stuck in "
+                              f"'{sig.stuck_state}' (confidence {sig.confidence:.2f}). "
+                              f"Source: core.knowledge.compiler.failure_signatures — "
+                              f"compiled, not an LLM guess."),
+                    discriminating_signals=list(sig.evidence_fields) + [sig.stuck_state],
+                    prior=sig.confidence,
+                )
+                self._note_knowledge_source(
+                    session, f"compiled failure signature: {protocol}/{sig.stuck_state} "
+                            f"(confidence {sig.confidence:.2f})")
+        except Exception as exc:
+            logger.debug("Compiled failure-signature seeding skipped: %s", exc)
+
+    def _note_knowledge_source(self, session: Session, source: str) -> None:
+        """Records provenance for the report's 'Knowledge Sources Consulted'
+        section — only called where compiled NKC knowledge actually
+        contributed, so a session with none stayed pure-LLM."""
+        if source not in session.knowledge_sources:
+            session.knowledge_sources.append(source)
+
     def _persist(self, session: Session) -> None:
         try:
             self.session_memory.save(session)
@@ -454,8 +629,83 @@ class TroubleshootingEngine:
             pass
 
     # ── conclusion ──────────────────────────────────────────────────────────────
+    def _compiled_remediation_intent(self, session: Session, root_cause_statement: str,
+                                     allowed_intents: List[str]) -> Optional[dict]:
+        """Checks the NKC's compiled RemediationTemplate mapping
+        (core.knowledge.compiler.reasoning_artifact_compiler) for a
+        deterministic cause->intent mapping BEFORE asking the LLM to guess
+        one. Matches by exact statement text — the compiled
+        FailureSignature.likely_cause seeded as a hypothesis in
+        _seed_deterministic_hypotheses() is the SAME string
+        RemediationTemplate.applicable_signature carries, so a hypothesis
+        that originated from compiled knowledge gets a compiled remediation
+        too, not a fresh LLM guess. Returns None (falls through to the LLM)
+        for any cause the compiled library doesn't cover."""
+        try:
+            from core.knowledge.compiler.reasoning_artifact_compiler import ReasoningArtifactCompiler
+        except Exception:
+            return None
+        protocol = self._detect_protocol(root_cause_statement)
+        try:
+            for template in ReasoningArtifactCompiler().compile_remediation(protocol):
+                if template.applicable_signature != root_cause_statement:
+                    continue
+                if allowed_intents and template.intent_name not in allowed_intents:
+                    continue
+                iface = ""
+                for o in session.observations:
+                    if o.subject.startswith("interface.") and o.attribute == "mtu":
+                        iface = o.subject.split(".", 1)[1]
+                        break
+                self._note_knowledge_source(
+                    session, f"compiled remediation template: {protocol}/{template.intent_name}")
+                return {"name": template.intent_name, "params": {"protocol": protocol, "interface": iface},
+                       "rationale": f"Compiled remediation template (risk={template.risk_level}): "
+                                   f"{'; '.join(template.prerequisites)}"}
+        except Exception as exc:
+            logger.debug("Compiled remediation lookup skipped: %s", exc)
+        return None
+
+    def _compiled_verification(self, session: Session, protocol: str) -> Optional[Dict[str, Any]]:
+        """Checks reasoning_artifact_compiler.compile_verification(protocol)
+        for a compiled command/success-criteria template before falling
+        back to the LLM's plan_verification(). Substitutes any observed
+        interface into a `<interface>` placeholder so the commands are
+        directly usable, not just descriptive."""
+        try:
+            from core.knowledge.compiler.reasoning_artifact_compiler import ReasoningArtifactCompiler
+            templates = ReasoningArtifactCompiler().compile_verification(protocol)
+        except Exception as exc:
+            logger.debug("Compiled verification lookup skipped: %s", exc)
+            return None
+        if not templates:
+            return None
+        tmpl = templates[0]
+        iface = ""
+        for o in session.observations:
+            if o.subject.startswith("interface.") and o.attribute == "mtu":
+                iface = o.subject.split(".", 1)[1]
+                break
+        commands = [c.replace("<interface>", iface) if iface else c for c in tmpl.commands]
+        self._note_knowledge_source(session, f"compiled verification template: {protocol}")
+        return {"commands": commands, "success_criteria": tmpl.success_criteria}
+
     def _finish(self, session: Session, ranker: RootCauseRanker) -> TroubleshootReport:
         top = session.top()
+
+        if top:
+            try:
+                from core.knowledge.compiler.reasoning_artifact_compiler import ReasoningArtifactCompiler
+                risk = ReasoningArtifactCompiler().compile_risk(
+                    self._detect_protocol(session.goal.query),
+                    affected_object_count=len(session.observations))
+                session.risk = {
+                    "severity": risk.severity, "probability": risk.probability,
+                    "impact": risk.impact, "affected_object_count": risk.affected_object_count,
+                    "mitigation_reference": risk.mitigation_reference,
+                }
+            except Exception as exc:
+                logger.debug("Risk compilation skipped: %s", exc)
 
         if top and ranker.converged(session) and self.gateway is not None:
             # Vendor-agnostic remediation: engine emits a NEUTRAL intent; the
@@ -470,8 +720,10 @@ class TroubleshootingEngine:
                     allowed = self.gateway.supported_intents(device)
             except Exception:
                 allowed = []
-            intent_raw = self.reasoner.propose_intent(
-                top.statement, session.goal.objective, self._evidence_summary(session), allowed)
+            protocol = self._detect_protocol(session.goal.query)
+            intent_raw = self._compiled_remediation_intent(session, top.statement, allowed) or \
+                        self.reasoner.propose_intent(
+                            top.statement, session.goal.objective, self._evidence_summary(session), allowed)
             intent = RemediationIntent(
                 name=str(intent_raw.get("name", "")).strip(),
                 params=intent_raw.get("params", {}) or {},
@@ -486,9 +738,11 @@ class TroubleshootingEngine:
                     explanation=plan.explanation or intent.rationale, syntax_ok=True,
                     validation_md=f"Vendor-validated by adapter for intent `{intent.name}`.",
                 )
+                compiled_verif = self._compiled_verification(session, protocol)
                 session.verification = VerificationPlan(
                     commands=plan.verification_commands,
-                    success_criteria="Adapter-defined verification of the applied intent.",
+                    success_criteria=(compiled_verif["success_criteria"] if compiled_verif
+                                     else "Adapter-defined verification of the applied intent."),
                     rollback_on_fail=plan.rollback_commands,
                 )
                 session.status = ResolutionStatus.RESOLVED_PENDING_APPROVAL
@@ -521,7 +775,9 @@ class TroubleshootingEngine:
                     fix.syntax_ok = False
                 session.fix = fix
 
-                ver_raw = self.reasoner.plan_verification(top.statement, cfgs)
+                protocol = self._detect_protocol(session.goal.query)
+                ver_raw = self._compiled_verification(session, protocol) or \
+                         self.reasoner.plan_verification(top.statement, cfgs)
                 vcmds = [c for c in (ver_raw.get("commands") or []) if self._validator(c)]
                 session.verification = VerificationPlan(
                     commands=vcmds, success_criteria=ver_raw.get("success_criteria", ""),

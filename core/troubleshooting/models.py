@@ -188,6 +188,17 @@ class Session:
     verification: Optional[VerificationPlan] = None
     next_best_command: str = ""
     escalation_reason: str = ""
+    # Descriptive risk metadata from core.knowledge.compiler.artifacts.
+    # RiskAnnotation (severity/probability/impact/mitigation_reference) —
+    # kept as a plain dict here (not the RiskAnnotation type itself) so this
+    # core data-model module doesn't need to import the NKC compiler package
+    # just for a type hint. NOT an authorization decision — GovernanceEngine
+    # remains the sole authoritative pre-deployment gate.
+    risk: Optional[Dict[str, Any]] = None
+    # Which compiled-knowledge sources actually informed this session (e.g.
+    # "compiled failure signature: ospf/ExStart", "compiled remediation
+    # template") — distinct from a bare LLM guess, for explainability.
+    knowledge_sources: List[str] = field(default_factory=list)
 
     def active_hypotheses(self) -> List[Hypothesis]:
         return [h for h in self.hypotheses if h.state == HypothesisState.ACTIVE]
@@ -241,6 +252,8 @@ class TroubleshootReport:
                 if s.verification else None
             ),
             "final_resolution_status": s.status.value,
+            "risk": s.risk,
+            "knowledge_sources": list(s.knowledge_sources),
         }
 
     def to_markdown(self) -> str:
@@ -298,6 +311,21 @@ class TroubleshootReport:
             lines.append("```")
         else:
             lines.append("_pending root-cause confirmation_")
+
+        if s.risk:
+            r = s.risk
+            lines.append("\n### ⚠️ Risk Assessment")
+            lines.append(f"- **Severity:** {r.get('severity', 'unknown')}  ·  "
+                         f"**Probability:** {r.get('probability', 'unknown')}")
+            if r.get("impact"):
+                lines.append(f"- **Impact:** {r['impact']}")
+            if r.get("mitigation_reference"):
+                lines.append(f"- **Mitigation reference:** {r['mitigation_reference']}")
+
+        if s.knowledge_sources:
+            lines.append("\n### 📚 Knowledge Sources Consulted")
+            for src in s.knowledge_sources:
+                lines.append(f"- {src}")
 
         status_msg = {
             ResolutionStatus.RESOLVED_PENDING_APPROVAL: "🟢 Root cause confirmed — fix awaiting your approval.",
