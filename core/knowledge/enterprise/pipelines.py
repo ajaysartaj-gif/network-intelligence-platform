@@ -143,6 +143,66 @@ def ingest_rfc(
     return layer.ingest(rec)
 
 
+def fetch_and_ingest_vendor_doc(
+    vendor: str,
+    command: str,
+    platform: str = "",
+    layer: Optional[EnterpriseKnowledgeLayer] = None,
+) -> Dict[str, Any]:
+    """
+    Live-fetches a vendor doc for `command` (core.knowledge.vendor_router's
+    per-vendor fetchers) and ingests the result as SourceType.VENDOR_DOCS.
+    This is the ONE implementation shared by network_compiler.py's
+    `vendor-doc` CLI command and the supply-chain facade's
+    fetch_vendor_updates() — extracted here so neither duplicates it.
+    """
+    from core.knowledge.vendor_router import get_fetcher
+
+    layer = layer or get_knowledge_layer()
+    fetcher = get_fetcher(vendor)
+    if not fetcher:
+        return {"skipped": True, "reason": f"no fetcher registered for vendor '{vendor}'"}
+    entry = fetcher.fetch(command, platform)
+    if not entry:
+        return {"skipped": True, "reason": f"no live doc found for '{command}' ({vendor})"}
+
+    doc_id = f"vendor_docs:{vendor}:{command}"
+    content = f"{entry.description}\n\nSyntax:\n{entry.syntax}".strip()
+    rec = KnowledgeRecord(
+        doc_id=doc_id, title=entry.citation.source_title or command,
+        content=content, source_type=SourceType.VENDOR_DOCS,
+        vendor=vendor, platform=platform, tags=["vendor_doc", "live_fetch"],
+        extra={"source_url": entry.citation.source_url or ""},
+    )
+    return layer.ingest(rec)
+
+
+def archive_source(doc_id: str, layer: Optional[EnterpriseKnowledgeLayer] = None) -> bool:
+    """
+    Marks every chunk of `doc_id` (all versions) as archived — retired from
+    active use without being deleted, so it remains available as historical
+    evidence (per Level 1's "never modify the original source" rule).
+    Reuses the exact "rebuild clean primitive metadata" technique
+    EnterpriseKnowledgeLayer.ingest() already uses for `superseded` (Chroma
+    silently drops non-primitive metadata values on write, so this is not a
+    new technique, just the same one applied to a new flag).
+    """
+    layer = layer or get_knowledge_layer()
+    col = layer._col()
+    existing = col.get(where={"doc_id": doc_id}, include=["metadatas"])
+    ids = existing.get("ids", []) or []
+    metas = existing.get("metadatas", []) or []
+    if not ids:
+        return False
+    fixed = []
+    for mm in metas:
+        nm = {k: v for k, v in (mm or {}).items() if isinstance(v, (str, int, float, bool))}
+        nm["archived"] = True
+        fixed.append(nm)
+    col.update(ids=ids, metadatas=fixed)
+    return True
+
+
 def ingest_remediation(
     remediation_id: str,
     intent: str,

@@ -47,7 +47,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from core.knowledge.enterprise.knowledge_layer import SourceType, get_knowledge_layer
 from core.knowledge.enterprise.pipelines import (
-    ingest_directory, ingest_file, ingest_rfc, run_standard_pipelines,
+    fetch_and_ingest_vendor_doc, ingest_directory, ingest_file, ingest_rfc,
+    run_standard_pipelines,
 )
 
 
@@ -101,34 +102,14 @@ def cmd_rfc(args):
 
 
 def cmd_vendor_doc(args):
-    from core.knowledge.vendor_router import get_fetcher
-
-    fetcher = get_fetcher(args.vendor)
-    if not fetcher:
-        print(f"No fetcher registered for vendor '{args.vendor}'")
-        return
-    entry = fetcher.fetch(args.command, args.platform)
-    if not entry:
-        print(f"No live doc found for '{args.command}' ({args.vendor})")
-        return
-    layer = get_knowledge_layer()
-    from core.knowledge.enterprise.knowledge_layer import KnowledgeRecord
-
-    doc_id = f"vendor_docs:{args.vendor}:{args.command}"
-    content = f"{entry.description}\n\nSyntax:\n{entry.syntax}".strip()
-    rec = KnowledgeRecord(
-        doc_id=doc_id, title=entry.citation.source_title or args.command,
-        content=content, source_type=SourceType.VENDOR_DOCS,
-        vendor=args.vendor, platform=args.platform or "",
-        tags=["vendor_doc", "live_fetch"],
-        extra={"source_url": entry.citation.source_url or ""},
-    )
-    r = layer.ingest(rec)
-    if r.get("skipped"):
+    r = fetch_and_ingest_vendor_doc(args.vendor, args.command, args.platform or "")
+    if r.get("skipped") and r.get("reason", "").startswith(("no fetcher", "no live doc")):
+        print(r["reason"])
+    elif r.get("skipped"):
         print(f"Fetched but not re-ingested (unchanged) — version {r.get('version')}")
     else:
-        print(f"Fetched from {entry.citation.source_url} and ingested — "
-              f"version {r.get('version')}, {r.get('chunks')} chunk(s).")
+        print(f"Fetched and ingested — version {r.get('version')}, "
+              f"{r.get('chunks')} chunk(s).")
 
 
 def cmd_search(args):

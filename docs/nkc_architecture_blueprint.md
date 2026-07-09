@@ -615,8 +615,44 @@ Phase 4  Reasoning          SHIPPED — core/knowledge/compiler/artifacts.py
                            deferred (see the doc). Phase 5 (below) is the
                            next increment.
 
-Phase 5  API consolidation  Stabilize the API surface (Part 8) as a real
-                           SDK, not just a CLI; add diff()/export()
+Phase 5  Supply Chain       SHIPPED — core/knowledge/compiler/
+    facade (SHIPPED)       supply_chain.py: NetworkIntelligenceSupplyChain,
+                           a thin delegating facade unifying Level 1 (Raw
+                           Knowledge, Phase 0), Level 2 (Compiled
+                           Knowledge, Phases 1-4), and Level 3 (Operational
+                           Intelligence — core.intelligence.
+                           operational_memory.OperationalMemory +
+                           core.intelligence.learning.LearningEngine,
+                           BOTH pre-existing, predating NKC) under one
+                           stable API surface, satisfying this phase's
+                           original "API consolidation" goal plus more.
+                           Extended enterprise/pipelines.py with
+                           fetch_and_ingest_vendor_doc() (extracted from
+                           network_compiler.py's cmd_vendor_doc, now
+                           shared instead of duplicated) and
+                           archive_source(). Extended failure_
+                           signatures.py with compile_operational_
+                           failure_signatures() — the one genuinely new
+                           algorithm, converting OperationalMemory.
+                           recurring_failures()'s raw operational history
+                           into the SAME FailureSignature shape Phase 4's
+                           textbook OSPF/STP signatures use. Added
+                           publish_operational_intelligence(), which
+                           closes the "continuously learning supply
+                           chain" loop: a learned operational pattern
+                           publishes into BOTH the EnterpriseKnowledgeLayer
+                           (searchable) and the KnowledgeGraph
+                           (traversable), via the unchanged
+                           ingest_incident_report()/graph_ops.
+                           merge_into_graph(). 14 tests in
+                           tests/test_supply_chain.py, all passing; full
+                           suite unchanged from prior phases' 6 pre-
+                           existing failures. See
+                           docs/nkc_supply_chain.md for the full data-flow/
+                           sequence diagrams and an honest gap report
+                           (LearningEngine's Corpus hardcodes global
+                           memory singletons with no DI — a pre-existing
+                           constraint, not fixed here).
 
 Phase 6  Scale-out          Parallelize ingestion, graph persistence,
                            tracing — only once volume actually demands it
@@ -633,12 +669,13 @@ test suite pattern (`tests/test_knowledge_parsers.py` established the
 download — reuse it for Phase 1-3 tests).
 
 **Recommendation:** the next concrete build increment, if you want one, is
-**wiring Phase 4's artifacts into `TroubleshootingEngine`** (the natural
-completion of "compile once, reuse many times" — right now the artifacts
-are compiled but nothing consults them yet), **Phase 5** (API
-consolidation — four phases now give the compiler a real Graph/Fact/
-Artifact API surface worth stabilizing into one SDK), or **Phase 7**
-(security hardening, if multi-tenant/customer-data ingestion is becoming a
-real near-term requirement). Say the word and I'll scope whichever one the
-same way we scoped Phases 0-3: a short plan, sign-off, then build against
-the existing test pattern.
+**wiring Phase 4's artifacts (now reachable via the Phase 5 facade) into
+`TroubleshootingEngine`** (the natural completion of "compile once, reuse
+many times" — right now the artifacts are compiled and published but
+nothing in the live troubleshooting hot path consults them yet), **richer
+provenance chaining** (Phase 5's gap report item #2 — linking a published
+artifact back to the exact `MemoryEvent` ids, not just the signature
+text), or **Phase 7** (security hardening, if multi-tenant/customer-data
+ingestion is becoming a real near-term requirement). Say the word and
+I'll scope whichever one the same way we scoped Phases 0-4: a short plan,
+sign-off, then build against the existing test pattern.

@@ -97,3 +97,34 @@ def compile_acl_deny_signature(acl_objects: List[NormalizedObject]) -> List[Fail
             likely_cause=f"Traffic denied by ACL '{acl_name}' rule: {rule}",
             evidence_fields=["action", "rule"], confidence=0.9))
     return signatures
+
+
+def compile_operational_failure_signatures(recurring: List[dict]) -> List[FailureSignature]:
+    """
+    Converts core.intelligence.operational_memory.OperationalMemory.
+    recurring_failures()'s output — real operational history, not textbook
+    protocol knowledge — into the SAME FailureSignature shape the OSPF/STP/
+    ACL signatures above use, so patterns LEARNED FROM OPERATIONS join the
+    same artifact model rather than living in a separate, second shape.
+
+    Expects the exact dict shape recurring_failures() returns:
+    {"signature": str, "count": int, "last_ts": float, "intent": str,
+    "protocol": str}. Confidence scales with recurrence count — more
+    independent failures of the same signature is stronger evidence this
+    is a real pattern, not noise — capped at 0.9 (the same ceiling the
+    textbook ExStart/MTU signature uses; operational evidence earns the
+    same trust as verified protocol knowledge, never more).
+    """
+    signatures: List[FailureSignature] = []
+    for row in recurring:
+        signature = row.get("signature", "")
+        count = int(row.get("count", 0) or 0)
+        intent = row.get("intent", "") or "(no intent recorded)"
+        protocol = (row.get("protocol", "") or "operational").lower()
+        confidence = min(0.9, 0.5 + 0.1 * max(0, count - 2))
+        signatures.append(FailureSignature(
+            protocol=protocol, stuck_state=f"recurring:{signature[:12]}",
+            likely_cause=f"Recurring failure pattern (seen {count}x): intent "
+                        f"'{intent}' on protocol '{protocol}'",
+            evidence_fields=["signature", "count"], confidence=confidence))
+    return signatures
