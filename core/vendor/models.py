@@ -23,6 +23,12 @@ class ObjectType(str, Enum):
     APPLICATION = "application"; FLOW = "flow"; TELEMETRY = "telemetry"
     ALARM = "alarm"; EVENT = "event"; INVENTORY = "inventory"
     CONFIGURATION = "configuration"
+    # Added for the Network Knowledge Compiler's Semantic Compiler
+    # (core/knowledge/compiler/) — additive only, no existing adapter or
+    # engine branches on full enum membership since NormalizedObject.type
+    # is a plain str.
+    VLAN = "vlan"; QOS = "qos"; NAT = "nat"; SECURITY_RULE = "security_rule"
+    CLOUD_RESOURCE = "cloud_resource"
 
 
 @dataclass

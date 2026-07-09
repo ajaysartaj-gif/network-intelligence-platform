@@ -1,7 +1,30 @@
 from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Dict, List, Optional, Tuple
+
+
+class RelationType(str, Enum):
+    """Recommended edge-type vocabulary for GraphRelationship.relationship_type.
+
+    Optional, not enforced: relationship_type stays a plain str field so
+    every existing caller (e.g. core/topology/knowledge_graph_bridge.py)
+    keeps working unmodified — a str-backed enum member IS a str. New
+    producers (core/knowledge/compiler/relationships.py) should use these
+    values instead of inventing ad-hoc strings, so the graph accumulates a
+    closed, queryable vocabulary over time rather than free text.
+    """
+    DEPENDS_ON = "depends_on"; USES = "uses"; IMPLEMENTS = "implements"
+    CONTAINS = "contains"; CONNECTED_TO = "connected_to"
+    NEIGHBOR_OF = "neighbor_of"; ROUTES_THROUGH = "routes_through"
+    ADVERTISES = "advertises"; LEARNS_FROM = "learns_from"; CAUSES = "causes"
+    AFFECTED_BY = "affected_by"; CONFLICTS_WITH = "conflicts_with"
+    OVERRIDES = "overrides"; SUPPORTS = "supports"
+    DEPRECATED_BY = "deprecated_by"; INTRODUCED_IN = "introduced_in"
+    VALIDATED_BY = "validated_by"; VERIFIED_BY = "verified_by"
+    RESOLVED_BY = "resolved_by"; PROTECTS = "protects"
+    BELONGS_TO = "belongs_to"; RELATED_TO = "related_to"
 
 
 @dataclass
@@ -42,6 +65,20 @@ class KnowledgeGraph:
     ) -> None:
         if source not in self.nodes or target not in self.nodes:
             raise ValueError("Both source and target nodes must exist before adding a relationship.")
+
+        # Idempotent on the exact (source, target, relationship_type) triple:
+        # calling this twice for the same edge (e.g. recompiling an unchanged
+        # source, or CDP+LLDP both reporting the same neighbor) updates the
+        # existing edge's weight/metadata instead of appending a duplicate.
+        # Confirmed safe for the only existing caller
+        # (core/topology/knowledge_graph_bridge.py) — its traversal methods
+        # don't depend on duplicate-edge counts.
+        for existing_target, existing_rel in self.adjacency.get(source, []):
+            if existing_target == target and existing_rel.relationship_type == relationship_type:
+                existing_rel.weight = weight
+                existing_rel.metadata.update(metadata or {})
+                return
+
         relationship = GraphRelationship(
             source=source,
             target=target,
