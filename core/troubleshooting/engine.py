@@ -158,6 +158,7 @@ class TroubleshootingEngine:
         #      and the NKC's compiled FailureSignature library (textbook
         #      root causes with real confidence, not a 0.05-0.4 LLM guess).
         self._seed_deterministic_hypotheses(session, hmgr, query)
+        self._bind_compiled_signature_evidence(session, hmgr, conf)
 
         # 1. seed hypotheses FROM the objective + the state just observed —
         #    the LLM EXTENDS the deterministic seed above, it never replaces it
@@ -214,6 +215,7 @@ class TroubleshootingEngine:
             # 4. analyze each output — Result Analyzer
             for dev_ip, output in outputs.items():
                 self._ingest_output(evidence_label, dev_ip, output, session, hmgr, conf)
+            self._bind_compiled_signature_evidence(session, hmgr, conf)
 
             # 5. lifecycle + contradiction awareness
             hmgr.reap()
@@ -529,6 +531,65 @@ class TroubleshootingEngine:
     def _evidence_summary(self, session: Session) -> str:
         lines = [f"{o.device} {o.subject}.{o.attribute}={o.value}" for o in session.observations[-12:]]
         return "; ".join(lines)
+
+    _STUCK_STATE_RE = re.compile(r"stuck in '([^']+)'")
+
+    @staticmethod
+    def _norm_state(s: str) -> str:
+        return re.sub(r"[^A-Z0-9]", "", (s or "").upper())
+
+    def _observed_protocol_state_obs(self, session: Session) -> Optional[Observation]:
+        """Best-effort deterministic read of the most recent observation that
+        reports an actual protocol/neighbor stuck-state (e.g. 'EXSTART') — the
+        same vocabulary compiled FailureSignatures key off of via stuck_state."""
+        for o in reversed(session.observations):
+            if o.attribute == "state" and ("neighbor" in o.subject.lower()
+                                           or "protocol" in o.subject.lower()):
+                if o.value:
+                    return o
+        return None
+
+    def _bind_compiled_signature_evidence(self, session: Session, hmgr: HypothesisManager,
+                                          conf: ConfidenceCalculator) -> None:
+        """Closes a gap _ingest_output's docstring deliberately left open:
+        deterministic facts are recorded as observations but never bound as
+        evidence there (that binding is inherently the LLM's own judgment
+        call). Left unclosed, compiled-signature hypotheses seeded in
+        _seed_deterministic_hypotheses() never move past their static prior
+        — even when the actually observed protocol state overwhelmingly
+        confirms one and rules out the rest, leaving a cluttered, unconverged
+        hypothesis list. This binds exactly that one fully-deterministic
+        comparison — observed stuck-state vs. each compiled signature's own
+        stuck_state (recovered from the rationale string stamped at seed
+        time) — nothing else. Every other hypothesis (LLM-authored,
+        mismatch-investigation-seeded) is untouched. Runs at most once per
+        hypothesis (idempotent via the delta reason tag) so it never
+        double-counts across rounds."""
+        obs = self._observed_protocol_state_obs(session)
+        if obs is None:
+            return
+        observed_norm = self._norm_state(obs.value)
+        if not observed_norm:
+            return
+        for hyp in session.active_hypotheses():
+            m = self._STUCK_STATE_RE.search(hyp.rationale or "")
+            if not m:
+                continue
+            if any((d.reason or "").startswith("deterministic-state-match") for d in hyp.deltas):
+                continue
+            stuck_norm = self._norm_state(m.group(1))
+            if not stuck_norm:
+                continue
+            if stuck_norm == observed_norm:
+                effect, weight = Effect.SUPPORT, 0.6
+                reason = f"deterministic-state-match: observed state '{obs.value}' confirms this signature"
+            else:
+                effect, weight = Effect.CONTRADICT, 0.6
+                reason = f"deterministic-state-match: observed state '{obs.value}' rules out this signature"
+            ev = Evidence(observation_id=obs.id, hypothesis_id=hyp.id,
+                         effect=effect, weight=weight, reason=reason)
+            session.evidence.append(ev)
+            conf.update(hyp, ev, obs)
 
     # ── deterministic seeding (runs BEFORE any LLM hypothesis call) ─────────────
     def _detect_protocol(self, query: str) -> str:

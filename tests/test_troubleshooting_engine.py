@@ -64,9 +64,14 @@ def make_ai(support_weight=0.4, mode="converge"):
                 if timer:
                     impacts.append({"hypothesis_id": timer, "effect": "contradict",
                                     "weight": 0.5, "reason": "timers match"})
-            # neutral mode: no impacts
+            # neutral mode: no impacts. silent mode: no facts either — simulates
+            # the LLM reporting NOTHING interpretable, so engine.
+            # _bind_compiled_signature_evidence (which reads session.observations,
+            # not just LLM impacts) also has no observed state to act on.
+            facts = ([] if mode == "silent" else
+                    [{"subject": "ospf.neighbor", "attribute": "state", "value": "EXSTART"}])
             return json.dumps({
-                "facts": [{"subject": "ospf.neighbor", "attribute": "state", "value": "EXSTART"}],
+                "facts": facts,
                 "impacts": impacts,
             })
         if "MINIMUM safe configuration" in prompt:
@@ -149,12 +154,46 @@ def test_report_has_all_expected_fields():
 
 
 def test_escalates_instead_of_guessing():
-    # model never provides supporting evidence → engine must NOT invent a root cause
-    eng = build_engine(make_ai(mode="neutral"), cfg=TSConfig(max_steps=5, patience=2))
+    # Neither the LLM (mode="silent" → no facts, no impacts) NOR
+    # deterministic extraction (no IP+state pattern in this output, so
+    # core.knowledge.compiler.semantic_analyzer's neighbor extractor finds
+    # nothing and engine._bind_compiled_signature_evidence has no observed
+    # state to bind) contributes usable evidence here → engine must NOT
+    # invent a root cause. build_engine()'s shared collector output
+    # ("Neighbor 2.2.2.2 state EXSTART...") is deliberately NOT used for
+    # this test: since the engine now also binds evidence from compiled
+    # failure signatures against a deterministically-observed protocol
+    # state (independent of the LLM), that canned output legitimately DOES
+    # count as real evidence and would converge here — correctly, not a bug.
+    collector = lambda dev, cmds: {cmds[0]: "GigabitEthernet0/0 is up, line protocol is up"}
+    eng = TroubleshootingEngine(
+        ai_call=make_ai(mode="silent"), devices=DEVICES,
+        collector=collector,
+        validator=lambda c: c.lower().strip().startswith("show"),
+        grounder=lambda q, d: "",
+        fix_validator=lambda cmds, ad, dr: "✅ 1 ok · 0 blocked",
+        config=TSConfig(max_steps=5, patience=2),
+    )
     s = eng.run("ospf issue").session
     assert s.status in (ResolutionStatus.ESCALATE, ResolutionStatus.LIKELY_CAUSE_PRESENT)
     assert s.fix is None, "must not fabricate a fix without sufficient evidence"
     print("[5] escalates rather than guessing: PASS")
+
+
+def test_compiled_signature_converges_without_llm_impacts():
+    # The compiled-signature evidence path is deterministic and independent
+    # of the LLM's own impact judgments: even with mode="neutral" (LLM
+    # reports the observed EXSTART fact but deliberately contributes zero
+    # impacts), the observed state alone should let the matching compiled
+    # signature (ExStart -> MTU mismatch) converge, since it's real,
+    # directly-observed evidence, not an invented one.
+    eng = build_engine(make_ai(mode="neutral"), cfg=TSConfig(max_steps=5, patience=2))
+    s = eng.run("ospf issue").session
+    assert s.status == ResolutionStatus.RESOLVED_PENDING_APPROVAL, s.status
+    top = s.top()
+    assert top and "MTU" in top.statement
+    assert any(src.startswith("compiled failure signature") for src in s.knowledge_sources)
+    print("[5b] compiled signature converges from observed state alone: PASS")
 
 
 def test_memory_dedup_unit():
@@ -171,5 +210,6 @@ if __name__ == "__main__":
     test_confidence_only_moves_on_evidence()
     test_report_has_all_expected_fields()
     test_escalates_instead_of_guessing()
+    test_compiled_signature_converges_without_llm_impacts()
     test_memory_dedup_unit()
     print("\nALL TROUBLESHOOTING-ENGINE TESTS PASSED")
