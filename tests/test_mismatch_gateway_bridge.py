@@ -23,6 +23,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import core.topology.knowledge_graph_bridge as kgb
 from core.vendor import VendorGateway
 from core.troubleshooting.strategies.mismatch_bridge import (
     detect_relationship_type, run_mismatch_investigation,
@@ -30,6 +31,16 @@ from core.troubleshooting.strategies.mismatch_bridge import (
 from core.troubleshooting.evidence_graph import EvidenceGraph
 from core.troubleshooting.hypotheses import HypothesisManager
 from core.troubleshooting.models import Session
+
+
+def _no_real_topology(monkeypatch):
+    """Every test in this file exercises the Mismatch Investigation in
+    isolation from real CDP/LLDP discovery (that's covered separately in
+    tests/test_knowledge_graph_bridge.py) — this keeps these tests fast and
+    deterministic instead of depending on how a real netmiko connection
+    attempt to a non-existent lab IP happens to fail in any given
+    environment (fast refusal here, but a slow timeout elsewhere)."""
+    monkeypatch.setattr(kgb, "build_knowledge_graph", lambda devices, **kw: kgb.KnowledgeGraph())
 
 
 class FakeDevice:
@@ -92,7 +103,8 @@ def test_detect_relationship_type():
 
 
 # ── healthy case: no findings, nothing seeded ────────────────────────────────
-def test_healthy_link_seeds_nothing():
+def test_healthy_link_seeds_nothing(monkeypatch):
+    _no_real_topology(monkeypatch)
     gw, ip_to_dev = _build_gateway(r1_hello="10", r2_hello="10")
     session = Session()
     hmgr = HypothesisManager(session)
@@ -108,7 +120,8 @@ def test_healthy_link_seeds_nothing():
 
 
 # ── real mismatch: hello-interval disagreement through the REAL adapter ─────
-def test_hello_mismatch_seeds_evidence_backed_hypothesis():
+def test_hello_mismatch_seeds_evidence_backed_hypothesis(monkeypatch):
+    _no_real_topology(monkeypatch)
     gw, ip_to_dev = _build_gateway(r1_hello="10", r2_hello="30", r2_state="INIT")
     session = Session()
     hmgr = HypothesisManager(session)
@@ -156,11 +169,12 @@ def test_neighbor_router_id_resolves_to_management_ip():
 
 
 # ── end-to-end: the REAL production entry point, TroubleshootingEngine.run() ─
-def test_full_engine_run_wires_mismatch_investigation():
+def test_full_engine_run_wires_mismatch_investigation(monkeypatch):
     """Proves the wiring at the top level actually used in production
     (core/copilot_engine.py calls exactly this): TroubleshootingEngine.run()
     reaches an evidence-backed hypothesis from the Mismatch Investigation
     alone, with no LLM interpretation needed to explain the symptom."""
+    _no_real_topology(monkeypatch)
     from core.troubleshooting import TroubleshootingEngine, TSConfig
 
     gw, ip_to_dev = _build_gateway(r1_hello="10", r2_hello="30", r2_state="INIT")
