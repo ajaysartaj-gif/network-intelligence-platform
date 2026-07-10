@@ -98,7 +98,7 @@ class CommandResolver:
     # ── chain links ───────────────────────────────────────────────────────────
     def _from_rag(self, purpose, vendor, os_, phase, context) -> List[str]:
         try:
-            from core.orchestration_engine import get_orchestrator
+            from core.knowledge.orchestrator import get_orchestrator
             hits = get_orchestrator().rag_query(
                 f"{vendor} {os_} CLI command to {purpose}", top_k=3) or []
         except Exception:
@@ -110,7 +110,7 @@ class CommandResolver:
         # MCP is the LAST documentation source (after RAG). Best-effort: use the
         # orchestrator's fetcher if present; never block if MCP is unavailable.
         try:
-            from core.orchestration_engine import get_orchestrator
+            from core.knowledge.orchestrator import get_orchestrator
             orch = get_orchestrator()
             fetch = getattr(orch, "fetch_commands", None) or getattr(orch, "mcp_query", None)
             if not fetch:
@@ -129,7 +129,7 @@ class CommandResolver:
         # RAG context first so the command reflects current OEM knowledge.
         grounding = ""
         try:
-            from core.orchestration_engine import get_orchestrator
+            from core.knowledge.orchestrator import get_orchestrator
             hits = get_orchestrator().rag_query(f"{vendor} {os_} {purpose}", top_k=2) or []
             grounding = "\n".join(getattr(h, "text", "")[:300] for h in hits)
         except Exception:

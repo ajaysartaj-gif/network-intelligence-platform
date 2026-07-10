@@ -73,6 +73,32 @@ def test_resolve_set_returns_phases_from_chain_not_a_table():
     assert all(any(token in c for c in cmds) for cmds in out.values())
 
 
+def test_from_rag_reaches_the_real_knowledge_orchestrator(monkeypatch):
+    """Regression test: _from_rag/_from_mcp/_from_ai used to import
+    get_orchestrator from core.orchestration_engine, which does not define
+    that name at all -- the resulting ImportError was silently swallowed by
+    each method's bare `except Exception: return []`, so RAG/MCP grounding
+    never actually ran; every purpose fell through to ungrounded AI
+    generation. This proves the import now resolves to the real
+    core.knowledge.orchestrator.get_orchestrator (the one with rag_query)
+    and that a hit it returns actually reaches the resolver's output."""
+    import core.knowledge.orchestrator as ko
+
+    class _FakeHit:
+        def __init__(self, text):
+            self.text = text
+
+    class _FakeOrchestrator:
+        def rag_query(self, query, top_k=3):
+            return [_FakeHit("interface GigabitEthernet0/1 ip mtu 1300")]
+
+    monkeypatch.setattr(ko, "get_orchestrator", lambda: _FakeOrchestrator())
+
+    r = cr.CommandResolver(ai_call=lambda p: "")
+    out = r._from_rag("check mtu", "cisco", "ios", "diagnostic", "")
+    assert out, "a real RAG hit must survive the import fix and reach the resolver"
+
+
 def _run_all():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
