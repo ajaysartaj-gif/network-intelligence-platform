@@ -940,7 +940,18 @@ class IntentEngine:
         return INTENT_DIAGNOSTIC, self._detect_scenario(q)
 
     def _detect_scenario(self, q: str) -> str:
-        """Map query to a scenario key for command selection."""
+        """Map query to a scenario key for command selection.
+
+        Lowercases defensively rather than relying on every caller to do it
+        first: _classify() (the original caller) already lowercases before
+        calling this, but core.troubleshooting.engine.TroubleshootingEngine.
+        _detect_protocol() calls this directly with the RAW query — and
+        protocol acronyms (OSPF, BGP, ACL, NAT, ...) are conventionally
+        written uppercase, so a case-sensitive check here silently returned
+        "general" for the overwhelmingly common way people actually phrase
+        these queries, breaking every compiled-signature feature keyed off
+        the detected protocol."""
+        q = (q or "").lower()
         for scenario in ("ospf", "bgp", "eigrp", "vlan", "acl",
                          "dhcp", "nat", "performance", "interface"):
             if scenario in q:

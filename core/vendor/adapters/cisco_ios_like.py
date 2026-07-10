@@ -129,7 +129,17 @@ class IosLikeAdapter(VendorAdapter):
                                      ("network_type", r"Network Type (\w+)"),
                                      ("ospf_state", r"State (\S+)"),
                                      ("hello", r"Hello (\d+)"), ("dead", r"Dead (\d+)"),
-                                     ("neighbor_count", r"Neighbor Count is (\d+)")):
+                                     ("neighbor_count", r"Neighbor Count is (\d+)"),
+                                     # Without this, gateway_adapter.py's
+                                     # _router_id_to_device_ip() (which maps a
+                                     # neighbor's OSPF router-id back to its
+                                     # real management IP) always builds an
+                                     # EMPTY map, since "show ip ospf neighbor"
+                                     # always identifies the far end by
+                                     # router-id, never by management IP —
+                                     # every neighbor was silently skipped as
+                                     # "not an approved device."
+                                     ("router_id", r"Router ID (\d+\.\d+\.\d+\.\d+)")):
                         mm = re.search(pat, block)
                         if mm:
                             attrs[key] = mm.group(1)
@@ -163,7 +173,12 @@ class IosLikeAdapter(VendorAdapter):
                 # fallback, not this parser.
                 for m in re.finditer(r"(?im)^interface\s+(\S+)(.*?)(?=^interface\s+\S+|\Z)", t, re.S):
                     ifname = m.group(1)
-                    mtu_m = re.search(r"\bip mtu\s+(\d+)", m.group(2), re.I)
+                    # Anchored to the start of a config line (after
+                    # indentation) so a "description" line merely MENTIONING
+                    # "ip mtu 9999" in free text — or a negated "no ip mtu
+                    # 9999" line — is never misread as a real override; only
+                    # an actual "ip mtu <n>" config command matches.
+                    mtu_m = re.search(r"^\s*ip mtu\s+(\d+)", m.group(2), re.I | re.M)
                     if mtu_m:
                         out.append(obj(ObjectType.INTERFACE, device=ip, id=ifname,
                                        ip_mtu=mtu_m.group(1)))

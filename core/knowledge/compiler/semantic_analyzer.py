@@ -71,7 +71,11 @@ def interface_extractor(root: ASTNode) -> List[SemanticFinding]:
         if ip_m:
             attrs["ip"], attrs["mask"] = ip_m.group(1), ip_m.group(2)
 
-        mtu_m = _child_value(node, r"\bmtu\s+(\d+)")
+        # Anchored to the start of the line (after indentation) so a NEGATED
+        # line ("no mtu 1300", removing an override) is never misread as a
+        # positive one — the old \bmtu\s+(\d+) matched "mtu 1300" as a
+        # substring of "no mtu 1300" regardless of the leading "no".
+        mtu_m = _child_value(node, r"^\s*mtu\s+(\d+)")
         if mtu_m:
             attrs["mtu"] = int(mtu_m.group(1))
 

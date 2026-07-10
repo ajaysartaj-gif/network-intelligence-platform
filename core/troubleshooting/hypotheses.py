@@ -22,10 +22,19 @@ from .models import (
 
 # Generic tokens carry no diagnostic subject, so they must not create spurious
 # matches between an observation and a hypothesis's discriminating signal, nor
-# spurious similarity between two hypotheses.
+# spurious similarity between two hypotheses. Includes domain-boilerplate
+# connector words ("mismatch", "between", "neighbors", protocol names) that
+# appear in nearly every hypothesis sentence within a session and so add no
+# discriminating power — without these, two genuinely DIFFERENT root causes
+# ("OSPF hello timer mismatch between neighbors" vs "OSPF dead timer mismatch
+# between neighbors") were measured at Jaccard 0.71 (>= the 0.6 threshold),
+# silently merging two distinct hypotheses into one and losing the discarded
+# one entirely.
 _STOP = {"state", "value", "status", "up", "down", "id", "name", "count",
          "the", "is", "on", "of", "a", "an", "to", "for", "not", "no", "issue",
-         "problem", "or", "and", "configuration", "configured", "misconfigured"}
+         "problem", "or", "and", "configuration", "configured", "misconfigured",
+         "mismatch", "mismatched", "between", "neighbor", "neighbors",
+         "ospf", "bgp", "eigrp", "stp", "isis", "rip"}
 
 
 def content_tokens(s: str) -> set:

@@ -150,6 +150,15 @@ def test_interface_extractor():
     assert vlan_iface.attributes["vlan"] == 10
 
 
+def test_interface_extractor_ignores_negated_mtu_line():
+    """Regression: \\bmtu\\s+(\\d+) used to match "mtu 1300" as a substring of
+    a NEGATED "no mtu 1300" line (removing an override), misreporting it as a
+    positive value. Anchoring to line-start (after indentation) fixes this."""
+    root = build_ast("interface GigabitEthernet2/0\n no mtu 1300\nend\n")
+    findings = [f for f in analyze(root) if f.kind == "interface"]
+    assert findings and "mtu" not in findings[0].attributes
+
+
 def test_protocol_extractor_stanza_and_neighbor():
     root = build_ast(SAMPLE_CONFIG)
     findings = analyze(root)

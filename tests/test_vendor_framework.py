@@ -28,6 +28,32 @@ def _gw():
                          hint_provider=lambda d: {"sys_descr": d._descr})
 
 
+def test_ios_ip_mtu_ignores_mere_mention_in_description():
+    """Regression: the ip_mtu stanza regex used to search the WHOLE interface
+    body unanchored, so a "description ... ip mtu 9999 ..." line (or a
+    negated "no ip mtu 9999") was misread as a real override. Anchoring to
+    the start of a config line (after indentation) fixes this."""
+    from core.vendor.adapters.cisco_ios_like import IosLikeAdapter
+
+    adapter = IosLikeAdapter()
+    profile = VendorProfile(vendor="ios-like", os="ios-like", version="", confidence=0.9,
+                            capabilities=[], attributes={"ip": "10.0.0.1"})
+    cfg = (
+        "interface GigabitEthernet0/0\n"
+        " description reference: legacy ip mtu 9999 config, do not reuse\n"
+        " ip address 10.0.0.3 255.255.255.0\n"
+        " ip mtu 1300\n"
+    )
+    objs = adapter.parse_output(
+        Operation(Op.GET_INTERFACE_DETAILS, {"protocol": "ospf"}),
+        {"show running-config | section ^interface": cfg}, profile)
+    merged = {}
+    for o in objs:
+        merged.setdefault(o.id, {}).update(o.attributes)
+    assert merged["GigabitEthernet0/0"]["ip_mtu"] == "1300"
+    print("[ip_mtu] description mention ignored, real override captured: PASS")
+
+
 def test_auto_discovery_registers_adapters():
     discover_adapters(force=True)
     names = {a.name for a in all_adapters()}
