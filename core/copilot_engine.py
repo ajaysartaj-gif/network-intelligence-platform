@@ -394,26 +394,128 @@ def _apply_cfg(call_ai_fn, pending_state) -> List[str]:
     return summary or ["ℹ️ No configuration commands resolved to apply."]
 
 
-def _apply_ts_fix(call_ai_fn, pending_state) -> List[str]:
-    """Apply an approved troubleshooting fix to the target device(s). Human-gated."""
+def _infer_protocol(text: str) -> str:
+    """Minimal keyword fallback — same technique
+    core.troubleshooting.engine.TroubleshootingEngine._detect_protocol uses when
+    no IntentEngine-driven scenario detection is available. Good enough for
+    tagging an operational-memory record; not used for any safety decision."""
+    q = (text or "").lower()
+    for p in ("ospf", "bgp", "eigrp", "stp", "vlan", "acl", "nat"):
+        if p in q:
+            return p
+    return ""
+
+
+def _apply_ts_fix(call_ai_fn, pending_state) -> Dict[str, Any]:
+    """Apply an approved troubleshooting fix to the target device(s). Human-gated,
+    and — GOVERNANCE-gated: core.governance.engine.GovernanceEngine (already
+    built, previously never invoked from this path) checks compliance/
+    authorization/risk/rollback readiness BEFORE any command reaches a device.
+    Blocking findings (a non-compliant command, an explicit policy denial) stop
+    the apply for that device entirely; non-blocking concerns (risk, missing
+    rollback, simulation not performed) are surfaced as warnings, matching the
+    engine's own lenient-by-design default (strict=True is a deliberate future
+    step, not enabled here since no operator identity is threaded through this
+    UI yet).
+
+    Also re-collects the verification commands immediately after a successful
+    apply, so the report's own verification plan is actually executed instead
+    of only ever being displayed — the caller uses this to show fresh
+    post-fix state and ask the user to confirm resolution (core.knowledge.
+    compiler.supply_chain.NetworkIntelligenceSupplyChain.record_resolution /
+    record_failed_resolution is only ever called on that explicit human
+    confirmation — see _record_ts_outcome — never inferred here).
+
+    Returns {"summary_lines": [...], "verification_output": {device_ip: text},
+    "applied_any": bool}.
+    """
+    from core.governance.engine import get_governance_engine
+    from core.governance.contract import GovernanceStatus
+
     devices = pending_state.get("devices", [])
     target_ip = pending_state.get("target_ip", "")
+    root_cause = pending_state.get("root_cause", "")
     ie = _build_intent_engine(call_ai_fn, devices)
-    # fix commands are plain config lines; strip any "(on X)" prefix defensively
+    # fix/rollback commands are plain config lines; strip any "(on X)" prefix defensively
     import re as _re
     cfg = [_re.sub(r"^\(on [^)]+\)\s*", "", c).strip()
            for c in pending_state.get("fix_commands", []) if c and c.strip()]
+    rollback = [_re.sub(r"^\(on [^)]+\)\s*", "", c).strip()
+               for c in pending_state.get("rollback_commands", []) if c and c.strip()]
+    verification_cmds = [c.strip() for c in pending_state.get("verification_commands", []) if c and c.strip()]
     targets = [d for d in devices if getattr(d, "ip", None) == target_ip] or devices
+
+    if not cfg:
+        return {"summary_lines": ["ℹ️ No config commands resolved from the fix."],
+               "verification_output": {}, "applied_any": False}
+
+    gov = get_governance_engine()
     summary: List[str] = []
+    verification_output: Dict[str, str] = {}
+    applied_any = False
     for dev in targets:
-        if not cfg:
+        label = getattr(dev, "hostname", None) or dev.ip
+        contract = gov.govern(device=dev.ip, commands=cfg, intent=root_cause,
+                              protocol=_infer_protocol(root_cause),
+                              rollback_commands=rollback, strict=False)
+        if contract.status in (GovernanceStatus.COMPLIANCE_FAILURE, GovernanceStatus.REJECTED):
+            reasons = "; ".join(contract.blocking_conditions) or "policy denied this change."
+            summary.append(f"🛑 Blocked on {label}: {reasons}")
             continue
+        for w in contract.warnings:
+            summary.append(f"⚠️ {label}: {w}")
         try:
             ie._ssh_apply(dev, cfg)
-            summary.append(f"✅ Applied on {getattr(dev, 'hostname', None) or dev.ip}")
+            summary.append(f"✅ Applied on {label}")
+            applied_any = True
+            if verification_cmds:
+                try:
+                    dr = ie._ssh_collect(dev, verification_cmds)
+                    verification_output[dev.ip] = "\n".join(dr.outputs.values())
+                except Exception as exc:
+                    verification_output[dev.ip] = f"(verification collection failed: {exc})"
         except Exception as exc:
-            summary.append(f"⚠️ {getattr(dev, 'hostname', None) or dev.ip}: {exc}")
-    return summary or ["ℹ️ No config commands resolved from the fix."]
+            summary.append(f"⚠️ {label}: {exc}")
+
+    if not summary:
+        summary = ["ℹ️ No config commands resolved to apply."]
+    return {"summary_lines": summary, "verification_output": verification_output, "applied_any": applied_any}
+
+
+def _record_ts_outcome(pending_state, success: bool) -> str:
+    """Human-confirmed learning feedback: the ONE call site in the live runtime
+    that invokes core.knowledge.compiler.supply_chain.NetworkIntelligenceSupplyChain's
+    record_resolution/record_failed_resolution + learn_from_incident — all
+    already built and tested (tests/test_supply_chain.py), never previously
+    invoked outside their own tests. A human confirming/denying resolution
+    (never an automatic keyword guess against free-text success_criteria) is
+    what triggers this, so the learning system is only ever trained on ground
+    truth, not a fragile inference."""
+    from core.knowledge.compiler.supply_chain import NetworkIntelligenceSupplyChain
+
+    root_cause = pending_state.get("root_cause", "")
+    protocol = _infer_protocol(root_cause)
+    target_ip = pending_state.get("target_ip", "")
+    devices = pending_state.get("devices", [])
+    device_ip = target_ip or (getattr(devices[0], "ip", "") if devices else "")
+    cfg = pending_state.get("fix_commands", [])
+
+    sc = NetworkIntelligenceSupplyChain()
+    try:
+        if success:
+            sc.record_resolution(root_cause, device_ip, commands=cfg, protocol=protocol)
+        else:
+            sc.record_failed_resolution(
+                root_cause, device_ip, reason="Operator reported the issue was not resolved.",
+                commands=cfg, protocol=protocol)
+        sc.learn_from_incident(success=success, intent=root_cause, device=device_ip,
+                               protocol=protocol, commands=cfg)
+    except Exception as exc:
+        return f"⚠️ Outcome recorded locally, but learning update failed: {exc}"
+    return ("✅ Recorded as resolved — this outcome now informs future troubleshooting."
+           if success else
+           "📝 Recorded as unresolved — flagged for review; a recurring pattern here "
+           "will be surfaced automatically.")
 
 
 def _render_assistant_message(content: str, mode_key: Optional[str]) -> None:
@@ -998,13 +1100,47 @@ def render_copilot_page(call_ai_fn):
                 _ts_col1, _ts_col2 = st.columns(2)
                 with _ts_col1:
                     if st.button("✅ Deploy Fix", key=f"cp_ts_deploy_{active_conversation['id']}", use_container_width=True):
-                        summary = _apply_ts_fix(call_ai_fn, pending_state)
+                        result = _apply_ts_fix(call_ai_fn, pending_state)
                         active_conversation["messages"].append(
-                            {"role": "assistant", "content": "\n".join(summary), "mode": "troubleshoot"})
-                        action_states[active_conversation["id"]] = {}
+                            {"role": "assistant", "content": "\n".join(result["summary_lines"]),
+                            "mode": "troubleshoot"})
+                        if result["verification_output"]:
+                            vlines = [f"**{ip}**\n```\n{out}\n```"
+                                     for ip, out in result["verification_output"].items()]
+                            active_conversation["messages"].append({
+                                "role": "assistant",
+                                "content": "🔍 **Post-fix verification (re-collected live):**\n\n"
+                                          + "\n".join(vlines),
+                                "mode": "troubleshoot",
+                            })
+                        if result["applied_any"]:
+                            action_states[active_conversation["id"]] = {**pending_state, "kind": "ts_verify"}
+                        else:
+                            action_states[active_conversation["id"]] = {}
                         st.rerun()
                 with _ts_col2:
                     if st.button("❌ Discard", key=f"cp_ts_discard_{active_conversation['id']}", use_container_width=True):
+                        action_states[active_conversation["id"]] = {}
+                        st.rerun()
+            elif pending_state.get("kind") == "ts_verify":
+                st.markdown("### 🔍 Confirm the fix")
+                if pending_state.get("root_cause"):
+                    st.markdown(f"**Root cause addressed:** {pending_state['root_cause']}")
+                st.caption("Review the fresh verification output above. Your answer trains the "
+                          "platform's operational memory — it is never guessed automatically.")
+                _tv_col1, _tv_col2 = st.columns(2)
+                with _tv_col1:
+                    if st.button("✅ Confirms Fixed", key=f"cp_ts_confirm_{active_conversation['id']}", use_container_width=True):
+                        msg = _record_ts_outcome(pending_state, success=True)
+                        active_conversation["messages"].append(
+                            {"role": "assistant", "content": msg, "mode": "troubleshoot"})
+                        action_states[active_conversation["id"]] = {}
+                        st.rerun()
+                with _tv_col2:
+                    if st.button("❌ Still Broken", key=f"cp_ts_deny_{active_conversation['id']}", use_container_width=True):
+                        msg = _record_ts_outcome(pending_state, success=False)
+                        active_conversation["messages"].append(
+                            {"role": "assistant", "content": msg, "mode": "troubleshoot"})
                         action_states[active_conversation["id"]] = {}
                         st.rerun()
             elif pending_state.get("kind") == "cfg_approval":
