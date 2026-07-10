@@ -704,16 +704,23 @@ class TroubleshootingEngine:
         try:
             from core.knowledge.compiler.failure_signatures import compile_failure_signatures
             protocol = self._detect_protocol(query)
+            # Seed EVERY known compiled signature for the protocol — never
+            # narrow by matching the query's wording against a stuck_state
+            # name. That narrowing used to seed only the signature whose name
+            # appeared in the query text, but a casual phrase like "OSPF down
+            # state" (meaning "not working", not the literal FSM state) is
+            # indistinguishable from a deliberate "stuck in Down" report —
+            # and narrowing to the wrong signature permanently locked out the
+            # correct one (it was never seeded, so no later evidence could
+            # ever resurrect it) AND starved the command planner's
+            # discriminating-signal prompt (Down's only signal is
+            # "admin_state", so "show ip ospf neighbor" — the one command
+            # that reveals the real state — was never even suggested).
+            # _bind_compiled_signature_evidence() already deterministically
+            # confirms the matching signature and contradicts the rest once
+            # real evidence arrives, so seeding all of them costs nothing and
+            # loses nothing.
             signatures = compile_failure_signatures(protocol)
-            if signatures:
-                # If the query names a specific stuck state (e.g. "EXSTART"),
-                # seed only that signature — otherwise seed all known
-                # signatures for the protocol and let confidence sort them.
-                def _norm(s: str) -> str:
-                    return re.sub(r"[^A-Z0-9]", "", (s or "").upper())
-                q_norm = _norm(query)
-                named = [s for s in signatures if _norm(s.stuck_state) in q_norm]
-                signatures = named or signatures
 
             existing = {h.statement for h in session.hypotheses}
             for sig in signatures:
