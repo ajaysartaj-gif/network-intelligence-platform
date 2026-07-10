@@ -83,6 +83,16 @@ class IosLikeAdapter(VendorAdapter):
         # asked for interface details.
         if operation.name == Op.GET_INTERFACE_DETAILS and proto == "ospf":
             commands.append(f"show interface{suffix}")
+            # `show interface`'s "MTU 1500 bytes" line is the interface's
+            # underlying L2/hardware MTU — it does NOT reflect an `ip mtu`
+            # override, which is the value OSPF's DBD exchange actually
+            # checks for the classic ExStart MTU-mismatch signature. Without
+            # this command, a real `ip mtu` override is invisible to the
+            # adapter entirely, and only the (possibly identical-on-both-
+            # sides) hardware MTU is ever compared — silently missing the
+            # real mismatch or reporting a false one.
+            commands.append(f"show running-config interface {scoped}" if scoped
+                            else "show running-config | section ^interface")
         return commands
 
     def parse_output(self, operation: Operation, raw: Dict[str, str],
@@ -144,6 +154,19 @@ class IosLikeAdapter(VendorAdapter):
                 for m in re.finditer(r"(\S+)\s+\S+\s+\w+\s+\w+\s+(up|down|administratively down)\s+(up|down)", t):
                     out.append(obj(ObjectType.INTERFACE, device=ip, id=m.group(1),
                                    status=m.group(2).lower(), line_protocol=m.group(3).lower()))
+            elif "running-config interface" in low or ("section" in low and "interface" in low):
+                # Per-interface config stanzas — extract the explicit
+                # `ip mtu <n>` override. Absence here means no override is
+                # configured, so the effective ip mtu equals the hardware
+                # MTU (Cisco IOS's own default rule) — the caller (e.g.
+                # gateway_adapter.read_parameter) is responsible for that
+                # fallback, not this parser.
+                for m in re.finditer(r"(?im)^interface\s+(\S+)(.*?)(?=^interface\s+\S+|\Z)", t, re.S):
+                    ifname = m.group(1)
+                    mtu_m = re.search(r"\bip mtu\s+(\d+)", m.group(2), re.I)
+                    if mtu_m:
+                        out.append(obj(ObjectType.INTERFACE, device=ip, id=ifname,
+                                       ip_mtu=mtu_m.group(1)))
             elif "section" in low or "running-config" in low:
                 cfg = [ln.strip() for ln in t.splitlines()
                        if re.search(r"router ospf|network |area |passive-interface|ip ospf",

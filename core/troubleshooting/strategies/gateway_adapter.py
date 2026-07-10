@@ -113,7 +113,18 @@ class GatewayDeviceAdapter(DeviceAdapter):
         if device is not None and self._protocol:
             objs, _err = self.gateway.collect(
                 device, Operation(Op.GET_INTERFACE_DETAILS, {"protocol": self._protocol}))
-        by_iface = {o.id: o for o in (objs or []) if getattr(o, "type", "") == "interface"}
+        # MERGE, not overwrite: the adapter legitimately returns MULTIPLE
+        # NormalizedObjects for the SAME interface id — one per command
+        # (e.g. "show ip ospf interface" for area/hello/dead, "show
+        # interface" for hardware mtu, "show running-config interface X"
+        # for an ip_mtu override). A naive {o.id: o} comprehension keeps
+        # only whichever object happens to be last and silently discards
+        # every attribute the others carried.
+        by_iface: Dict[str, Dict[str, Any]] = {}
+        for o in (objs or []):
+            if getattr(o, "type", "") != "interface":
+                continue
+            by_iface.setdefault(o.id, {}).update(o.attributes)
         self._iface_cache[device_ip] = by_iface
         return by_iface
 
@@ -215,7 +226,17 @@ class GatewayDeviceAdapter(DeviceAdapter):
         iface_obj = self._interfaces(endpoint.device).get(endpoint.context)
         if iface_obj is None:
             return ParameterValue(value=None, raw="", available=False)
-        raw = iface_obj.get(attr)
+        # "interface_mtu" means the IP MTU OSPF's DBD exchange actually
+        # checks — a distinct, independently-configurable value (`ip mtu
+        # <n>`) from the interface's underlying L2/hardware MTU (the "mtu"
+        # attr, from `show interface`). Prefer the explicit ip_mtu override
+        # when the adapter reported one; the hardware MTU is only a
+        # legitimate stand-in when no override exists (Cisco IOS: ip mtu
+        # defaults to the interface MTU).
+        if read_intent == "interface_mtu" and iface_obj.get("ip_mtu") is not None:
+            raw = iface_obj.get("ip_mtu")
+        else:
+            raw = iface_obj.get(attr)
         if raw is None:
             return ParameterValue(value=None, raw="", available=False)
         value = normalize(read_intent, raw)

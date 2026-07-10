@@ -463,9 +463,19 @@ class TroubleshootingEngine:
                 if kv.get("state"):
                     facts.append({"subject": f"protocol.{oid or '?'}",
                                  "attribute": "state", "value": kv["state"]})
-            elif otype == "interface" and kv.get("mtu"):
-                facts.append({"subject": f"interface.{oid or '?'}",
-                             "attribute": "mtu", "value": kv["mtu"]})
+            elif otype == "interface":
+                if kv.get("mtu"):
+                    facts.append({"subject": f"interface.{oid or '?'}",
+                                 "attribute": "mtu", "value": kv["mtu"]})
+                # ip_mtu (from `ip mtu <n>`, IosLikeAdapter's dedicated
+                # running-config parse) is kept as its OWN, distinctly-named
+                # fact — never merged into "mtu" — since it's a different,
+                # independently-configurable value from the interface's
+                # hardware MTU, and conflating them is exactly what made a
+                # real ip-mtu-based OSPF mismatch invisible before.
+                if kv.get("ip_mtu"):
+                    facts.append({"subject": f"interface.{oid or '?'}",
+                                 "attribute": "ip_mtu", "value": kv["ip_mtu"]})
         return facts
 
     def _deterministic_facts(self, output: str) -> List[Dict[str, str]]:
