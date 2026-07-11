@@ -25,3 +25,12 @@ core/.env
 .netbrain_memory.sqlite
 .netbrain_rag_chroma/
 .netbrain_topology_cache.json
+
+# ── Downloaded vendor docs (auto-generated, regenerate via
+# core/knowledge/doc_downloader/run.py) — fetched content and its
+# manifest, not code. The folder hierarchy itself is kept via .gitkeep,
+# and pdf_downloads/README.md (explaining the mechanism) is intentionally
+# NOT matched by these patterns.
+pdf_downloads/cisco/*/*.md
+pdf_downloads/versa/*/*.pdf
+pdf_downloads/.manifest.json
