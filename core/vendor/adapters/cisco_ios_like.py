@@ -72,7 +72,10 @@ class IosLikeAdapter(VendorAdapter):
             (Op.GET_ROUTING_INFORMATION, "ospf"): "show ip route ospf",
             (Op.GET_ROUTING_INFORMATION, ""): "show ip route",
             (Op.GET_CONFIGURATION, "ospf"): "show running-config | section router ospf",
+            (Op.GET_CONFIGURATION, "acl"): "show access-lists",
+            (Op.GET_CONFIGURATION, "nat"): "show ip nat statistics",
             (Op.GET_CONFIGURATION, ""): "show running-config",
+            (Op.COLLECT_EVIDENCE, "vlan"): "show logging | include NATIVE_VLAN",
         }
         cmd = table.get((operation.name, proto)) or table.get((operation.name, ""))
         if not cmd:
@@ -279,6 +282,84 @@ class IosLikeAdapter(VendorAdapter):
                         continue
                     out.append(obj(ObjectType.NEIGHBOR, device=ip, id=m.group(1),
                                    protocol="stp", state="ERRDISABLED"))
+            elif "access-lists" in low:
+                # Real "show access-lists" text: a header line naming the
+                # ACL ("Standard/Extended IP access list <name>") followed
+                # by its numbered rule lines, each optionally suffixed with
+                # a "(N matches)" hit counter. Each rule becomes its own
+                # ObjectType.ACL object — compile_acl_deny_signature() (core.
+                # knowledge.compiler.failure_signatures) reads these
+                # DIRECTLY: a deny rule IS the failure signature, not an
+                # inference from a state machine, so there's no "state"
+                # vocabulary to map here the way every FSM protocol above
+                # needs.
+                acl_name = None
+                for line in t.splitlines():
+                    hm = re.match(r"(?:Standard|Extended) IP access list (\S+)", line.strip())
+                    if hm:
+                        acl_name = hm.group(1)
+                        continue
+                    rm = re.match(r"(\d+)\s+(permit|deny)\s+(.*?)(?:\s*\(\d+ matches?\))?\s*$",
+                                 line.strip(), re.I)
+                    if rm and acl_name:
+                        # Standard ACL rule text legitimately contains a literal
+                        # comma ("192.168.1.0, wildcard bits 0.0.0.255") — but
+                        # this object round-trips through NormalizedObject.
+                        # summary()'s ", "-joined key=value text and back (see
+                        # engine.py's _bind_acl_deny_evidence), which would
+                        # otherwise silently truncate the rule at that comma.
+                        rule_text = rm.group(3).strip().replace(",", ";")
+                        out.append(obj(ObjectType.ACL, device=ip, id=f"{acl_name}-{rm.group(1)}",
+                                       acl_name=acl_name, action=rm.group(2).lower(),
+                                       rule=rule_text))
+            elif "nat statistics" in low:
+                # Real "show ip nat statistics" text: an "Inside interfaces:"
+                # section and an "Outside interfaces:" section, each
+                # followed by indented interface-name lines (zero or more)
+                # until the next unindented line. An EMPTY section here is
+                # a direct, unambiguous signal — not an inference — that
+                # NAT has no interface of that role at all, so nothing can
+                # ever be translated regardless of any other configuration.
+                inside_ifaces: List[str] = []
+                outside_ifaces: List[str] = []
+                section = None
+                hits, misses = "0", "0"
+                for line in t.splitlines():
+                    stripped = line.strip()
+                    if stripped.startswith("Inside interfaces"):
+                        section = "inside"
+                        continue
+                    if stripped.startswith("Outside interfaces"):
+                        section = "outside"
+                        continue
+                    hm = re.match(r"Hits:\s*(\d+)\s+Misses:\s*(\d+)", stripped)
+                    if hm:
+                        hits, misses = hm.group(1), hm.group(2)
+                        section = None
+                        continue
+                    if section and line[:1].isspace() and stripped:
+                        (inside_ifaces if section == "inside" else outside_ifaces).append(stripped)
+                    elif section and not line[:1].isspace():
+                        section = None
+                out.append(obj("nat", device=ip, id="nat",
+                               inside_count=len(inside_ifaces), outside_count=len(outside_ifaces),
+                               hits=hits, misses=misses))
+            elif "native_vlan" in low:
+                # Real Cisco syslog line, verbatim:
+                #   %CDP-4-NATIVE_VLAN_MISMATCH: Native VLAN mismatch
+                #   discovered on GigabitEthernet0/1 (1), with Switch2
+                #   GigabitEthernet0/1 (10).
+                # CDP already did the cross-device comparison — this reads
+                # its conclusion directly, not an inference of our own.
+                for m in re.finditer(
+                        r"NATIVE_VLAN_MISMATCH:\s*Native VLAN mismatch discovered on "
+                        r"(\S+)\s*\((\d+)\),\s*with\s+(\S+)\s+(\S+)\s*\((\d+)\)", t):
+                    local_if, local_vlan, remote_dev, remote_if, remote_vlan = m.groups()
+                    out.append(obj("vlan_native_mismatch", device=ip,
+                                   id=f"{local_if}-{remote_dev}",
+                                   local_interface=local_if, local_vlan=local_vlan,
+                                   remote_device=remote_dev, remote_interface=remote_if,
+                                   remote_vlan=remote_vlan))
             elif "ospf interface" in low:
                 for block in re.split(r"\n(?=\S)", t):
                     mi = re.match(r"(\S+) is (up|down|administratively down)", block)
@@ -454,6 +535,12 @@ class IosLikeAdapter(VendorAdapter):
             return ["show vrrp brief"]
         if proto == "stp":
             return ["show spanning-tree", "show interfaces status"]
+        if proto == "acl":
+            return ["show access-lists"]
+        if proto == "nat":
+            return ["show ip nat statistics"]
+        if proto == "vlan":
+            return ["show logging | include NATIVE_VLAN", "show interfaces trunk"]
         return []
 
     def validate(self, commands: List[str], profile: VendorProfile) -> ValidationResult:

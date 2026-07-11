@@ -27,9 +27,17 @@ Returns [] for any protocol without a seeded model in protocol_models.py
 consistent with the original scoping decision (those protocols are on
 the roadmap, not yet verified precisely enough to seed).
 
-compile_acl_deny_signature() is independently grounded — it reads Phase
-1's already-compiled `acl` NormalizedObjects directly (a deny rule IS the
-failure signature, not an inference from a state machine).
+compile_acl_deny_signature(), compile_nat_role_signature(), and
+compile_vlan_native_mismatch_signature() are all independently grounded —
+they read Phase 1's already-compiled `acl`/`nat`/`vlan_native_mismatch`
+NormalizedObjects directly (a deny rule, a missing NAT inside/outside
+role, or a CDP-detected native VLAN mismatch, IS the failure signature,
+not an inference from a state machine). None of ACL/NAT/VLAN has a
+ProtocolStateModel at all (there's no "stuck state" FSM for a firewall
+rule, an address-translation role, or a trunk-link comparison) — these
+three functions are a deliberately different, reactive shape from every
+FSM-based signature above: they only exist once real device output has
+actually been read, not seeded as a prior beforehand.
 """
 from __future__ import annotations
 
@@ -252,6 +260,87 @@ def compile_acl_deny_signature(acl_objects: List[NormalizedObject]) -> List[Fail
             protocol="acl", stuck_state="deny_hit",
             likely_cause=f"Traffic denied by ACL '{acl_name}' rule: {rule}",
             evidence_fields=["action", "rule"], confidence=0.9))
+    return signatures
+
+
+def compile_nat_role_signature(nat_objects: List[NormalizedObject]) -> List[FailureSignature]:
+    """Reads Phase 1's already-compiled `nat` NormalizedObjects (from
+    "show ip nat statistics") directly — a missing 'ip nat inside' or
+    'ip nat outside' interface role IS the signature, not an inference:
+    NAT cannot translate anything without at least one interface of each
+    role configured, regardless of any other configuration, so this is
+    among the most commonly reported real "NAT isn't working at all"
+    causes. High confidence (directly observed, unambiguous).
+
+    Deliberately has NO mapped remediation intent (see reasoning_artifact_
+    compiler.py): auto-assigning 'ip nat inside'/'ip nat outside' to a
+    GUESSED interface risks getting the role backwards (translating the
+    wrong direction, or exposing the wrong network) — worse than leaving
+    NAT unconfigured. Same safety principle as ACL's deny-hit signature
+    and STP's ErrDisabled signature both having no auto-fix either."""
+    signatures: List[FailureSignature] = []
+    for obj in nat_objects:
+        if obj.type != "nat":
+            continue
+        if int(obj.get("inside_count", 0) or 0) == 0:
+            signatures.append(FailureSignature(
+                protocol="nat", stuck_state="no_inside_interface",
+                likely_cause="No interface is configured as 'ip nat inside' — NAT has "
+                            "no interface to translate traffic FROM, so nothing gets "
+                            "translated regardless of any other configuration",
+                evidence_fields=["inside_count"], confidence=0.85))
+        if int(obj.get("outside_count", 0) or 0) == 0:
+            signatures.append(FailureSignature(
+                protocol="nat", stuck_state="no_outside_interface",
+                likely_cause="No interface is configured as 'ip nat outside' — NAT has "
+                            "no interface to translate traffic TO, so nothing gets "
+                            "translated regardless of any other configuration",
+                evidence_fields=["outside_count"], confidence=0.85))
+    return signatures
+
+
+def compile_vlan_native_mismatch_signature(vlan_objects: List[NormalizedObject]) -> List[FailureSignature]:
+    """Reads Phase 1's already-compiled `vlan_native_mismatch` Normalized-
+    Objects (parsed directly from a real %CDP-4-NATIVE_VLAN_MISMATCH
+    syslog line in "show logging") directly. Unlike ACL's deny-hit or
+    NAT's missing-role signature, this isn't even OUR inference at all —
+    CDP itself already did the cross-device comparison and told us the
+    two sides disagree, so confidence is higher than any other reactive
+    signature in this module.
+
+    VLAN native-mismatch was originally scoped (per the roadmap) to reuse
+    this package's existing cross-device Mismatch Investigation machinery
+    (core.troubleshooting.strategies.mismatch_bridge / gateway_adapter.py's
+    GatewayDeviceAdapter), the same mechanism ospf_adjacency/hsrp_pairing
+    use. That machinery's enumerate_relationship() fundamentally requires
+    a PROTOCOL neighbor table (it resolves the far end via a router-id
+    map built from protocol-specific interface attributes) — a physical
+    trunk link has no such protocol-neighbor concept, only a CDP/LLDP
+    topology edge, so forcing VLAN through it would need a real rewrite
+    of that pairing logic, not a one-file addition, and risks regressing
+    OSPF/HSRP's existing pairing behavior. Detecting CDP's OWN mismatch
+    log line directly (this function) is honest, correct, and exactly
+    what an operator would actually check in practice — not a workaround.
+
+    Deliberately has NO mapped remediation intent: aligning the native
+    VLAN is a safe, well-understood FIX in isolation, but WHICH side is
+    misconfigured (and therefore which one to change) is a judgment call
+    this platform can't safely guess — same principle as every other
+    reactive, no-FSM signature in this module."""
+    signatures: List[FailureSignature] = []
+    for obj in vlan_objects:
+        if obj.type != "vlan_native_mismatch":
+            continue
+        local_if, local_vlan = obj.get("local_interface", "?"), obj.get("local_vlan", "?")
+        remote_dev, remote_if = obj.get("remote_device", "?"), obj.get("remote_interface", "?")
+        remote_vlan = obj.get("remote_vlan", "?")
+        signatures.append(FailureSignature(
+            protocol="vlan", stuck_state="native_vlan_mismatch",
+            likely_cause=f"CDP detected a native VLAN mismatch on {local_if} (VLAN "
+                        f"{local_vlan}) with {remote_dev} {remote_if} (VLAN {remote_vlan}) "
+                        f"— the trunk's native VLAN must match on both ends or untagged "
+                        f"traffic leaks between VLANs and STP may see it as a loop",
+            evidence_fields=["local_vlan", "remote_vlan"], confidence=0.95))
     return signatures
 
 

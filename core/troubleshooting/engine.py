@@ -387,6 +387,10 @@ class TroubleshootingEngine:
             except Exception:
                 pass
 
+        self._bind_acl_deny_evidence(output, device_ip, command, session, hmgr, conf)
+        self._bind_nat_role_evidence(output, device_ip, command, session, hmgr, conf)
+        self._bind_vlan_native_mismatch_evidence(output, device_ip, command, session, hmgr, conf)
+
         active = [{"id": h.id, "statement": h.statement} for h in session.active_hypotheses()]
         parsed = self.reasoner.analyze(command, device_ip, output, active)
 
@@ -648,6 +652,180 @@ class TroubleshootingEngine:
                          effect=effect, weight=weight, reason=reason)
             session.evidence.append(ev)
             conf.update(hyp, ev, obs)
+
+    def _bind_acl_deny_evidence(self, output: str, device_ip: str, command: str,
+                                session: Session, hmgr: HypothesisManager,
+                                conf: ConfidenceCalculator) -> None:
+        """ACL deny-hit signatures (core.knowledge.compiler.failure_signatures.
+        compile_acl_deny_signature) don't fit the "seed a prior, then bind
+        evidence later" shape every FSM protocol above uses — there's no
+        prior to seed before a device's ACL config has actually been read;
+        the deny rule itself IS the evidence, discovered reactively the
+        moment "show access-lists" output arrives. So unlike
+        _bind_compiled_signature_evidence, this both seeds AND confirms in
+        one step, immediately, the first time each distinct deny rule is
+        observed (idempotent via the existing hypothesis-statement dedup
+        in hmgr.add())."""
+        try:
+            from core.knowledge.compiler.failure_signatures import compile_acl_deny_signature
+            from core.vendor.models import NormalizedObject
+        except Exception:
+            return
+        acl_objects: List[NormalizedObject] = []
+        for line in (output or "").splitlines():
+            m = self._GATEWAY_OBJ_LINE.match(line.strip())
+            if not m or m.group("type") != "acl":
+                continue
+            kv: Dict[str, str] = {}
+            for pair in m.group("kv").split(", "):
+                if "=" in pair:
+                    k, v = pair.split("=", 1)
+                    kv[k.strip()] = v.strip()
+            acl_objects.append(NormalizedObject(type="acl", id=m.group("id"),
+                                                device=m.group("device"), attributes=kv))
+        if not acl_objects:
+            return
+        existing = {h.statement for h in session.hypotheses}
+        for sig in compile_acl_deny_signature(acl_objects):
+            if sig.likely_cause in existing:
+                continue
+            h = hmgr.add(
+                sig.likely_cause,
+                rationale=(f"Compiled ACL deny-hit signature (confidence {sig.confidence:.2f}). "
+                          f"Source: core.knowledge.compiler.failure_signatures — "
+                          f"reads the deny rule directly, not an inference."),
+                discriminating_signals=list(sig.evidence_fields) + ["acl"],
+                prior=sig.confidence)
+            if h is None:
+                continue
+            self._note_knowledge_source(session, f"compiled ACL deny signature: {sig.stuck_state}")
+            obs = Observation(device=device_ip, subject=f"acl.{sig.stuck_state}",
+                              attribute="action", value="deny", source_command=command,
+                              raw_snippet=sig.likely_cause[:200])
+            session.observations.append(obs)
+            try:
+                self.graph.add_observation(obs)
+            except Exception:
+                pass
+            ev = Evidence(observation_id=obs.id, hypothesis_id=h.id, effect=Effect.SUPPORT,
+                         weight=0.9, reason="deny rule directly observed in ACL config — "
+                                            "not an inference from a state machine")
+            session.evidence.append(ev)
+            conf.update(h, ev, obs)
+
+    def _bind_nat_role_evidence(self, output: str, device_ip: str, command: str,
+                                session: Session, hmgr: HypothesisManager,
+                                conf: ConfidenceCalculator) -> None:
+        """Same reactive shape as _bind_acl_deny_evidence: a missing NAT
+        inside/outside interface role is directly observed the moment
+        "show ip nat statistics" output arrives, not a prior seeded ahead
+        of evidence."""
+        try:
+            from core.knowledge.compiler.failure_signatures import compile_nat_role_signature
+            from core.vendor.models import NormalizedObject
+        except Exception:
+            return
+        nat_objects: List[NormalizedObject] = []
+        for line in (output or "").splitlines():
+            m = self._GATEWAY_OBJ_LINE.match(line.strip())
+            if not m or m.group("type") != "nat":
+                continue
+            kv: Dict[str, str] = {}
+            for pair in m.group("kv").split(", "):
+                if "=" in pair:
+                    k, v = pair.split("=", 1)
+                    kv[k.strip()] = v.strip()
+            nat_objects.append(NormalizedObject(type="nat", id=m.group("id"),
+                                                device=m.group("device"), attributes=kv))
+        if not nat_objects:
+            return
+        existing = {h.statement for h in session.hypotheses}
+        for sig in compile_nat_role_signature(nat_objects):
+            if sig.likely_cause in existing:
+                continue
+            h = hmgr.add(
+                sig.likely_cause,
+                rationale=(f"Compiled NAT role signature (confidence {sig.confidence:.2f}). "
+                          f"Source: core.knowledge.compiler.failure_signatures — "
+                          f"reads the missing interface role directly, not an inference."),
+                discriminating_signals=list(sig.evidence_fields) + ["nat"],
+                prior=sig.confidence)
+            if h is None:
+                continue
+            self._note_knowledge_source(session, f"compiled NAT role signature: {sig.stuck_state}")
+            obs = Observation(device=device_ip, subject=f"nat.{sig.stuck_state}",
+                              attribute="count", value="0", source_command=command,
+                              raw_snippet=sig.likely_cause[:200])
+            session.observations.append(obs)
+            try:
+                self.graph.add_observation(obs)
+            except Exception:
+                pass
+            ev = Evidence(observation_id=obs.id, hypothesis_id=h.id, effect=Effect.SUPPORT,
+                         weight=0.9, reason="missing interface role directly observed in "
+                                            "NAT statistics — not an inference")
+            session.evidence.append(ev)
+            conf.update(h, ev, obs)
+
+    def _bind_vlan_native_mismatch_evidence(self, output: str, device_ip: str, command: str,
+                                            session: Session, hmgr: HypothesisManager,
+                                            conf: ConfidenceCalculator) -> None:
+        """Same reactive shape as _bind_acl_deny_evidence/_bind_nat_role_
+        evidence: CDP's own native-VLAN-mismatch syslog line IS the
+        evidence (CDP already did the cross-device comparison), bound the
+        moment it's observed in "show logging" output — see
+        compile_vlan_native_mismatch_signature()'s docstring for why this
+        reads a direct CDP log line instead of going through the existing
+        cross-device Mismatch Investigation machinery."""
+        try:
+            from core.knowledge.compiler.failure_signatures import (
+                compile_vlan_native_mismatch_signature,
+            )
+            from core.vendor.models import NormalizedObject
+        except Exception:
+            return
+        vlan_objects: List[NormalizedObject] = []
+        for line in (output or "").splitlines():
+            m = self._GATEWAY_OBJ_LINE.match(line.strip())
+            if not m or m.group("type") != "vlan_native_mismatch":
+                continue
+            kv: Dict[str, str] = {}
+            for pair in m.group("kv").split(", "):
+                if "=" in pair:
+                    k, v = pair.split("=", 1)
+                    kv[k.strip()] = v.strip()
+            vlan_objects.append(NormalizedObject(type="vlan_native_mismatch", id=m.group("id"),
+                                                 device=m.group("device"), attributes=kv))
+        if not vlan_objects:
+            return
+        existing = {h.statement for h in session.hypotheses}
+        for sig in compile_vlan_native_mismatch_signature(vlan_objects):
+            if sig.likely_cause in existing:
+                continue
+            h = hmgr.add(
+                sig.likely_cause,
+                rationale=(f"Compiled VLAN native-mismatch signature (confidence "
+                          f"{sig.confidence:.2f}). Source: core.knowledge.compiler."
+                          f"failure_signatures — reads CDP's own mismatch detection "
+                          f"directly, not our own inference."),
+                discriminating_signals=list(sig.evidence_fields) + ["vlan"],
+                prior=sig.confidence)
+            if h is None:
+                continue
+            self._note_knowledge_source(session, f"compiled VLAN signature: {sig.stuck_state}")
+            obs = Observation(device=device_ip, subject=f"vlan.{sig.stuck_state}",
+                              attribute="mismatch", value="true", source_command=command,
+                              raw_snippet=sig.likely_cause[:200])
+            session.observations.append(obs)
+            try:
+                self.graph.add_observation(obs)
+            except Exception:
+                pass
+            ev = Evidence(observation_id=obs.id, hypothesis_id=h.id, effect=Effect.SUPPORT,
+                         weight=0.95, reason="CDP's own native-VLAN-mismatch detection, "
+                                             "directly observed — not an inference")
+            session.evidence.append(ev)
+            conf.update(h, ev, obs)
 
     # ── deterministic seeding (runs BEFORE any LLM hypothesis call) ─────────────
     def _detect_protocol(self, query: str) -> str:
