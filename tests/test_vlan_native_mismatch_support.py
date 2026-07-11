@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from core.knowledge.compiler.failure_signatures import compile_vlan_native_mismatch_signature
+from core.knowledge.compiler.protocol_registry import PROTOCOL_SPECS
 from core.knowledge.compiler.reasoning_artifact_compiler import ReasoningArtifactCompiler
 from core.vendor import VendorGateway, Op, Operation, VendorProfile
 from core.vendor.adapters.cisco_ios_like import IosLikeAdapter
@@ -96,7 +97,8 @@ def test_engine_binds_vlan_mismatch_evidence_reactively():
     conf = ConfidenceCalculator()
     output = ("vlan_native_mismatch[Gi0/1-Switch2]@10.0.0.1 {local_interface=Gi0/1, "
              "local_vlan=1, remote_device=Switch2, remote_interface=Gi0/1, remote_vlan=10}")
-    eng._bind_vlan_native_mismatch_evidence(output, "10.0.0.1", "show logging", session, hmgr, conf)
+    eng._bind_reactive_evidence(PROTOCOL_SPECS["vlan"], output, "10.0.0.1", "show logging",
+                                session, hmgr, conf)
     assert len(session.hypotheses) == 1
     assert session.hypotheses[0].confidence > 0.95
 

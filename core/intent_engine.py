@@ -951,9 +951,19 @@ class IntentEngine:
         "general" for the overwhelmingly common way people actually phrase
         these queries, breaking every compiled-signature feature keyed off
         the detected protocol."""
+        from core.knowledge.compiler.protocol_registry import all_keywords
+
         q = (q or "").lower()
-        for scenario in ("ospf", "bgp", "eigrp", "lacp", "hsrp", "vrrp", "stp", "vlan", "acl",
-                         "dhcp", "nat", "performance", "interface"):
+        # protocol_registry.all_keywords() is the single source of truth
+        # for every protocol this platform models — this used to be a
+        # second, independently-maintained copy of engine.py's own list,
+        # and the two had already drifted apart for real once (STP was
+        # missing from THIS list for the entire time its compiled
+        # signatures existed, silently making them unreachable in
+        # production). "eigrp"/"dhcp"/"performance"/"interface" are
+        # scenario words this method recognizes that aren't modeled
+        # protocols in the registry.
+        for scenario in (*all_keywords(), "eigrp", "dhcp", "performance", "interface"):
             if scenario in q:
                 return scenario
         if any(kw in q for kw in ("route", "routing", "prefix", "subnet")):

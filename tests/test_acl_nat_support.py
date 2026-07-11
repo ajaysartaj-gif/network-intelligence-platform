@@ -5,7 +5,7 @@ FSM-based protocol above (BGP/LACP/HSRP/VRRP/STP): there's no protocol
 state model for a firewall rule or a NAT role, so there's no "prior to
 seed before evidence exists" -- the deny rule / missing NAT role IS the
 evidence, reactively bound the moment real config output is observed
-(engine.py's _bind_acl_deny_evidence / _bind_nat_role_evidence). Neither
+(engine.py's generic _bind_reactive_evidence). Neither
 gets a remediation intent, by design: auto-editing a security ACL or
 guessing which interface should be NAT inside/outside is a genuine safety
 risk, the same principle behind STP's ErrDisabled having no auto-fix.
@@ -22,6 +22,7 @@ sys.path.insert(0, str(ROOT))
 from core.knowledge.compiler.failure_signatures import (
     compile_acl_deny_signature, compile_nat_role_signature,
 )
+from core.knowledge.compiler.protocol_registry import PROTOCOL_SPECS
 from core.knowledge.compiler.reasoning_artifact_compiler import ReasoningArtifactCompiler
 from core.vendor import VendorGateway, Op, Operation, VendorProfile
 from core.vendor.adapters.cisco_ios_like import IosLikeAdapter
@@ -56,7 +57,7 @@ def test_adapter_acl_rule_comma_survives_summary_round_trip():
     """Standard ACL rule text legitimately contains a literal comma
     ("192.168.1.0, wildcard bits ..."), which would otherwise be silently
     truncated by NormalizedObject.summary()'s ", "-joined key=value text
-    and its regex-based re-parse in engine.py's _bind_acl_deny_evidence."""
+    and its regex-based re-parse in engine.py's _bind_reactive_evidence."""
     adapter = IosLikeAdapter()
     profile = VendorProfile(vendor="ios-like", os="ios-like", version="", confidence=0.9,
                             capabilities=[], attributes={"ip": "10.0.0.5"})
@@ -150,7 +151,8 @@ def test_engine_binds_acl_deny_evidence_reactively():
     conf = ConfidenceCalculator()
     output = ("acl[ACL_IN-10]@10.0.0.1 {acl_name=ACL_IN, action=deny, rule=ip 10.0.0.0 0.0.0.255 any}\n"
              "acl[ACL_IN-20]@10.0.0.1 {acl_name=ACL_IN, action=permit, rule=ip any any}")
-    eng._bind_acl_deny_evidence(output, "10.0.0.1", "show access-lists", session, hmgr, conf)
+    eng._bind_reactive_evidence(PROTOCOL_SPECS["acl"], output, "10.0.0.1", "show access-lists",
+                                session, hmgr, conf)
     assert len(session.hypotheses) == 1
     assert session.hypotheses[0].confidence > 0.9
 
@@ -162,7 +164,8 @@ def test_engine_binds_nat_role_evidence_reactively():
     hmgr = HypothesisManager(session)
     conf = ConfidenceCalculator()
     output = "nat[nat]@10.0.0.1 {inside_count=0, outside_count=1, hits=0, misses=128}"
-    eng._bind_nat_role_evidence(output, "10.0.0.1", "show ip nat statistics", session, hmgr, conf)
+    eng._bind_reactive_evidence(PROTOCOL_SPECS["nat"], output, "10.0.0.1", "show ip nat statistics",
+                                session, hmgr, conf)
     assert len(session.hypotheses) == 1
     assert "ip nat inside" in session.hypotheses[0].statement
 

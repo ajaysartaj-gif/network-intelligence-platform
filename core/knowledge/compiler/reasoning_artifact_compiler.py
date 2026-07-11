@@ -26,121 +26,29 @@ from core.knowledge.compiler.artifacts import (
 )
 from core.knowledge.compiler.compiler import get_compiled_graph
 from core.knowledge.compiler.protocol_models import build_protocol_model
+from core.knowledge.compiler.protocol_registry import PROTOCOL_SPECS
 from core.knowledge_graph import KnowledgeGraph
 
-# Verification command templates — real, well-known show commands, not
-# invented ones (the same commands already referenced in this package's
-# own corpus/test fixtures: "show ip ospf neighbor" etc.).
+# All four of these used to be hand-maintained module-level dicts here —
+# one more file to touch per protocol. Now derived from protocol_registry.
+# py's PROTOCOL_SPECS, the single place a new protocol's verification
+# template, remediation mapping, risk level, and regression states are
+# declared (see protocol_registry.py's own ProtocolSpec.verification/
+# remediations/regression_states fields).
 _VERIFICATION_TEMPLATES: Dict[str, VerificationTemplate] = {
-    "ospf": VerificationTemplate(
-        protocol="ospf",
-        commands=["show ip ospf neighbor", "show ip ospf interface <interface>",
-                 "show interface <interface>"],
-        success_criteria="Neighbor state is Full (or 2-Way if no adjacency is required "
-                         "on this network type)",
-        failure_indicators=["neighbor stuck below Full for longer than the dead interval",
-                            "%OSPF-5-ADJCHG log messages repeating without reaching Full"],
-        alternative_checks=["show ip ospf database"]),
-    "stp": VerificationTemplate(
-        protocol="stp",
-        commands=["show spanning-tree", "show interfaces status"],
-        success_criteria="Port state is Forwarding for the expected root/designated role, "
-                         "and not err-disabled",
-        failure_indicators=["port stuck in Blocking on a link expected to forward",
-                            "port shows 'err-disabled' in show interfaces status "
-                            "(BPDU Guard triggered)"],
-        alternative_checks=["show spanning-tree detail", "show errdisable recovery"]),
-    "bgp": VerificationTemplate(
-        protocol="bgp",
-        commands=["show ip bgp summary"],
-        success_criteria="Neighbor state is Established",
-        failure_indicators=["neighbor stuck below Established past the hold timer",
-                            "%BGP-5-ADJCHANGE log messages repeating without reaching Established"],
-        alternative_checks=["show ip bgp neighbors <neighbor_ip>"]),
-    "lacp": VerificationTemplate(
-        protocol="lacp",
-        commands=["show etherchannel summary"],
-        success_criteria="Member port flag is 'P' (Bundled) in the Port-channel",
-        failure_indicators=["member port stuck at 'I' (Individual) or 's' (Suspended)"],
-        alternative_checks=["show lacp neighbor"]),
-    "hsrp": VerificationTemplate(
-        protocol="hsrp",
-        commands=["show standby brief"],
-        success_criteria="This router shows Active, or Standby with 'preempt' configured "
-                         "so it will take over if the Active router fails",
-        failure_indicators=["stuck in Listen or Speak past the hold timer",
-                            "Standby with no 'P' (preempt) flag when failover is expected"],
-        alternative_checks=["show standby"]),
-    "vrrp": VerificationTemplate(
-        protocol="vrrp",
-        commands=["show vrrp brief"],
-        success_criteria="This router shows Master, or Backup with 'Pre'=Y so it will "
-                         "take over if the Master fails",
-        failure_indicators=["stuck in Initialize past the startup timer",
-                            "Backup with 'Pre'=N despite a higher configured priority"],
-        alternative_checks=["show vrrp"]),
+    name: spec.verification for name, spec in PROTOCOL_SPECS.items() if spec.verification is not None
 }
 
-# Failure-cause -> EXISTING vendor-adapter intent name (from
-# core/vendor/adapters/cisco_ios_like.py's supported_intents()). Only
-# protocols/causes with a REAL matching intent get a RemediationTemplate —
-# no intent is invented here.
 _REMEDIATION_INTENTS: Dict[str, Dict[str, str]] = {
-    "ospf": {
-        "ExStart": "ignore_protocol_mtu",
-        "2-Way": "set_protocol_network_point_to_point",
-        "Init": "configure_ospf_interface",
-        "Down": "enable_ospf_on_interface",
-    },
-    # "stp": {} — no matching vendor-adapter intent exists yet; compile_remediation("stp")
-    # returns [] rather than inventing one.
-    # Matching OSPF's own honest scoping, not every BGP stuck-state gets a
-    # mapped intent — "Connect"/"OpenSent"/"OpenConfirm" fall through to the
-    # LLM's own judgment (there's no single safe, deterministic config change
-    # for an AS/version/MD5/MTU mismatch without more specific evidence).
-    "bgp": {
-        "Idle": "remove_bgp_neighbor_shutdown",
-        "Active": "add_bgp_ebgp_multihop",
-    },
-    # Only "Individual" (mode mismatch) maps to a safe, deterministic fix.
-    # "Suspended" (too many possible mismatched parameters — VLAN/trunk/STP —
-    # to guess which one) and "Down" (a physical-layer issue, outside LACP's
-    # own control) fall through to the LLM, same honest partial-coverage
-    # scoping OSPF/BGP already use.
-    "lacp": {
-        "Individual": "set_lacp_mode_active",
-    },
-    # Only the "won't fail over" states get a mapped intent — Init/Listen/
-    # Speak (HSRP) and Initialize (VRRP) have too many possible causes
-    # (VLAN, ACL, auth, priority tie) to safely auto-fix without more
-    # specific evidence, same honest scoping as every other protocol above.
-    "hsrp": {
-        "Standby": "add_hsrp_preempt",
-    },
-    "vrrp": {
-        "Backup": "enable_vrrp_preempt",
-    },
+    name: {r.trigger_state: r.intent_name for r in spec.remediations if r.trigger_state}
+    for name, spec in PROTOCOL_SPECS.items() if spec.remediations
 }
 
 _RISK_LEVEL_BY_INTENT = {
-    "ignore_protocol_mtu": "medium",             # disables a real safety check
-    "set_protocol_network_point_to_point": "medium",
-    "configure_ospf_interface": "medium",
-    "enable_ospf_on_interface": "low",
-    "remove_bgp_neighbor_shutdown": "low",       # removes an admin block, no side effects
-    "add_bgp_ebgp_multihop": "medium",           # changes real session parameters
-    "set_lacp_mode_active": "medium",            # changes real channel-group membership mode
-    "add_hsrp_preempt": "low",                   # only affects failover behavior, not current forwarding
-    "enable_vrrp_preempt": "low",                # same — re-asserts a default-on VRRP behavior
+    r.intent_name: r.risk_level for spec in PROTOCOL_SPECS.values() for r in spec.remediations
 }
 
-# States a "forward progress" transition should never regress into, when
-# choosing which outgoing transition represents the decision graph's
-# success path. LACP's own reset state, "Down", is already covered by the
-# existing generic entry. HSRP's "Init" and VRRP's "Initialize" are their
-# OWN distinct reset-state names (not literally "Down"), so each needs its
-# own entry rather than silently falling through.
-_REGRESSION_STATES = {"Down", "Blocking", "Disabled", "Idle", "Init", "Initialize"}
+_REGRESSION_STATES = {s for spec in PROTOCOL_SPECS.values() for s in spec.regression_states}
 
 
 class ReasoningArtifactCompiler:

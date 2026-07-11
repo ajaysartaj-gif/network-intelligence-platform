@@ -25,6 +25,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
+from core.knowledge.compiler.protocol_registry import all_keywords, reactive_specs
+
 from .evidence_graph import EvidenceGraph
 from .hypotheses import (
     ConfidenceCalculator, HypothesisManager, RootCauseRanker, content_tokens,
@@ -387,9 +389,8 @@ class TroubleshootingEngine:
             except Exception:
                 pass
 
-        self._bind_acl_deny_evidence(output, device_ip, command, session, hmgr, conf)
-        self._bind_nat_role_evidence(output, device_ip, command, session, hmgr, conf)
-        self._bind_vlan_native_mismatch_evidence(output, device_ip, command, session, hmgr, conf)
+        for spec in reactive_specs():
+            self._bind_reactive_evidence(spec, output, device_ip, command, session, hmgr, conf)
 
         active = [{"id": h.id, "statement": h.statement} for h in session.active_hypotheses()]
         parsed = self.reasoner.analyze(command, device_ip, output, active)
@@ -653,108 +654,62 @@ class TroubleshootingEngine:
             session.evidence.append(ev)
             conf.update(hyp, ev, obs)
 
-    def _bind_acl_deny_evidence(self, output: str, device_ip: str, command: str,
+    def _bind_reactive_evidence(self, spec, output: str, device_ip: str, command: str,
                                 session: Session, hmgr: HypothesisManager,
                                 conf: ConfidenceCalculator) -> None:
-        """ACL deny-hit signatures (core.knowledge.compiler.failure_signatures.
-        compile_acl_deny_signature) don't fit the "seed a prior, then bind
-        evidence later" shape every FSM protocol above uses — there's no
-        prior to seed before a device's ACL config has actually been read;
-        the deny rule itself IS the evidence, discovered reactively the
-        moment "show access-lists" output arrives. So unlike
-        _bind_compiled_signature_evidence, this both seeds AND confirms in
-        one step, immediately, the first time each distinct deny rule is
-        observed (idempotent via the existing hypothesis-statement dedup
-        in hmgr.add())."""
-        try:
-            from core.knowledge.compiler.failure_signatures import compile_acl_deny_signature
-            from core.vendor.models import NormalizedObject
-        except Exception:
-            return
-        acl_objects: List[NormalizedObject] = []
-        for line in (output or "").splitlines():
-            m = self._GATEWAY_OBJ_LINE.match(line.strip())
-            if not m or m.group("type") != "acl":
-                continue
-            kv: Dict[str, str] = {}
-            for pair in m.group("kv").split(", "):
-                if "=" in pair:
-                    k, v = pair.split("=", 1)
-                    kv[k.strip()] = v.strip()
-            acl_objects.append(NormalizedObject(type="acl", id=m.group("id"),
-                                                device=m.group("device"), attributes=kv))
-        if not acl_objects:
-            return
-        existing = {h.statement for h in session.hypotheses}
-        for sig in compile_acl_deny_signature(acl_objects):
-            if sig.likely_cause in existing:
-                continue
-            h = hmgr.add(
-                sig.likely_cause,
-                rationale=(f"Compiled ACL deny-hit signature (confidence {sig.confidence:.2f}). "
-                          f"Source: core.knowledge.compiler.failure_signatures — "
-                          f"reads the deny rule directly, not an inference."),
-                discriminating_signals=list(sig.evidence_fields) + ["acl"],
-                prior=sig.confidence)
-            if h is None:
-                continue
-            self._note_knowledge_source(session, f"compiled ACL deny signature: {sig.stuck_state}")
-            obs = Observation(device=device_ip, subject=f"acl.{sig.stuck_state}",
-                              attribute="action", value="deny", source_command=command,
-                              raw_snippet=sig.likely_cause[:200])
-            session.observations.append(obs)
-            try:
-                self.graph.add_observation(obs)
-            except Exception:
-                pass
-            ev = Evidence(observation_id=obs.id, hypothesis_id=h.id, effect=Effect.SUPPORT,
-                         weight=0.9, reason="deny rule directly observed in ACL config — "
-                                            "not an inference from a state machine")
-            session.evidence.append(ev)
-            conf.update(h, ev, obs)
+        """Replaces what used to be three separately hand-written methods
+        (_bind_acl_deny_evidence / _bind_nat_role_evidence /
+        _bind_vlan_native_mismatch_evidence) whose only real difference
+        was a handful of strings and one compile function — now declared
+        once per protocol in protocol_registry.py's ProtocolSpec and
+        rendered generically here.
 
-    def _bind_nat_role_evidence(self, output: str, device_ip: str, command: str,
-                                session: Session, hmgr: HypothesisManager,
-                                conf: ConfidenceCalculator) -> None:
-        """Same reactive shape as _bind_acl_deny_evidence: a missing NAT
-        inside/outside interface role is directly observed the moment
-        "show ip nat statistics" output arrives, not a prior seeded ahead
-        of evidence."""
+        None of ACL/NAT/VLAN fit the "seed a prior, then bind evidence
+        later" shape every FSM protocol above uses — there's no prior to
+        seed before the relevant device output has actually been read;
+        the deny rule / missing NAT role / CDP mismatch IS the evidence,
+        discovered reactively the moment it's observed. So unlike
+        _bind_compiled_signature_evidence, this both seeds AND confirms
+        in one step, immediately, the first time each distinct signature
+        is observed (idempotent via the existing hypothesis-statement
+        dedup in hmgr.add())."""
+        if not spec.reactive_compile_fn:
+            return
         try:
-            from core.knowledge.compiler.failure_signatures import compile_nat_role_signature
             from core.vendor.models import NormalizedObject
         except Exception:
             return
-        nat_objects: List[NormalizedObject] = []
+        matched: List[NormalizedObject] = []
         for line in (output or "").splitlines():
             m = self._GATEWAY_OBJ_LINE.match(line.strip())
-            if not m or m.group("type") != "nat":
+            if not m or m.group("type") != spec.reactive_object_type:
                 continue
             kv: Dict[str, str] = {}
             for pair in m.group("kv").split(", "):
                 if "=" in pair:
                     k, v = pair.split("=", 1)
                     kv[k.strip()] = v.strip()
-            nat_objects.append(NormalizedObject(type="nat", id=m.group("id"),
-                                                device=m.group("device"), attributes=kv))
-        if not nat_objects:
+            matched.append(NormalizedObject(type=spec.reactive_object_type, id=m.group("id"),
+                                            device=m.group("device"), attributes=kv))
+        if not matched:
             return
         existing = {h.statement for h in session.hypotheses}
-        for sig in compile_nat_role_signature(nat_objects):
+        for sig in spec.reactive_compile_fn(matched):
             if sig.likely_cause in existing:
                 continue
             h = hmgr.add(
                 sig.likely_cause,
-                rationale=(f"Compiled NAT role signature (confidence {sig.confidence:.2f}). "
-                          f"Source: core.knowledge.compiler.failure_signatures — "
-                          f"reads the missing interface role directly, not an inference."),
-                discriminating_signals=list(sig.evidence_fields) + ["nat"],
+                rationale=(f"Compiled {spec.reactive_rationale_label} signature "
+                          f"(confidence {sig.confidence:.2f}). Source: core.knowledge."
+                          f"compiler.failure_signatures — {spec.reactive_rationale_reason}"),
+                discriminating_signals=list(sig.evidence_fields) + [spec.name],
                 prior=sig.confidence)
             if h is None:
                 continue
-            self._note_knowledge_source(session, f"compiled NAT role signature: {sig.stuck_state}")
-            obs = Observation(device=device_ip, subject=f"nat.{sig.stuck_state}",
-                              attribute="count", value="0", source_command=command,
+            self._note_knowledge_source(
+                session, f"compiled {spec.reactive_note_label} signature: {sig.stuck_state}")
+            obs = Observation(device=device_ip, subject=f"{spec.name}.{sig.stuck_state}",
+                              attribute="detected", value="true", source_command=command,
                               raw_snippet=sig.likely_cause[:200])
             session.observations.append(obs)
             try:
@@ -762,68 +717,7 @@ class TroubleshootingEngine:
             except Exception:
                 pass
             ev = Evidence(observation_id=obs.id, hypothesis_id=h.id, effect=Effect.SUPPORT,
-                         weight=0.9, reason="missing interface role directly observed in "
-                                            "NAT statistics — not an inference")
-            session.evidence.append(ev)
-            conf.update(h, ev, obs)
-
-    def _bind_vlan_native_mismatch_evidence(self, output: str, device_ip: str, command: str,
-                                            session: Session, hmgr: HypothesisManager,
-                                            conf: ConfidenceCalculator) -> None:
-        """Same reactive shape as _bind_acl_deny_evidence/_bind_nat_role_
-        evidence: CDP's own native-VLAN-mismatch syslog line IS the
-        evidence (CDP already did the cross-device comparison), bound the
-        moment it's observed in "show logging" output — see
-        compile_vlan_native_mismatch_signature()'s docstring for why this
-        reads a direct CDP log line instead of going through the existing
-        cross-device Mismatch Investigation machinery."""
-        try:
-            from core.knowledge.compiler.failure_signatures import (
-                compile_vlan_native_mismatch_signature,
-            )
-            from core.vendor.models import NormalizedObject
-        except Exception:
-            return
-        vlan_objects: List[NormalizedObject] = []
-        for line in (output or "").splitlines():
-            m = self._GATEWAY_OBJ_LINE.match(line.strip())
-            if not m or m.group("type") != "vlan_native_mismatch":
-                continue
-            kv: Dict[str, str] = {}
-            for pair in m.group("kv").split(", "):
-                if "=" in pair:
-                    k, v = pair.split("=", 1)
-                    kv[k.strip()] = v.strip()
-            vlan_objects.append(NormalizedObject(type="vlan_native_mismatch", id=m.group("id"),
-                                                 device=m.group("device"), attributes=kv))
-        if not vlan_objects:
-            return
-        existing = {h.statement for h in session.hypotheses}
-        for sig in compile_vlan_native_mismatch_signature(vlan_objects):
-            if sig.likely_cause in existing:
-                continue
-            h = hmgr.add(
-                sig.likely_cause,
-                rationale=(f"Compiled VLAN native-mismatch signature (confidence "
-                          f"{sig.confidence:.2f}). Source: core.knowledge.compiler."
-                          f"failure_signatures — reads CDP's own mismatch detection "
-                          f"directly, not our own inference."),
-                discriminating_signals=list(sig.evidence_fields) + ["vlan"],
-                prior=sig.confidence)
-            if h is None:
-                continue
-            self._note_knowledge_source(session, f"compiled VLAN signature: {sig.stuck_state}")
-            obs = Observation(device=device_ip, subject=f"vlan.{sig.stuck_state}",
-                              attribute="mismatch", value="true", source_command=command,
-                              raw_snippet=sig.likely_cause[:200])
-            session.observations.append(obs)
-            try:
-                self.graph.add_observation(obs)
-            except Exception:
-                pass
-            ev = Evidence(observation_id=obs.id, hypothesis_id=h.id, effect=Effect.SUPPORT,
-                         weight=0.95, reason="CDP's own native-VLAN-mismatch detection, "
-                                             "directly observed — not an inference")
+                         weight=spec.reactive_evidence_weight, reason=spec.reactive_evidence_reason)
             session.evidence.append(ev)
             conf.update(h, ev, obs)
 
@@ -840,7 +734,15 @@ class TroubleshootingEngine:
             except Exception:
                 pass
         q = (query or "").lower()
-        for p in ("ospf", "bgp", "eigrp", "stp", "lacp", "hsrp", "vrrp", "vlan", "acl", "nat"):
+        # protocol_registry.all_keywords() is the single source of truth
+        # for every protocol this platform models — "eigrp" is the one
+        # keyword here that ISN'T (genuinely unmodeled, kept only so this
+        # fallback still recognizes the word instead of falling to
+        # "general"). This used to be a second, independently-maintained
+        # copy of intent_engine.py's own list — the two had already
+        # drifted apart for real once (STP was missing from the other
+        # list for the entire time its signatures existed).
+        for p in (*all_keywords(), "eigrp"):
             if p in q:
                 return p
         return "general"

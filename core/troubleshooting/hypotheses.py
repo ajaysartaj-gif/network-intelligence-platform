@@ -16,6 +16,8 @@ from __future__ import annotations
 import re
 from typing import List, Optional
 
+from core.knowledge.compiler.protocol_registry import all_keywords
+
 from .models import (
     ConfidenceDelta, Effect, Evidence, Hypothesis, HypothesisState, Observation,
 )
@@ -30,11 +32,18 @@ from .models import (
 # between neighbors") were measured at Jaccard 0.71 (>= the 0.6 threshold),
 # silently merging two distinct hypotheses into one and losing the discarded
 # one entirely.
+#
+# Protocol names come from protocol_registry.all_keywords() (the same
+# single source of truth engine.py._detect_protocol and intent_engine.py.
+# _detect_scenario use) plus "eigrp"/"isis"/"rip", which aren't modeled
+# protocols but are still real protocol-name tokens worth suppressing
+# here for the same reason. This used to be a third, independently-
+# maintained list — one more place a new protocol had to be remembered.
 _STOP = {"state", "value", "status", "up", "down", "id", "name", "count",
          "the", "is", "on", "of", "a", "an", "to", "for", "not", "no", "issue",
          "problem", "or", "and", "configuration", "configured", "misconfigured",
          "mismatch", "mismatched", "between", "neighbor", "neighbors",
-         "ospf", "bgp", "eigrp", "stp", "isis", "rip", "lacp", "hsrp", "vrrp"}
+         "eigrp", "isis", "rip", *all_keywords()}
 
 
 def content_tokens(s: str) -> set:
