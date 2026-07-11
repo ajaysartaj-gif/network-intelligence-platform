@@ -25,7 +25,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
-from core.knowledge.compiler.protocol_registry import all_keywords, reactive_specs
+from core.knowledge.compiler.protocol_registry import all_keywords, get_spec, reactive_specs
 
 from .evidence_graph import EvidenceGraph
 from .hypotheses import (
@@ -161,6 +161,8 @@ class TroubleshootingEngine:
         #      and the NKC's compiled FailureSignature library (textbook
         #      root causes with real confidence, not a 0.05-0.4 LLM guess).
         self._seed_deterministic_hypotheses(session, hmgr, query)
+        self._bind_compiled_signature_evidence(session, hmgr, conf)
+        self._ensure_protocol_state_observed(session, hmgr, conf, device_ips)
         self._bind_compiled_signature_evidence(session, hmgr, conf)
 
         # 1. seed hypotheses FROM the objective + the state just observed —
@@ -827,6 +829,88 @@ class TroubleshootingEngine:
                             f"(confidence {sig.confidence:.2f})")
         except Exception as exc:
             logger.debug("Compiled failure-signature seeding skipped: %s", exc)
+
+    def _ensure_protocol_state_observed(self, session: Session, hmgr: HypothesisManager,
+                                        conf: ConfidenceCalculator, device_ips: List[str]) -> None:
+        """Closes the real gap behind "why do I get a different answer every
+        time, and why does it never converge to a fix": every compiled
+        FailureSignature just seeded above is keyed off an observed
+        stuck_state (Down/Init/ExStart/...), but nothing GUARANTEED the one
+        command that reveals it (show ip ospf neighbor / show ip bgp
+        summary / ...) ever actually got collected — plan_operations() is
+        entirely LLM-driven, sees only a bare list of operation NAMES (no
+        descriptions), and the discriminating-signal hints derived from
+        each signature's evidence_fields (mtu/areas/admin_state/...) never
+        include the state itself as a signal, so the LLM had no reliable
+        reason to prioritize it over get_interface_details/get_configuration.
+        Without it, _bind_compiled_signature_evidence's one deterministic,
+        high-weight (0.6) confirm/contradict pass never fires for ANY
+        signature, every run just drifts on weak LLM-derived guesses, and
+        which secondary command the LLM happens to reach for first (and in
+        what order) varies call to call — the literal mechanism behind
+        "different output for the same issue."
+
+        Deterministically fetches whichever operation this protocol's own
+        adapter defines as neighbor/state-revealing (GET_NEIGHBORS for
+        OSPF/BGP, GET_INTERFACE_DETAILS for LACP/HSRP/VRRP/STP) exactly
+        once, before the LLM ever forms or extends a hypothesis — same
+        "deterministic anchor before any LLM judgment" precedent as
+        _seed_deterministic_hypotheses and _bind_compiled_signature_evidence
+        themselves. A no-op if the state is already known (e.g. re-seeded
+        from session memory), if this isn't an FSM protocol (ACL/NAT/VLAN
+        are reactive-only, no state_model), or outside gateway/adapter mode.
+
+        Tries GET_NEIGHBORS first and falls back to GET_INTERFACE_DETAILS
+        only if that didn't actually surface a state — deliberately NOT
+        gated on VendorGateway.supports_operation(), which turned out to be
+        far too permissive to use as a per-protocol capability check (it
+        allows every operation name except two hardcoded exceptions,
+        regardless of whether this protocol's own AdapterSpec.commands
+        maps that operation to anything at all — confirmed directly
+        against an adapter's own build_command() implementation. Trusting
+        it here would have silently no-op'd for LACP/STP/HSRP/VRRP (whose
+        commands dict has no "get_neighbors" key) while claiming to have
+        tried it."""
+        if self.gateway is None:
+            return
+        try:
+            protocol = self._detect_protocol(session.goal.query)
+            spec = get_spec(protocol)
+            if spec is None or spec.state_model is None:
+                return
+            if self._observed_protocol_state_obs(session) is not None:
+                return
+            from core.vendor.operations import Op, Operation
+
+            for opname in (Op.GET_NEIGHBORS, Op.GET_INTERFACE_DETAILS):
+                params = {"protocol": protocol}
+                sig = self._op_signature(opname, params)
+                targets = [ip for ip in device_ips if not self.cmd_memory.has(ip, sig)]
+                if not targets:
+                    if self._observed_protocol_state_obs(session) is not None:
+                        break
+                    continue
+                session.next_best_command = (
+                    f"[operation] {opname} {params} → {targets[0] if len(targets) == 1 else 'all'}")
+                for ip in targets:
+                    device = self._ip_to_dev.get(ip)
+                    if device is None:
+                        continue
+                    objects, err = self.gateway.collect(device, Operation(
+                        opname, params, "deterministic neighbor/protocol-state anchor"))
+                    if err is not None:
+                        text = f"error[{err.error_class.value}]: {err.message}"
+                    else:
+                        text = "\n".join(o.summary() for o in objects) or "(no normalized objects)"
+                    session.executed.append(self.cmd_memory.record(
+                        ip, sig, text, "deterministic neighbor/protocol-state anchor", reused=False))
+                    self._ingest_output(sig, ip, text, session, hmgr, conf)
+                if self._observed_protocol_state_obs(session) is not None:
+                    self._note_knowledge_source(
+                        session, f"deterministic neighbor/protocol-state anchor: {protocol}/{opname}")
+                    break
+        except Exception as exc:
+            logger.debug("Deterministic protocol-state anchor skipped: %s", exc)
 
     def _note_knowledge_source(self, session: Session, source: str) -> None:
         """Records provenance for the report's 'Knowledge Sources Consulted'
