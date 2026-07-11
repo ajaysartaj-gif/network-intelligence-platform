@@ -179,7 +179,10 @@ def test_stp_state_model_transitions():
 
 
 def test_unknown_protocol_returns_none_not_a_guess():
-    assert protocol_models.build_protocol_model("bgp") is None
+    # "bgp" was the example unmodeled protocol before BGP support was added
+    # (protocol_models.py now seeds ospf/stp/bgp) — "eigrp" is still
+    # genuinely unmodeled and exercises the same "never fabricate" behavior.
+    assert protocol_models.build_protocol_model("eigrp") is None
     assert protocol_models.build_protocol_model("totally-made-up") is None
 
 

@@ -47,6 +47,19 @@ _VERIFICATION_TEMPLATES: Dict[str, VerificationTemplate] = {
         success_criteria="Port state is Forwarding for the expected root/designated role",
         failure_indicators=["port stuck in Blocking on a link expected to forward"],
         alternative_checks=["show spanning-tree detail"]),
+    "bgp": VerificationTemplate(
+        protocol="bgp",
+        commands=["show ip bgp summary"],
+        success_criteria="Neighbor state is Established",
+        failure_indicators=["neighbor stuck below Established past the hold timer",
+                            "%BGP-5-ADJCHANGE log messages repeating without reaching Established"],
+        alternative_checks=["show ip bgp neighbors <neighbor_ip>"]),
+    "lacp": VerificationTemplate(
+        protocol="lacp",
+        commands=["show etherchannel summary"],
+        success_criteria="Member port flag is 'P' (Bundled) in the Port-channel",
+        failure_indicators=["member port stuck at 'I' (Individual) or 's' (Suspended)"],
+        alternative_checks=["show lacp neighbor"]),
 }
 
 # Failure-cause -> EXISTING vendor-adapter intent name (from
@@ -62,6 +75,22 @@ _REMEDIATION_INTENTS: Dict[str, Dict[str, str]] = {
     },
     # "stp": {} — no matching vendor-adapter intent exists yet; compile_remediation("stp")
     # returns [] rather than inventing one.
+    # Matching OSPF's own honest scoping, not every BGP stuck-state gets a
+    # mapped intent — "Connect"/"OpenSent"/"OpenConfirm" fall through to the
+    # LLM's own judgment (there's no single safe, deterministic config change
+    # for an AS/version/MD5/MTU mismatch without more specific evidence).
+    "bgp": {
+        "Idle": "remove_bgp_neighbor_shutdown",
+        "Active": "add_bgp_ebgp_multihop",
+    },
+    # Only "Individual" (mode mismatch) maps to a safe, deterministic fix.
+    # "Suspended" (too many possible mismatched parameters — VLAN/trunk/STP —
+    # to guess which one) and "Down" (a physical-layer issue, outside LACP's
+    # own control) fall through to the LLM, same honest partial-coverage
+    # scoping OSPF/BGP already use.
+    "lacp": {
+        "Individual": "set_lacp_mode_active",
+    },
 }
 
 _RISK_LEVEL_BY_INTENT = {
@@ -69,12 +98,16 @@ _RISK_LEVEL_BY_INTENT = {
     "set_protocol_network_point_to_point": "medium",
     "configure_ospf_interface": "medium",
     "enable_ospf_on_interface": "low",
+    "remove_bgp_neighbor_shutdown": "low",       # removes an admin block, no side effects
+    "add_bgp_ebgp_multihop": "medium",           # changes real session parameters
+    "set_lacp_mode_active": "medium",            # changes real channel-group membership mode
 }
 
 # States a "forward progress" transition should never regress into, when
 # choosing which outgoing transition represents the decision graph's
-# success path.
-_REGRESSION_STATES = {"Down", "Blocking", "Disabled"}
+# success path. LACP's own reset state, "Down", is already covered by the
+# existing generic entry.
+_REGRESSION_STATES = {"Down", "Blocking", "Disabled", "Idle"}
 
 
 class ReasoningArtifactCompiler:

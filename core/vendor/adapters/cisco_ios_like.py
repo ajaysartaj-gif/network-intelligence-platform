@@ -64,6 +64,7 @@ class IosLikeAdapter(VendorAdapter):
             (Op.GET_NEIGHBORS, "ospf"): "show ip ospf neighbor",
             (Op.GET_NEIGHBORS, "bgp"): "show ip bgp summary",
             (Op.GET_INTERFACE_DETAILS, "ospf"): f"show ip ospf interface{suffix}",
+            (Op.GET_INTERFACE_DETAILS, "lacp"): "show etherchannel summary",
             (Op.GET_INTERFACE_DETAILS, ""): "show ip interface brief",
             (Op.GET_ROUTING_INFORMATION, "ospf"): "show ip route ospf",
             (Op.GET_ROUTING_INFORMATION, ""): "show ip route",
@@ -119,6 +120,64 @@ class IosLikeAdapter(VendorAdapter):
                                neighbor_count=len(nbrs),
                                adjacency=(",".join(nbrs) if nbrs else "none"),
                                state=("up" if any(n == "FULL" for n in nbrs) else "down")))
+            elif "bgp summary" in low:
+                # Real "show ip bgp summary" rows end in EITHER a digit (the
+                # PfxRcd count -> the session IS Established) OR a literal
+                # state name (Idle/Connect/Active/OpenSent/OpenConfirm) when
+                # NOT yet established — this column-meaning ambiguity is the
+                # one genuinely new parsing wrinkle vs. OSPF's neighbor table
+                # (which always prints a literal state) and must be handled
+                # explicitly, not assumed away.
+                nbrs = []
+                for line in t.splitlines():
+                    m = re.search(
+                        r"(\d{1,3}(?:\.\d{1,3}){3})\s+\d+\s+(\d+)\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\S+\s+(\S+)",
+                        line)
+                    if not m:
+                        continue
+                    neighbor_ip, remote_as, tail = m.group(1), m.group(2), m.group(3)
+                    state = "ESTABLISHED" if tail.isdigit() else tail.upper()
+                    nbrs.append(state)
+                    out.append(obj(ObjectType.NEIGHBOR, device=ip, id=neighbor_ip,
+                                   protocol="bgp", state=state, remote_as=remote_as))
+                out.append(obj(ObjectType.PROTOCOL, device=ip, id="bgp",
+                               neighbor_count=len(nbrs),
+                               adjacency=(",".join(nbrs) if nbrs else "none"),
+                               state=("up" if any(n == "ESTABLISHED" for n in nbrs) else "down")))
+            elif "etherchannel summary" in low:
+                # Real "show etherchannel summary" rows: a Port-channel entry
+                # ("Po1(SU)") followed by its MEMBER ports ("Gi0/1(P)"). Only
+                # single-letter flags on a NON-"Po*" name are per-member
+                # bundling states — the Port-channel's own flags (e.g. "SU")
+                # are container-level (Layer2/in-use), a DIFFERENT vocabulary
+                # entirely, and must not be misread as a member's state.
+                # Uses ObjectType.NEIGHBOR (not INTERFACE) even though a LACP
+                # member port isn't a remote "neighbor" in the OSPF/BGP sense
+                # — it's the same granular, per-entity stuck-state shape
+                # (Down/Individual/Suspended/Bundled) that the evidence-
+                # binding pipeline already knows how to read from a
+                # "neighbor.*" subject (engine.py's _gateway_object_facts);
+                # ObjectType.INTERFACE's fact-extraction only surfaces
+                # mtu/ip_mtu, so the granular bundling state would otherwise
+                # be invisible to compiled-signature matching entirely.
+                _FLAG_STATE = {"P": "BUNDLED", "I": "INDIVIDUAL", "s": "SUSPENDED", "D": "DOWN"}
+                members = []
+                for line in t.splitlines():
+                    if not re.match(r"\s*\d+\s+Po", line):
+                        continue
+                    for name, flags in re.findall(r"(\S+?)\((\w+)\)", line):
+                        if name.lower().startswith("po"):
+                            continue                       # the channel container itself
+                        if len(flags) != 1 or flags not in _FLAG_STATE:
+                            continue                       # unmodeled flag (H/w/u/...) — don't guess
+                        state = _FLAG_STATE[flags]
+                        members.append(state)
+                        out.append(obj(ObjectType.NEIGHBOR, device=ip, id=name,
+                                       protocol="lacp", state=state))
+                out.append(obj(ObjectType.PROTOCOL, device=ip, id="lacp",
+                               neighbor_count=len(members),
+                               adjacency=(",".join(members) if members else "none"),
+                               state=("up" if any(m == "BUNDLED" for m in members) else "down")))
             elif "ospf interface" in low:
                 for block in re.split(r"\n(?=\S)", t):
                     mi = re.match(r"(\S+) is (up|down|administratively down)", block)
@@ -200,11 +259,14 @@ class IosLikeAdapter(VendorAdapter):
 
     def supported_intents(self, profile: VendorProfile) -> List[str]:
         return ["ignore_protocol_mtu", "set_protocol_network_point_to_point",
-                "configure_ospf_interface", "enable_ospf_on_interface"]
+                "configure_ospf_interface", "enable_ospf_on_interface",
+                "remove_bgp_neighbor_shutdown", "add_bgp_ebgp_multihop",
+                "set_lacp_mode_active"]
 
     def build_fix(self, intent: RemediationIntent, profile: VendorProfile) -> List[str]:
         proto = str(intent.params.get("protocol", "")).lower()
         iface = intent.params.get("interface", "")
+        neighbor_ip = intent.params.get("neighbor_ip", "")
         recipes = {
             "ignore_protocol_mtu": (f"interface {iface}" if iface else None,
                                     f"ip {proto} mtu-ignore"),
@@ -216,6 +278,28 @@ class IosLikeAdapter(VendorAdapter):
             "enable_ospf_on_interface": (f"interface {iface}" if iface else None,
                                          f"ip {proto or 'ospf'} {intent.params.get('process', '1')} "
                                          f"area {intent.params.get('area', '0')}"),
+            # BGP fixes operate under "router bgp <asn>" config mode, not an
+            # interface context — local_as is optional (falls through if
+            # unknown, same "context line is optional" pattern as OSPF above).
+            "remove_bgp_neighbor_shutdown": (
+                f"router bgp {intent.params.get('local_as', '')}"
+                if intent.params.get("local_as") else None,
+                f"no neighbor {neighbor_ip} shutdown"),
+            "add_bgp_ebgp_multihop": (
+                f"router bgp {intent.params.get('local_as', '')}"
+                if intent.params.get("local_as") else None,
+                f"neighbor {neighbor_ip} ebgp-multihop {intent.params.get('hops', '2')}"),
+            # LACP's "neighbor" IS the member port itself (parse_output()
+            # emits the port name as the NEIGHBOR subject, same shape OSPF/
+            # BGP use for their own peers) — so neighbor_ip here holds the
+            # interface name (e.g. "Gi0/1"), not a peer IP. Only "Individual"
+            # (mode mismatch) gets an intent: "Suspended" has too many
+            # possible mismatched parameters (VLAN/trunk/STP) to safely
+            # auto-fix, and "Down" is a physical-layer issue outside LACP's
+            # own control — same honest partial-coverage scoping OSPF/BGP use.
+            "set_lacp_mode_active": (
+                f"interface {neighbor_ip}" if neighbor_ip else None,
+                f"channel-group {intent.params.get('channel_group', '1')} mode active"),
         }
         recipe = recipes.get(intent.name)
         if not recipe:
@@ -224,16 +308,27 @@ class IosLikeAdapter(VendorAdapter):
 
     def build_rollback(self, intent: RemediationIntent, profile: VendorProfile) -> List[str]:
         fix = self.build_fix(intent, profile)
-        # rollback = negate the last config line, keep the interface context
         if not fix:
             return []
-        rb = list(fix[:-1]) + [f"no {fix[-1]}"]
-        return rb
+        last = fix[-1]
+        # If the fix line ITSELF negates something ("no neighbor X shutdown"),
+        # the rollback must re-assert it, not prepend a second "no" ("no no
+        # neighbor X shutdown" isn't valid syntax) — every prior intent's fix
+        # was a positive command, so this case was previously unreachable.
+        if re.match(r"^\s*no\s+", last, re.I):
+            undo = re.sub(r"^\s*no\s+", "", last, count=1, flags=re.I)
+        else:
+            undo = f"no {last}"
+        return list(fix[:-1]) + [undo]
 
     def build_verification(self, intent: RemediationIntent, profile: VendorProfile) -> List[str]:
         proto = str(intent.params.get("protocol", "")).lower()
         if proto == "ospf":
             return ["show ip ospf neighbor"]
+        if proto == "bgp":
+            return ["show ip bgp summary"]
+        if proto == "lacp":
+            return ["show etherchannel summary"]
         return []
 
     def validate(self, commands: List[str], profile: VendorProfile) -> ValidationResult:
@@ -251,4 +346,7 @@ class IosLikeAdapter(VendorAdapter):
         return NormalizedError(ErrorClass.UNKNOWN, raw_error, raw=raw_error, source=self.name)
 
     def supports_intent(self, intent_name: str, profile: VendorProfile) -> bool:
-        return intent_name in {"ignore_protocol_mtu", "set_protocol_network_point_to_point", "configure_ospf_interface", "enable_ospf_on_interface"}
+        return intent_name in {"ignore_protocol_mtu", "set_protocol_network_point_to_point",
+                               "configure_ospf_interface", "enable_ospf_on_interface",
+                               "remove_bgp_neighbor_shutdown", "add_bgp_ebgp_multihop",
+                               "set_lacp_mode_active"}

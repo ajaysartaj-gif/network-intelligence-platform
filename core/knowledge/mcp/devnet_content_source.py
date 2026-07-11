@@ -17,8 +17,9 @@ The DevNet MCP fills the gap for Meraki + Catalyst Center programmability.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from core.knowledge.base import (
     Citation,
@@ -30,6 +31,25 @@ from core.knowledge.cache.ttl_policy import get_ttl
 from core.knowledge.mcp.mcp_client import MCPHttpClient
 
 logger = logging.getLogger("NetBrain.Knowledge.MCP.DevNet")
+
+# Generic words that appear in almost any troubleshooting question or almost
+# any API-doc blurb; excluded from the relevance-overlap check below so a
+# match on "is"/"not"/"up" alone can't count as evidence of topical overlap.
+_STOPWORDS = {
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+    "to", "of", "in", "on", "for", "and", "or", "not", "no", "with",
+    "why", "what", "how", "when", "where", "which", "do", "does", "did",
+    "up", "down", "it", "its", "this", "that", "these", "those", "as",
+    "at", "by", "from", "into", "than", "then", "so", "but", "if",
+}
+
+
+def _content_tokens(text: str) -> set:
+    """Lowercased alphanumeric tokens, minus stopwords -- same tokenizer
+    style as core.knowledge.enterprise.knowledge_layer._tokens(), applied
+    here to compare a query against a result's own title/description."""
+    return {t for t in re.findall(r"[a-z0-9]+", (text or "").lower())
+            if t not in _STOPWORDS and len(t) > 1}
 
 
 class DevNetContentMCPSource(KnowledgeSource):
@@ -184,6 +204,49 @@ class DevNetContentMCPSource(KnowledgeSource):
 
     # ── Result → KnowledgeEntry ───────────────────────────────────────────────
 
+    def _estimate_confidence(self, query: str, text: str) -> Tuple[ConfidenceLevel, str]:
+        """
+        The DevNet Content Search MCP's tool responses (verified live against
+        the real endpoint) carry no relevance/similarity score field at all —
+        every result is just a JSON blob of API-doc fields (name, description,
+        tags, api_path, ...) with nothing indicating how well it actually
+        matches the query. Blindly labeling every response ConfidenceLevel.HIGH
+        (as this used to do unconditionally) is worse than admitting
+        uncertainty: it presents a keyword coincidence (e.g. a Meraki VPN
+        "peers" API doc surfacing for a "VXLAN EVPN peering" question) with
+        the platform's highest trust label.
+
+        In the absence of a real relevance score from the API, fall back to
+        a token-overlap check between the query and the returned result's own
+        text: if none of the query's meaningful (non-stopword) words appear
+        anywhere in what came back, that is strong, cheap, defensible evidence
+        the result is off-topic, and confidence is downgraded accordingly
+        rather than assumed to be HIGH. This never invents relevance where
+        none is measurable; it only refuses to claim confidence the source
+        gives us no basis for.
+        """
+        query_tokens = _content_tokens(query)
+        result_tokens = _content_tokens(text)
+        if not query_tokens or not result_tokens:
+            return ConfidenceLevel.LOW, "no comparable query/result tokens"
+
+        overlap = query_tokens & result_tokens
+        ratio = len(overlap) / len(query_tokens)
+
+        if not overlap:
+            return (ConfidenceLevel.UNVERIFIED,
+                    "no shared vocabulary between query and result — likely a "
+                    "keyword coincidence on the underlying search, not a "
+                    "topical match")
+        if ratio < 0.34:
+            return (ConfidenceLevel.LOW,
+                    f"only weak term overlap with the query ({sorted(overlap)})")
+        if ratio < 0.6:
+            return (ConfidenceLevel.MEDIUM,
+                    f"partial term overlap with the query ({sorted(overlap)})")
+        return (ConfidenceLevel.HIGH,
+                f"strong term overlap with the query ({sorted(overlap)})")
+
     def _result_to_entry(
         self,
         command: str,
@@ -192,6 +255,7 @@ class DevNetContentMCPSource(KnowledgeSource):
         text: str,
     ) -> KnowledgeEntry:
         now = datetime.utcnow().isoformat()
+        confidence, relevance_note = self._estimate_confidence(command, text)
         return KnowledgeEntry(
             vendor="cisco",
             platform=(platform or "").lower(),
@@ -206,9 +270,10 @@ class DevNetContentMCPSource(KnowledgeSource):
                 source_url=self.ENDPOINT_URL,
                 source_title=f"Cisco DevNet MCP · {tool_name}",
                 vendor="cisco",
-                confidence=ConfidenceLevel.HIGH,
+                confidence=confidence,
                 fetched_at=now,
-                notes=f"Retrieved via Cisco-hosted MCP tool '{tool_name}'",
+                notes=(f"Retrieved via Cisco-hosted MCP tool '{tool_name}' "
+                       f"({relevance_note})"),
             ),
             fetched_at=now,
             verified_at=now,

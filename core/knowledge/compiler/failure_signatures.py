@@ -3,18 +3,21 @@ core/knowledge/compiler/failure_signatures.py
 ================================================
 Failure Signature Library — deterministic, textbook root-cause signatures
 compiled from each protocol's VERIFIED state model
-(core/knowledge/compiler/protocol_models.py, seeded with exactly OSPF and
-STP in Phase 3). Confidence is honestly hedged per signature: ExStart/MTU
-and Init/hello-mismatch are well-established textbook signatures (high
-confidence); a "stuck" state with many possible causes (Down, Exchange,
-Loading) gets a lower confidence rather than false precision. 2-Way is
+(core/knowledge/compiler/protocol_models.py, seeded with OSPF, STP, BGP,
+and LACP). Confidence is honestly hedged per signature, grounded in
+real-world reported frequency, not uniform: ExStart/MTU, BGP Active
+(repeated TCP failures), and LACP Individual (LACPDU/mode mismatch) are
+well-established, frequently-cited signatures (high confidence); a
+"stuck" state with many possible causes (Down, Exchange, Loading, BGP
+OpenSent) gets a lower confidence rather than false precision. 2-Way is
 explicitly noted as often a NORMAL stable state, not a failure, on
 broadcast networks between two DROTHERs — a real nuance worth stating
 rather than flagging every 2-Way sighting as a problem.
 
 Returns [] for any protocol without a seeded model in protocol_models.py
-— NEVER fabricates a signature for BGP/ISIS/MPLS/VXLAN/EVPN/HSRP/VRRP/
-RSTP/LACP, consistent with Phase 3's scoping decision.
+— NEVER fabricates a signature for EIGRP/ISIS/MPLS/VXLAN/EVPN/HSRP/VRRP/
+RSTP, consistent with the original scoping decision (those protocols are
+on the roadmap, not yet verified precisely enough to seed).
 
 compile_acl_deny_signature() is independently grounded — it reads Phase
 1's already-compiled `acl` NormalizedObjects directly (a deny rule IS the
@@ -70,7 +73,70 @@ _STP_SIGNATURES = {
         evidence_fields=[], confidence=0.6),
 }
 
-_SIGNATURE_LIBRARY = {"ospf": _OSPF_SIGNATURES, "stp": _STP_SIGNATURES}
+# Confidence grounded in real-world frequency (Cisco/Juniper docs, community
+# threads), not uniform: Active (repeated TCP failures — wrong neighbor IP/
+# no route/ACL) is by far the most commonly reported stuck state, so it gets
+# the highest confidence; OpenSent (AS/version mismatch) is comparatively
+# rare/short-lived, so it gets the lowest.
+_BGP_SIGNATURES = {
+    "Idle": FailureSignature(
+        protocol="bgp", stuck_state="Idle",
+        likely_cause="Neighbor administratively shut down, or no route exists to the "
+                    "peer address — BGP never even attempts to connect",
+        evidence_fields=["admin_state", "route_to_peer"], confidence=0.5),
+    "Connect": FailureSignature(
+        protocol="bgp", stuck_state="Connect",
+        likely_cause="TCP port 179 appears reachable but the peer isn't completing the "
+                    "handshake — an ACL or firewall along the path is the most common cause",
+        evidence_fields=["acl"], confidence=0.6),
+    "Active": FailureSignature(
+        protocol="bgp", stuck_state="Active",
+        likely_cause="Repeated TCP connection failures to the peer address — wrong "
+                    "neighbor IP, no route to the peer, or an ACL/firewall blocking "
+                    "TCP port 179",
+        evidence_fields=["neighbor_ip", "route_to_peer", "acl"], confidence=0.7),
+    "OpenSent": FailureSignature(
+        protocol="bgp", stuck_state="OpenSent",
+        likely_cause="Local OPEN message sent but the peer's OPEN was rejected — "
+                    "commonly a remote-AS mismatch or a BGP version mismatch",
+        evidence_fields=["remote_as"], confidence=0.55),
+    "OpenConfirm": FailureSignature(
+        protocol="bgp", stuck_state="OpenConfirm",
+        likely_cause="OPEN messages exchanged but KEEPALIVE never confirmed — commonly "
+                    "an MD5 authentication mismatch or an MTU mismatch preventing "
+                    "larger BGP messages",
+        evidence_fields=["auth", "mtu"], confidence=0.6),
+}
+
+# Individual is by far the most commonly reported LACP problem (community/
+# vendor consensus: neighbor not sending LACPDUs, active/PAgP/passive mode
+# mismatch, or both ends passive so neither side initiates) — highest
+# confidence. Suspended (a real parameter mismatch the switch actively
+# protects the channel from) is well-understood but less frequently the
+# FIRST symptom reported. Down is generic (many possible causes) and gets
+# the lowest confidence, same pattern as OSPF's Down/BGP's Idle.
+_LACP_SIGNATURES = {
+    "Individual": FailureSignature(
+        protocol="lacp", stuck_state="Individual",
+        likely_cause="Neighbor not sending LACPDUs, an LACP mode mismatch (one side "
+                    "static/PAgP while the other is LACP), or both ends configured "
+                    "passive so neither side initiates negotiation",
+        evidence_fields=["lacp_mode", "channel_protocol"], confidence=0.75),
+    "Suspended": FailureSignature(
+        protocol="lacp", stuck_state="Suspended",
+        likely_cause="Parameter mismatch on this member link (allowed VLANs, native "
+                    "VLAN, trunk mode, or STP-related) — the switch suspends the port "
+                    "to protect the channel rather than bundling a mismatched link",
+        evidence_fields=["allowed_vlans", "native_vlan", "trunk_mode"], confidence=0.65),
+    "Down": FailureSignature(
+        protocol="lacp", stuck_state="Down",
+        likely_cause="Member link is physically down or administratively disabled — "
+                    "Layer 1/2 issue upstream of LACP negotiation entirely",
+        evidence_fields=["admin_state"], confidence=0.4),
+}
+
+_SIGNATURE_LIBRARY = {"ospf": _OSPF_SIGNATURES, "stp": _STP_SIGNATURES, "bgp": _BGP_SIGNATURES,
+                      "lacp": _LACP_SIGNATURES}
 
 
 def compile_failure_signatures(protocol: str) -> List[FailureSignature]:

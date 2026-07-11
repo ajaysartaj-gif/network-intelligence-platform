@@ -2,20 +2,29 @@
 core/knowledge/compiler/protocol_models.py
 =============================================
 Protocol State Model Compiler — a small, generic state-machine
-representation, seeded with exactly TWO verified models: OSPF neighbor
-adjacency (RFC 2328) and STP port states (802.1D). Both are textbook,
-unambiguous, and OSPF's states already appear in this package's
+representation, seeded with four verified models: OSPF neighbor adjacency
+(RFC 2328), STP port states (802.1D), BGP peer session states (RFC 4271),
+and LACP port-bundling state (802.3ad/802.1AX). All four are textbook,
+unambiguous, and their states already appear in this package's
 tokens.py::_STATE_WORDS and semantic_analyzer.py::_NEIGHBOR_ROW.
 
-Deliberately NOT seeded: BGP/EIGRP/ISIS/MPLS/VXLAN/EVPN/VRRP/HSRP/LACP.
+LACP's model is deliberately scoped to the OBSERVABLE port-bundling state
+from "show etherchannel summary" (Down/Individual/Suspended/Bundled) —
+NOT the full internal 802.3ad Actor/Partner state machine (LACP_Activity,
+Aggregation, Synchronization, Collecting, Distributing, Defaulted,
+Expired flags), which isn't what an operator observes directly via CLI
+and would risk asserting internal detail I can't verify precisely enough.
+Same principle as OSPF/BGP: model what's textbook AND observable, not
+protocol internals.
+
+Deliberately NOT seeded (yet): EIGRP/ISIS/MPLS/VXLAN/EVPN/VRRP/HSRP.
 Several of these have real vendor/version-specific nuance (HSRP vs VRRP
-timers and state names differ; LACP spans multiple RFC revisions) that I
-cannot verify precisely enough to assert as "compiled knowledge" without
-risking a WRONG transition table — worse than no table at all. The
-registry mechanism is fully generic (PROTOCOL_STATE_MODELS is just a
-dict); adding a new protocol is one new ProtocolStateModel entry, same
-"registry, not a rewrite" shape as every other extension point in this
-package.
+timers and state names differ) that I cannot verify precisely enough to
+assert as "compiled knowledge" without risking a WRONG transition table —
+worse than no table at all. The registry mechanism is fully generic
+(PROTOCOL_STATE_MODELS is just a dict); adding a new protocol is one new
+ProtocolStateModel entry, same "registry, not a rewrite" shape as every
+other extension point in this package.
 """
 from __future__ import annotations
 
@@ -78,9 +87,45 @@ _STP_PORT = ProtocolStateModel(
     ],
 )
 
+_BGP_NEIGHBOR = ProtocolStateModel(
+    protocol="bgp",
+    states=["Idle", "Connect", "Active", "OpenSent", "OpenConfirm", "Established"],
+    transitions=[
+        ProtocolTransition("Idle", "Connect", "TCP connection initiated"),
+        ProtocolTransition("Connect", "Active", "TCP connection failed, retrying"),
+        ProtocolTransition("Connect", "OpenSent", "TCP connection succeeded, OPEN sent"),
+        ProtocolTransition("Active", "Connect", "TCP retry timer, reattempting connection"),
+        ProtocolTransition("Active", "OpenSent", "TCP connection finally succeeded, OPEN sent"),
+        ProtocolTransition("OpenSent", "OpenConfirm", "valid OPEN received, KEEPALIVE sent"),
+        ProtocolTransition("OpenSent", "Active", "OPEN error or connection collapse"),
+        ProtocolTransition("OpenConfirm", "Established", "KEEPALIVE received"),
+        # regression edges — a hold-timer expiry or NOTIFICATION drops the
+        # session all the way back to Idle, not to some intermediate state
+        ProtocolTransition("OpenConfirm", "Idle", "hold timer expired / NOTIFICATION received"),
+        ProtocolTransition("Established", "Idle", "hold timer expired / session reset"),
+    ],
+)
+
+_LACP_PORT = ProtocolStateModel(
+    protocol="lacp",
+    states=["Down", "Individual", "Suspended", "Bundled"],
+    transitions=[
+        ProtocolTransition("Down", "Individual", "link up, LACP negotiation starts but partner not yet agreeing"),
+        ProtocolTransition("Down", "Bundled", "link up, LACP negotiation succeeds immediately"),
+        ProtocolTransition("Individual", "Bundled", "partner starts responding correctly / mode corrected"),
+        ProtocolTransition("Suspended", "Bundled", "parameter mismatch on this member resolved"),
+        # regression edges
+        ProtocolTransition("Bundled", "Suspended", "parameter mismatch develops (VLAN/trunk/STP inconsistency)"),
+        ProtocolTransition("Bundled", "Down", "member link goes down"),
+        ProtocolTransition("Individual", "Down", "member link goes down"),
+    ],
+)
+
 PROTOCOL_STATE_MODELS: Dict[str, ProtocolStateModel] = {
     "ospf": _OSPF_NEIGHBOR,
     "stp": _STP_PORT,
+    "bgp": _BGP_NEIGHBOR,
+    "lacp": _LACP_PORT,
 }
 
 

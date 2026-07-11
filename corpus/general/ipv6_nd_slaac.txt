@@ -1,0 +1,129 @@
+IPv6 Neighbor Discovery and SLAAC Troubleshooting
+=====================================================
+
+What IPv6 ND and SLAAC are
+------------------------------
+IPv6 replaces ARP and DHCP-only address assignment with the Neighbor
+Discovery Protocol (NDP, RFC 4861+), built on five core ICMPv6 message
+types: Router Solicitation (RS, type 133), Router Advertisement (RA, type
+134), Neighbor Solicitation (NS, type 135), Neighbor Advertisement (NA, type
+136), and Redirect. SLAAC (Stateless Address Autoconfiguration) is the
+mechanism by which a host builds its own global address without a DHCP
+server: it sends an RS to the all-routers multicast address (ff02::2) or
+simply waits for a router's periodic unsolicited RA; the RA carries the
+on-link prefix(es) (typically /64) and flags indicating whether SLAAC,
+DHCPv6, or both should be used. The host combines the advertised /64 prefix
+with an interface identifier (historically EUI-64-derived, now commonly a
+randomized "privacy" identifier per RFC 8981/7217) to form its address, then
+must verify uniqueness via Duplicate Address Detection (DAD) — sending an
+NS for its own tentative address and confirming no other host answers —
+before the address becomes usable.
+
+Because RA is the single message that carries the default gateway, on-link
+prefix, and configuration flags all at once, most real IPv6 connectivity
+problems trace back either to an RA never arriving/being processed, or to
+conflicting/rogue RA information — this is architecturally different from
+IPv4, where DHCP and gateway configuration are two separate mechanisms.
+
+Common failure symptom: host has only a link-local address, no global address
+---------------------------------------------------------------------------------
+Symptom: the host shows an fe80::/10 link-local address but never acquires a
+global unicast address; it can reach other hosts on the same link-local
+segment but has no off-link IPv6 connectivity at all.
+Root causes:
+  - IPv6 routing/forwarding isn't enabled on the router, or the interface
+    isn't configured to send RAs at all — some platforms don't send RAs by
+    default until IPv6 unicast routing is explicitly enabled globally, an
+    easy step to miss when only individual interface IPv6 addresses were
+    configured.
+  - The router interface facing the host has RA suppressed intentionally
+    (e.g., "no ipv6 nd ra suppress" not applied where required on multi-
+    access or tunnel interface types that default to suppressing RA) or the
+    interface is in a state (e.g., certain VLAN/SVI configurations) where RA
+    transmission doesn't happen despite IPv6 otherwise being configured.
+Verify/fix: confirm IPv6 unicast routing is enabled globally on the router,
+and directly verify RAs are actually being transmitted and received on the
+segment (packet capture for ICMPv6 type 134, or the platform's RA-specific
+show command) rather than assuming configuration presence guarantees RA
+transmission.
+
+Common failure symptom: host sends RS but never receives an RA
+--------------------------------------------------------------------------
+Symptom: capture shows the host's RS reaching the local segment, but no RA
+is ever returned, or an RA is seen from the wrong device.
+Root causes:
+  - Router configuration/first-hop security should be checked immediately
+    in this exact scenario — an RA-Guard or first-hop-security feature
+    intended to block ROGUE RAs is, due to a scope or trust-port
+    misconfiguration, also filtering the legitimate router's own RAs (a
+    known side effect of aggressive port-based ND/RA inspection rolled out
+    without validating the trusted uplink/router-facing port list).
+  - No IPv6-capable router is actually attached to that segment/VLAN, or the
+    router's interface for that VLAN doesn't have an IPv6 address/prefix
+    configured — obvious in hindsight but a common oversight after a VLAN is
+    freshly stood up for IPv6 without every router-facing interface being
+    updated.
+Verify/fix: review RA-Guard / ND-inspection policy scope on the switches in
+the path and confirm the router-facing port(s) are explicitly trusted;
+confirm the router actually has an IPv6 address and RA transmission enabled
+on the specific VLAN/interface facing the segment in question.
+
+Common failure symptom: Duplicate Address Detection (DAD) failure
+------------------------------------------------------------------------
+Symptom: a host logs a DAD failure and never brings up the address it was
+attempting to autoconfigure; the address remains in "tentative" state
+indefinitely or is abandoned.
+Root cause: DAD works by having the host send an NS for its own
+about-to-be-assigned address before using it; if another host on the same
+segment answers (because it's genuinely already using that same address —
+most likely with deterministic EUI-64 addressing colliding after a NIC/MAC
+reassignment, or, less commonly, a misbehaving device/NIC responding to
+every NS regardless of target), the address is correctly rejected as a
+duplicate. A subtler variant: a switch or NIC issue that loops a host's own
+NS back to itself (e.g., a Layer 2 loop, or certain virtualization/bonding
+misconfigurations) makes a perfectly unique address look like a duplicate of
+itself, since the host receives what appears to be a competing claim to the
+address it just solicited.
+Verify/fix: identify the actual second device claiming the address via a
+packet capture of the NA response (not just the DAD failure message);
+rule out Layer 2 loops or NIC-teaming/virtualization misconfiguration that
+could reflect a host's own traffic back to itself before assuming a genuine
+address collision with another physical host.
+
+Common failure symptom: rogue or conflicting RA causes intermittent/partial reachability
+-----------------------------------------------------------------------------------------------
+Symptom: hosts on a segment intermittently get an unexpected default gateway
+or on-link prefix, causing partial or flapping reachability that doesn't
+correlate with any obvious device failure.
+Root causes:
+  - An unauthorized or misconfigured device on the segment (a consumer
+    router with IPv6 enabled by default, a misconfigured lab device, or a
+    device with SLAAC-forwarding/routing accidentally enabled) is itself
+    sending RAs, and hosts process whichever RA/router they hear, giving
+    every host on the segment an inconsistent, non-deterministic view of the
+    "real" gateway/prefix depending on RA timing.
+  - Because RA hijacking of the default route is the single biggest
+    first-hop trust risk in IPv6 (there is no equivalent DHCP-server-
+    authorization concept built into base RA processing), an environment
+    without RA-Guard/ND-inspection deployed at all is fully exposed to this
+    class of problem the moment any unauthorized device starts advertising.
+Verify/fix: identify the rogue RA source via packet capture (source MAC/link-
+local address of the unexpected RA) and physically or administratively
+remove/reconfigure it; deploy RA-Guard or equivalent first-hop-security
+scoped correctly to trust only the legitimate router-facing port(s) (see the
+prior symptom for the failure mode of doing this too aggressively).
+
+Common failure symptom: inconsistent behavior on non-/64 or non-standard prefix segments
+-----------------------------------------------------------------------------------------------
+Symptom: SLAAC works reliably on some segments but produces inconsistent or
+partial host behavior on others using a different prefix length.
+Root cause: SLAAC's address-generation algorithm assumes a /64 on-link
+prefix — an RA advertising a non-/64 prefix (a common mistake carried over
+from IPv4 subnetting habits, or done deliberately to conserve address space)
+either isn't processed correctly by SLAAC-only hosts, or produces
+behavior undefined/inconsistent across different host operating systems'
+SLAAC implementations, since /64 is a foundational assumption of the
+autoconfiguration algorithm rather than a mere convention.
+Verify/fix: use /64 for any segment where hosts rely on SLAAC for address
+assignment; if a smaller allocation is truly required, use DHCPv6 for
+stateful address assignment on that segment instead of SLAAC.

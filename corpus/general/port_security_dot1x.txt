@@ -1,0 +1,144 @@
+Port Security and 802.1X Troubleshooting
+============================================
+
+What port security and 802.1X are
+-------------------------------------
+These are two distinct, commonly-confused Layer 2 access-control
+mechanisms, and mixing them up (or deploying both on the same port without
+understanding the interaction) is itself a frequent source of incidents.
+
+Port security is a purely MAC-address-based control local to a switchport:
+it limits how many source MAC addresses may be learned on a port (often 1,
+for a single-host access port) and defines a violation action for what
+happens when a frame arrives from a MAC address beyond that limit, or from
+a MAC not in the configured/learned allow-list. Learned addresses can be
+"sticky" — dynamically learned but then written into the running
+configuration so they persist across a reload only if the configuration is
+saved (`write memory`/`copy running-config startup-config`); sticky entries
+learned but never saved are lost on the next reload, a common point of
+confusion when a supposedly-locked-down port stops enforcing after a
+maintenance reboot.
+
+802.1X (Port-Based Network Access Control) is an entirely different,
+identity-based mechanism: the switch (acting as "Authenticator") relays
+EAP authentication exchanges between the connecting device/user
+("Supplicant") and a RADIUS server ("Authentication Server"); the port
+stays unauthorized (blocking normal traffic, sometimes allowing only EAPOL
+frames) until the RADIUS server approves the credentials/certificate
+presented. Because 802.1X already provides per-device/per-user access
+control at a stronger (identity) layer, combining it with MAC-count-based
+port security on the same port is explicitly not recommended by most vendor
+guidance — the two features can conflict over what "a violation" even means
+on that port, and 802.1X already has its own violation/err-disable-style
+handling for repeated authentication failures independent of port security.
+
+Common failure symptom: port-security violation shuts the port down (err-disable)
+---------------------------------------------------------------------------------------
+Symptom: a port stops passing traffic entirely, showing an err-disabled
+state, and does not recover on its own.
+Root cause: the "shutdown" violation mode (the default on most Cisco-family
+platforms) puts the entire port into err-disable the instant a violation is
+detected (too many MACs learned, or a frame from a MAC not in the allowed
+list) — by design, this is a hard stop that does not self-heal; the port
+stays down until it is explicitly cleared (`shutdown`/`no shutdown`, a
+manual `clear`, or an automatic err-disable-recovery timer if one is
+configured for the security-violation cause).
+Verify/fix: check the violation counter and the specific offending MAC
+address (`show port-security interface` style output) to confirm this was a
+genuine unauthorized-device event rather than an expected topology change
+(e.g., a user swapped NICs, a phone/PC pass-through changed which MAC shows
+up first, or a virtualization host started presenting more MACs than the
+configured maximum); if the shutdown was appropriate, address the root
+cause before re-enabling the port; if false-positive violations are
+frequent for a legitimate reason (e.g., IP phones with a PC daisy-chained
+through them, which need at least 2 allowed MACs), raise the maximum
+allowed MAC count rather than repeatedly clearing the same violation.
+
+Common failure symptom: violations are occurring but nobody notices (silent drops)
+-------------------------------------------------------------------------------------------
+Symptom: hosts report connectivity is intermittently blocked, but no err-
+disable event or log entry is ever seen, and the port doesn't appear down.
+Root cause: the port is configured in "protect" violation mode, which
+silently drops traffic from any MAC beyond the configured limit / not on
+the allowed list with no log message, no SNMP trap, and no counter
+increment for the violation itself — traffic from known MACs continues
+to pass, so the port looks entirely healthy from a link/interface-status
+perspective while quietly discarding some frames. This mode is intentionally
+the quietest of the three (protect/restrict/shutdown) and is easy to forget
+was chosen, especially if it was set to avoid nuisance err-disable events
+without realizing visibility was traded away entirely.
+Verify/fix: if any observability into violations is needed, switch to
+"restrict" mode instead of "protect" — functionally identical drop
+behavior, but it logs a syslog message, sends an SNMP trap, and increments
+the violation counter, giving visibility without taking the port down.
+
+Common failure symptom: sticky MAC entries "disappear" after a maintenance reload
+------------------------------------------------------------------------------------------
+Symptom: a port that was correctly locked to a specific learned MAC address
+before a switch reload accepts a different device (or no longer enforces
+the expected restriction) after the reload.
+Root cause: sticky secure MAC addresses are learned dynamically just like
+normal port-security entries, and only become part of the persistent
+configuration once the running configuration is saved to the startup
+configuration; if the switch is reloaded (planned maintenance, a crash, a
+power event) after a sticky MAC was learned but before a `write memory` was
+performed, that learned entry is gone — the port reverts to accepting the
+next MAC it sees as the new sticky entry, which looks like "the security
+policy just stopped working" but is actually a save/persistence gap.
+Verify/fix: confirm the running configuration was saved after any sticky
+MAC learning event that matters (an easy habit to build into any change
+process involving port security); to remove a specific stale sticky entry
+without a reload, use the vendor's explicit remove-sticky-MAC command rather
+than trying to clear the whole port-security state.
+
+Common failure symptom: 802.1X authentication never succeeds
+-----------------------------------------------------------------
+Symptom: the supplicant (client) appears to attempt authentication (visible
+in client-side logs / EAP exchange starting) but the port never transitions
+to authorized, or the client reports a generic authentication failure.
+Root causes:
+  - Certificate problems on the supplicant or RADIUS side: an invalid,
+    expired, or untrusted (chain-verification failure) certificate is
+    reported as the single most common category of 802.1X authentication
+    failure — either the client doesn't trust the RADIUS server's
+    certificate (for EAP methods requiring server validation, like
+    EAP-TLS/PEAP), or the client's own certificate has expired/was revoked.
+  - RADIUS communication is blocked or misconfigured between the switch
+    (Authenticator) and the RADIUS server: a firewall not permitting the
+    RADIUS authentication port (traditionally UDP 1812, though legacy 1645
+    still appears in some deployments), or a mismatched shared secret
+    between the switch and RADIUS server — a shared-secret mismatch often
+    produces no useful failure detail on the client side at all, since the
+    switch can't even parse the RADIUS server's response correctly.
+  - EAP method mismatch: the supplicant is configured for an EAP method
+    (e.g., PEAP, EAP-TLS, EAP-FAST) the RADIUS server's policy doesn't
+    accept for that client/group, so the negotiation fails even though
+    both individual sides are otherwise correctly configured.
+Verify/fix: check switch-side authentication logs/RADIUS accounting for the
+actual rejection reason (a mismatched shared secret often shows as the
+switch treating the RADIUS server as unreachable, not as an
+authentication rejection, which is a useful distinguishing symptom); verify
+certificate validity and trust chain on both client and server; confirm the
+EAP method configured on the client is permitted by the RADIUS server's
+policy for that identity.
+
+Common failure symptom: 802.1X port ends up err-disabled from repeated failures
+-------------------------------------------------------------------------------------
+Symptom: a port running 802.1X (with or without port security also
+configured) ends up err-disabled specifically for a security-violation or
+similar 802.1X-related cause after repeated failed authentication attempts.
+Root cause: 802.1X ports are not generally intended to end up err-disabled
+as their normal failure mode (a failed authentication should simply leave
+the port unauthorized, not disable it) — an err-disable outcome on an
+802.1X port usually indicates port security is also configured on the same
+port and its own violation/MAC-limit logic triggered, which is exactly the
+combination vendor guidance recommends against; running port-security's
+MAC-limiting logic alongside 802.1X's own identity-based access control on
+the same port is a frequent, confusing root cause of unexpected err-disable
+events that look like an 802.1X problem but are actually a port-security
+violation layered on top of it.
+Verify/fix: determine which feature actually triggered the err-disable
+(port security's violation counter vs. an 802.1X-specific event) before
+troubleshooting the wrong subsystem; reconsider whether both features are
+needed on the same port, since 802.1X's identity-based control already
+covers what MAC-limiting is trying to achieve in most designs.

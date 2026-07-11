@@ -1,0 +1,133 @@
+MPLS L3VPN Troubleshooting
+=============================
+
+What MPLS L3VPN is
+--------------------
+MPLS Layer 3 VPN (RFC 4364) lets a single provider (or enterprise WAN core)
+carry multiple customers'/tenants' private IP routing tables over a shared
+backbone while keeping them fully isolated from each other. The building
+blocks:
+  - VRF (Virtual Routing and Forwarding instance): a separate routing/
+    forwarding table per customer/tenant on a PE (Provider Edge) router, so
+    overlapping address space between customers is not a problem.
+  - RD (Route Distinguisher): a value prepended to a customer's IPv4 prefix
+    to make it globally unique in MP-BGP (this is what allows two customers
+    to both use 10.0.0.0/8 without collision inside the provider's BGP
+    table) — it does not, by itself, control which VRFs import which
+    routes.
+  - RT (Route Target): an extended BGP community attached to a VPNv4 route
+    that DOES control import/export — a PE exports routes out of a VRF
+    tagged with that VRF's export-RT, and imports incoming VPNv4 routes into
+    a VRF only if the route's RT matches that VRF's configured import-RT
+    list. This is the actual mechanism that builds any-to-any, hub-and-spoke,
+    or extranet topologies.
+  - MP-BGP (multiprotocol BGP, address-family VPNv4/VPNv6): the PE-to-PE
+    control plane that exchanges customer routes wrapped with RD/RT
+    information — almost always run over an iBGP session between PE
+    loopbacks (frequently via route-reflectors so PEs don't need a full
+    mesh).
+  - LDP/RSVP-TE label distribution + an IGP (OSPF/IS-IS) in the core:
+    provides the label-switched path (LSP) PE routers use to reach each
+    other's loopbacks with an MPLS label stack — this is what makes the P
+    (core) routers able to forward customer traffic without ever knowing
+    about customer routes at all. A VPN packet crossing the core carries two
+    labels: an outer "transport" label (from LDP/IGP, swapped hop-by-hop by
+    P routers to reach the egress PE) and an inner "VPN" label (assigned by
+    the egress PE, identifying which VRF/CE to deliver the packet to).
+
+Common failure symptom: PE-CE routes never appear on the remote PE
+-----------------------------------------------------------------------
+Symptom: a route learned from a customer (CE) router on the local PE never
+shows up in the remote PE's VRF routing table, even though both PEs' VRFs
+otherwise look correctly configured.
+Root causes:
+  - Route-target import/export mismatch: the single most common L3VPN
+    fault. The local VRF's export-RT and the remote VRF's import-RT list
+    must actually match (a copy/paste that didn't update the RT per site, or
+    an off-by-one in a hub-and-spoke design where spoke VRFs should export
+    a different RT than the hub imports, is a routine misconfiguration).
+    Because the route is still present in the PE's global VPNv4 BGP table
+    even when the RT doesn't match anywhere, checking "did the PE receive
+    the route at all" first (rather than just checking the VRF table) is the
+    fastest way to isolate an RT problem from an actual BGP session problem.
+  - The route is present in the VPNv4 BGP table but "hidden" — commonly
+    because it was never properly labeled (no VPN label was assigned or
+    advertised with it), which most implementations expose via a specific
+    "hidden routes" view in the VPNv4/L3VPN table separate from the normal
+    route table.
+  - PE-CE routing protocol (static, BGP, OSPF, or EIGRP between PE and CE)
+    isn't actually delivering the route into the VRF on the originating PE
+    in the first place — this is a PE-CE-local problem, not an MPLS-core
+    problem, and is diagnosed by checking the VRF's local routing table on
+    the originating PE before ever looking at MP-BGP.
+Verify/fix: on the originating PE, confirm the route is present in the VRF's
+local table (proves PE-CE exchange worked); confirm it was redistributed
+into VPNv4 BGP and advertised with the expected export-RT; on the receiving
+PE, confirm the VPNv4 BGP table has the route (proves the core MP-BGP session
+is fine) and then confirm the VRF's import-RT list actually includes that
+value.
+
+Common failure symptom: MP-BGP VPNv4 session won't establish, or is up but idle
+-----------------------------------------------------------------------------------
+Symptom: the iBGP session between PE loopbacks used for VPNv4 either never
+reaches Established, or is Established under the default IPv4 address-family
+but no VPNv4 prefixes are ever exchanged.
+Root causes:
+  - The `address-family vpnv4` (or vpnv6) isn't activated for the neighbor —
+    exactly analogous to the same failure mode in BGP EVPN: the base session
+    can be perfectly healthy while the specific AF needed for VPN routes was
+    never turned on for that peer.
+  - PE loopback reachability across the core depends on the IGP/LDP label-
+    switched path being intact; if the core IGP has an adjacency problem or
+    LDP hasn't distributed labels for the PE's loopback, the BGP TCP session
+    itself may still come up (if IP reachability exists via the IGP alone)
+    but data-plane forwarding for VPN traffic will fail even though BGP looks
+    fine — a classic split between "control plane looks healthy" and "actual
+    traffic doesn't forward."
+  - Route-reflector client relationships not applied symmetrically to a new
+    PE (same class of problem as in EVPN: an RR reflecting to some PE
+    clients but not a newly added one).
+Verify/fix: confirm `address-family vpnv4` is active for the neighbor on
+both PEs; confirm the LDP/IGP label-switched path exists between the two PE
+loopbacks (checking for a valid outbound label per hop, not just IP
+reachability) since MPLS forwarding needs the label stack to be complete end
+to end, not merely IP-layer reachability.
+
+Common failure symptom: traffic reaches the far PE but is dropped or misrouted there
+------------------------------------------------------------------------------------------
+Symptom: `traceroute`/label-stack inspection shows the LSP is intact and
+labels are being swapped correctly hop-by-hop through the core, but traffic
+still fails between CE sites.
+Root causes:
+  - VPN (inner) label mismatch: the label the ingress PE pushed for a given
+    prefix doesn't match what the egress PE actually assigned and is
+    expecting to pop for that prefix (usually stale label state after a
+    route flap, or a race during reconvergence) — verified by comparing the
+    VPN label shown in the local PE's outgoing route against what the remote
+    PE has assigned for the same prefix.
+  - PE-CE routing on the EGRESS side (opposite direction of the earlier
+    symptom) — the route made it across the core correctly but was never
+    redistributed out to the receiving CE (e.g., an ACL/route-map on PE-CE
+    BGP, or an EIGRP/OSPF redistribution filter at the PE-CE boundary),
+    so packets arrive at the correct PE but have nowhere to go.
+  - Overlapping/duplicate RD used for two different VRFs on the same PE, or
+    an inconsistent RD between the ends of what should be one L3VPN service —
+    RDs don't control import/export (RTs do), but an accidental RD collision
+    between unrelated VRFs on the same PE can still cause BGP best-path
+    selection to treat two customers' identical-looking prefixes as the same
+    route and silently prefer one over the other.
+Verify/fix: verify VPN label consistency between ingress and egress PE for
+the affected prefix; check PE-CE egress filtering/redistribution
+independently of the core; audit RD uniqueness across VRFs configured on the
+same PE.
+
+General diagnostic sequence
+------------------------------
+Work outward from the customer: (1) confirm the route exists in the VRF on
+the originating PE (PE-CE exchange), (2) confirm it was advertised into
+VPNv4 MP-BGP with the right RT and RD, (3) confirm the remote PE's VPNv4 BGP
+table received it, (4) confirm the remote VRF's import-RT accepted it into
+the VRF table, (5) confirm the LSP/label stack between the two PEs is
+intact, (6) confirm the remote PE redistributes it out to its own CE. Nearly
+every real L3VPN incident is fully explained by finding exactly which of
+those six steps first fails.

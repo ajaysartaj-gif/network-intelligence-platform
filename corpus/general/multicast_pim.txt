@@ -1,0 +1,135 @@
+Multicast / PIM Troubleshooting
+=================================
+
+What multicast and PIM are
+----------------------------
+IP multicast lets a single sender deliver one stream of traffic to many
+receivers without replicating it at the source; routers along the path
+replicate the packet only where the tree actually branches. IGMP (on the
+LAN segment between hosts and their first-hop router) lets a host tell its
+router "I want to receive group G." PIM (Protocol Independent Multicast) is
+the router-to-router protocol that builds and maintains the distribution
+tree across the network so traffic for group G actually reaches every router
+that has a downstream receiver. "Protocol Independent" means PIM does not
+run its own routing protocol to learn topology — it reuses whatever unicast
+routing table (from OSPF, EIGRP, static routes, BGP, etc.) is already
+present, via the Reverse Path Forwarding (RPF) check described below. PIM
+Sparse Mode (PIM-SM) is by far the most common deployment mode; it depends
+on a Rendezvous Point (RP) as a shared meeting place where sources and
+receivers initially find each other, with routers optionally switching to a
+direct shortest-path tree (SPT) per source once traffic is flowing.
+
+Core troubleshooting commands across vendors: `show ip pim neighbor`,
+`show ip pim interface`, `show ip mroute` (multicast routing table),
+`show ip rpf <source>` (reverse-path check), and `show ip igmp groups`.
+
+Common failure symptom: no PIM neighbor forms on a link
+-----------------------------------------------------------
+Symptom: `show ip pim neighbor` doesn't list the expected neighbor on an
+interface, even though the unicast IGP adjacency across that same link (if
+any) is fine.
+Root causes:
+  - PIM is simply not enabled on the interface (`ip pim sparse-mode` or
+    equivalent missing) — the single most common cause; PIM must be
+    explicitly enabled per interface, it is not implied by having an IP
+    address or by running an IGP on that interface.
+  - PIM hello interval/timers mismatched aggressively enough to prevent
+    neighbor formation, or an ACL/firewall blocking the PIM protocol
+    (IP protocol 103) or PIM's multicast hello destination (224.0.0.13).
+  - Mismatched PIM version or mode expectations between the two routers
+    (e.g., one side hard-set to dense-mode while the fabric is standardized
+    on sparse-mode) causing hellos to be accepted but the relationship to
+    behave unexpectedly.
+Verify/fix: confirm `ip pim sparse-mode` (or the vendor equivalent) is
+configured on both ends of the link, confirm no ACL is filtering PIM/224.0.0.13,
+and confirm consistent PIM mode across the domain.
+
+Common failure symptom: RPF failure — mroute stuck, traffic not forwarded
+------------------------------------------------------------------------------
+Symptom: `show ip mroute` for the group either doesn't appear at all, or
+shows the (S,G) or (*,G) entry with the incoming interface flagged as
+RPF-failed; `show ip rpf <source>` reports "failed, no route exists" or
+shows an unexpected interface.
+Root cause: PIM's core forwarding rule is the Reverse Path Forwarding check —
+a router only accepts multicast traffic for a source/group on the interface
+that its UNICAST routing table says is the path back toward the source. If
+the unicast route to the source (or RP, for shared-tree traffic) doesn't
+exist, is asymmetric (traffic arrives on interface A but the unicast return
+path points out interface B), or points via a different IGP/protocol than
+the one carrying multicast, PIM correctly refuses to forward the packet —
+this is by design, not a bug, and is overwhelmingly the most common real-world
+multicast complaint. Typical underlying triggers: asymmetric/unequal-cost
+routing paths, a multicast source's route missing from the unicast table
+(e.g., filtered by a route-map), or multiple IGP domains/redistribution
+boundaries where the multicast topology and unicast topology diverge.
+Verify/fix: run the RPF check directly (`show ip rpf <source-address>`) and
+compare the interface it names against the interface multicast traffic is
+actually arriving on; fix by correcting the unicast route (or, if
+intentional asymmetry is required, configuring an explicit static mroute /
+RPF override).
+
+Common failure symptom: missing or unreachable Rendezvous Point (RP)
+-------------------------------------------------------------------------
+Symptom: sources register but receivers never get traffic (or vice versa);
+`show ip pim rp mapping` shows no RP for the group, an unreachable RP
+address, or a different RP than expected on different routers.
+Root causes:
+  - RP address statically configured on some routers but not others (a
+    common config-drift issue when RP is set with per-router static
+    `ip pim rp-address` statements instead of a dynamically-distributed
+    mechanism), so different routers in the same domain disagree about
+    which router is the RP for a given group.
+  - Auto-RP or BSR (Bootstrap Router) mechanism intended to distribute RP
+    information dynamically isn't working — e.g., the Auto-RP
+    announce/discovery multicast groups (224.0.1.39/224.0.1.40) aren't
+    PIM-dense-mode enabled on the necessary links, so the RP-mapping
+    messages themselves never propagate even though sparse-mode groups are
+    configured correctly everywhere else.
+  - The RP's loopback/address is not reachable via unicast routing from
+    some part of the network (an RPF problem toward the RP itself, which
+    blocks the shared-tree (*,G) join from ever completing).
+Verify/fix: confirm `show ip pim rp mapping` returns the same, reachable RP
+address on every router in the domain; if using Auto-RP or BSR, confirm the
+distribution mechanism's own multicast groups are functioning: the
+distribution mechanism must work before any sparse-mode group relying on it
+can.
+
+Common failure symptom: IGMP — receiver never gets added to the local mroute
+--------------------------------------------------------------------------------
+Symptom: a host reports it joined a multicast group (or its application
+logs a join) but `show ip igmp groups` on its first-hop router never shows
+the group, and no (*,G) entry appears in `show ip mroute`.
+Root causes:
+  - IGMP snooping on an intermediate Layer 2 switch is filtering the IGMP
+    membership report before it reaches the router (snooping without a
+    correctly detected/static multicast router port), so the router-facing
+    IGMP querier never sees the join.
+  - PIM/IGMP not enabled on the router's receiver-facing VLAN interface at
+    all — IGMP processing on an interface is generally tied to that
+    interface having PIM enabled.
+  - IGMP version mismatch between host and router (e.g., host sending IGMPv3
+    source-specific reports the router's configured IGMP version doesn't
+    expect) causing reports to be silently ignored.
+Verify/fix: check IGMP snooping's detected multicast-router port on the
+intervening switch, confirm PIM/IGMP is enabled on the router interface
+facing the receiver, and confirm IGMP version consistency (or explicit
+version configuration) end to end.
+
+Common failure symptom: topology/IGP incongruence across multiple domains
+-------------------------------------------------------------------------------
+Symptom: multicast works within one IGP area/domain but fails (typically as
+RPF failures) at domain boundaries, or on NBMA/hub-and-spoke links (e.g.,
+DMVPN, Frame Relay) where the unicast next-hop and the actual Layer 2
+adjacency don't line up the same way multicast needs them to.
+Root cause: PIM has no topology of its own — it is entirely dependent on the
+unicast routing table lining up with the physical/logical multicast
+distribution path. Redistribution boundaries between IGPs, summarization
+that hides the specific source route needed for an accurate RPF check, and
+NBMA topologies where one physical interface reaches many next-hops (so the
+"incoming interface" the RPF check expects is ambiguous) are the classic
+causes of RPF failures that only show up at scale, not in a small test
+topology.
+Verify/fix: design multicast to run within a single congruent IGP domain
+wherever possible; where redistribution or summarization is unavoidable,
+verify that the specific /32 (or precise-enough) route to each multicast
+source survives to every router that needs an RPF check against it.

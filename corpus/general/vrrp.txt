@@ -1,0 +1,120 @@
+VRRP (Virtual Router Redundancy Protocol) Troubleshooting
+=============================================================
+
+What VRRP is
+--------------
+VRRP (RFC 5798, standards-based — the open equivalent of Cisco's proprietary
+HSRP) lets a group of routers on a shared LAN segment present a single
+virtual IP/MAC address as the default gateway for hosts, so a host's
+gateway keeps working transparently if the physical router currently
+serving it fails. One router in the group is elected Master (owns the
+virtual IP and answers ARP/forwards traffic for it); the rest are Backup and
+listen for the Master's periodic VRRP advertisements. If the Master stops
+advertising, a Backup takes over as the new Master after a timeout. Election
+is based on Priority (0-254, default 100; a router configured with the
+virtual IP's real/owner address as its own always uses priority 255 and is
+the "IP address owner"); on a priority tie, the router with the higher
+primary IP address on that interface wins.
+
+VRRP is deliberately similar in role to HSRP but differs in some important
+mechanics — it's an open standard usable across vendors, it has no separate
+"active/standby" hello vs. coup mechanism (a single advertisement type
+serves both), and, notably, virtual-router MAC addressing and preemption
+defaults differ from HSRP, so operators moving from HSRP-heavy Cisco
+environments to multi-vendor VRRP deployments should not assume identical
+default behavior.
+
+Common failure symptom: multiple routers simultaneously claim Master
+---------------------------------------------------------------------------
+Symptom: more than one router in the same VRRP group believes it is Master
+at the same time — visible as duplicate ARP replies for the virtual IP, or
+each router's VRRP state showing Master.
+Root causes:
+  - Mismatched advertisement (hello) timers between group members: VRRP's
+    Master-down detection is timer-based (Backup routers wait roughly
+    3x the advertisement interval, plus a skew factor, before assuming the
+    Master is gone) — if the configured advertisement interval differs
+    between routers, a Backup can decide the Master is down and take over
+    while the actual Master is still alive and advertising on its own
+    (different, longer) interval, producing two simultaneous Masters.
+  - A unidirectional or partial link/VLAN failure (e.g., a trunk allows
+    VRRP hellos in one direction but not the other, or an intervening
+    switch is filtering the VRRP multicast/hello destination on some ports
+    but not others) so the routers can't agree on reachability even though
+    each individually appears healthy.
+  - Split VLAN/broadcast domain — e.g., a spanning-tree issue or a
+    misconfigured trunk that partitions what should be one shared segment
+    into two, so each side's VRRP group independently (and correctly, given
+    its own view) elects its own Master.
+Verify/fix: confirm the advertisement interval is configured identically on
+every group member; verify VRRP hello traffic (and the group's virtual MAC)
+is actually reaching every member by checking hello/advertisement receive
+counters on each router (a Master that is only sending, never receiving,
+advertisements from peers is a strong signal of one-way reachability); check
+Layer 2 path health (trunk state, STP topology) for a segment/partition
+issue.
+
+Common failure symptom: Backup never takes over Master role when it should
+---------------------------------------------------------------------------------
+Symptom: the configured Master fails or its uplink goes down, but a Backup
+router doesn't take over the virtual IP, or is slow enough to take over that
+users experience an outage.
+Root causes:
+  - No object/interface tracking configured: by default, a router only
+    lowers its VRRP priority (triggering failover) if the VRRP-enabled
+    interface itself goes down — if the actual failure is further upstream
+    (e.g., the router's WAN uplink fails but its LAN-facing VRRP interface
+    stays up), the router has no way to know it should give up Master
+    status unless tracking of that specific upstream interface/route was
+    explicitly configured to decrement priority on failure.
+  - Advertisement interval set too long for the outage tolerance required —
+    since Backup failover time is directly proportional to the
+    advertisement interval (roughly 3x the interval plus skew), a slow
+    interval that's fine for the interface-down failure case is much too
+    slow for scenarios needing sub-second failover.
+Verify/fix: configure object/route tracking so a router's priority is
+demoted when something other than the directly VRRP-enabled interface fails
+(mirroring HSRP's "track" concept); tune the advertisement interval to match
+the required failover time budget, understanding that a very short interval
+increases control-plane and CPU load if many VRRP groups are configured.
+
+Common failure symptom: previous Master doesn't reclaim Master role after recovery
+-----------------------------------------------------------------------------------------
+Symptom: a higher-priority router that was Master, failed, and recovered
+stays in Backup state indefinitely instead of becoming Master again.
+Root cause: this is controlled by the preempt setting. Preemption is enabled
+by default in the VRRP standard, meaning a recovered higher-priority router
+should reclaim Master — but if preempt was explicitly disabled (a common
+choice to avoid flapping/traffic reordering during a flaky link's repeated
+up/down cycling), the recovered router intentionally stays Backup until the
+current (lower-priority) Master itself fails, which is by-design behavior
+often mistaken for a fault.
+Verify/fix: check the preempt setting on the recovered router — if the
+design intends for the highest-priority router to always be Master when
+healthy, preempt should be enabled (the default); if flap-avoidance was the
+reason it was disabled, consider adding a preempt delay instead of disabling
+outright, so the router waits to be sure it's stably healthy before
+reclaiming Master rather than never reclaiming it at all.
+
+Common failure symptom: hosts on the segment lose their gateway despite VRRP looking healthy
+-----------------------------------------------------------------------------------------------
+Symptom: `show vrrp` on both routers reports healthy Master/Backup state and
+correct priorities, but end hosts can't reach the virtual gateway IP.
+Root causes:
+  - Virtual MAC/ARP issue: hosts have cached an ARP entry for the virtual IP
+    pointing at a MAC address that's no longer being served correctly by
+    the new Master (rare with VRRP's shared virtual MAC design, but possible
+    if a device on the path — e.g., a firewall or a switch with strict
+    port-security/MAC-limiting — is filtering the virtual MAC as
+    "unexpected" on the new Master's port after a failover).
+  - Advertisement statistics show the "advertisements sent" counter climbing
+    normally but no growth in the corresponding received counters on peers —
+    indicating the VRRP control-plane traffic itself isn't reaching where it
+    needs to, even though the VRRP process locally reports itself healthy
+    (worth checking directly with per-router advertisement statistics rather
+    than trusting VRRP state alone).
+Verify/fix: verify basic reachability to the virtual IP directly (ping) as
+a baseline before assuming the fault is inside VRRP itself; check port-
+security/MAC-limiting configuration on switches in the path for the virtual
+MAC; compare advertisement sent/received counters across group members to
+confirm true bidirectional control-plane reachability.

@@ -34,7 +34,7 @@ _STOP = {"state", "value", "status", "up", "down", "id", "name", "count",
          "the", "is", "on", "of", "a", "an", "to", "for", "not", "no", "issue",
          "problem", "or", "and", "configuration", "configured", "misconfigured",
          "mismatch", "mismatched", "between", "neighbor", "neighbors",
-         "ospf", "bgp", "eigrp", "stp", "isis", "rip"}
+         "ospf", "bgp", "eigrp", "stp", "isis", "rip", "lacp"}
 
 
 def content_tokens(s: str) -> set:

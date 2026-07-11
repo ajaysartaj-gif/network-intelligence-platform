@@ -1,0 +1,163 @@
+VXLAN / EVPN Peering and Forwarding Troubleshooting
+====================================================
+
+What VXLAN and EVPN are
+------------------------
+VXLAN (Virtual Extensible LAN) is a MAC-in-UDP encapsulation that lets Ethernet
+segments be stretched across an IP (Layer 3) underlay. Each participating
+switch is a VTEP (VXLAN Tunnel Endpoint) — it encapsulates a frame from a
+locally attached VLAN into a VXLAN/UDP/IP packet, sends it across the
+underlay to a remote VTEP's source IP, and the remote VTEP decapsulates it
+back onto the matching VLAN. The VNI (VXLAN Network Identifier) is the
+24-bit field that identifies which logical Layer 2 segment (or, for a Layer 3
+VNI, which tenant VRF) a given packet belongs to — it plays the role a VLAN ID
+plays inside a single switch, but at data-center-fabric scale.
+
+By itself VXLAN only defines the encapsulation; it does not define how VTEPs
+learn which remote VTEP owns which MAC/IP. Historically this was done with
+flood-and-learn (multicast in the underlay carries unknown-unicast/broadcast/
+multicast, "BUM", traffic and VTEPs learn source MACs from it, like classic
+Ethernet). Modern deployments instead use BGP EVPN (RFC 7432) as the control
+plane: VTEPs peer over MP-BGP (typically iBGP to spine route-reflectors, or
+eBGP in a CLOS fabric) and exchange EVPN address-family routes carrying
+MAC/IP/VNI/next-hop reachability, so no data-plane flooding is needed to learn
+where an endpoint lives. The five EVPN route types most relevant to
+troubleshooting are:
+  - Type 2 (MAC/IP Advertisement): a host's MAC (and optionally IP) at a VTEP,
+    used for ARP/ND suppression and unicast forwarding.
+  - Type 3 (Inclusive Multicast Ethernet Tag / IMET): announces "I am a VTEP
+    participating in VNI X", building the ingress-replication or multicast
+    list used to flood BUM traffic for that VNI.
+  - Type 5 (IP Prefix route): advertises a routed IP prefix bound to a tenant
+    VRF (Layer 3 VNI) — used for inter-subnet/external routing and is the
+    preferred way to advertise a subnet behind a silent or non-BGP host.
+
+Because two independent layers must both work — the IP underlay (VTEP-to-VTEP
+reachability) and the BGP EVPN overlay (control-plane route exchange) — most
+real failures are a mismatch or break in one of those two layers, not a flaw
+in VXLAN encapsulation itself.
+
+Common failure symptom: EVPN BGP peering never comes up
+---------------------------------------------------------
+Symptom: `show bgp l2vpn evpn summary` (or `show bgp evpn summary`) shows the
+neighbor stuck in Idle/Active/Connect, never reaching Established.
+Root causes, in order of likelihood:
+  - Underlay reachability is broken: the loopback/VTEP source addresses used
+    as BGP peering addresses aren't mutually reachable — an IGP (OSPF/IS-IS)
+    adjacency between the two VTEPs (or to the spine route-reflector) is down,
+    or a firewall/ACL blocks TCP/179 between loopbacks.
+  - The `l2vpn evpn` address-family isn't activated for that neighbor even
+    though the base BGP session parameters look right — the session forms in
+    the default (IPv4 unicast) AF but EVPN NLRI is never exchanged, so nothing
+    ever populates the L2/L3 tables even though "show bgp summary" for IPv4
+    looks fine.
+  - Route-reflector client relationship is asymmetric: a spine is configured
+    as RR for some leaves but a given leaf's peer-group/template wasn't
+    applied, so that one leaf never receives reflected routes even though its
+    session is Established.
+  - AS-path / eBGP-multihop misconfiguration in eBGP-underlay fabrics: eBGP
+    peers between loopbacks require `ebgp-multihop` (loopbacks are more than
+    one hop away) — omitting it means the TCP SYN never gets a reply.
+Verify/fix: confirm underlay reachability first (`ping`/`traceroute` between
+VTEP source/loopback addresses, check the IGP neighbor table), then check
+`show bgp l2vpn evpn summary` state and confirm the `address-family l2vpn
+evpn` is configured and activated under the neighbor (or peer-group/template)
+on both ends, then confirm RR-client configuration symmetry on the
+route-reflector.
+
+Common failure symptom: BGP EVPN session is Established but no routes
+------------------------------------------------------------------------
+Symptom: session shows Established, but `show bgp l2vpn evpn` has zero or far
+fewer prefixes than expected, and remote hosts are unreachable.
+Root causes:
+  - Route-target (RT) import/export mismatch: each VNI/VRF has an
+    export-route-target attached to outgoing EVPN routes and an
+    import-route-target that decides which received routes are accepted into
+    that VNI/VRF's table. If the import RT on one VTEP doesn't match the
+    export RT the other VTEP is using (a typo, or a copy-paste that didn't
+    update the ASN:VNI value per site), the routes arrive at the receiving
+    VTEP's BGP table (visible with `show bgp l2vpn evpn` as received) but are
+    never imported into the per-VNI/VRF forwarding table — a very common,
+    entirely silent failure because the base BGP session looks completely
+    healthy.
+  - VNI not actually provisioned in the NVE/VTEP's local mapping: the
+    global/VRF-level EVPN configuration is correct but the specific Layer 2
+    VNI was never added to the NVE interface (or the VLAN-to-VNI mapping is
+    missing), so the local VTEP never originates a Type-3 route for that VNI
+    and never imports Type-2 routes into it even though BGP itself is fine.
+  - Route-reflector configured to reflect standard BGP AFs but not explicitly
+    configured for the l2vpn evpn AF (same asymmetry as above, but caught only
+    once the session is up and specific VNIs are checked).
+Verify/fix: on both VTEPs, compare configured export-RT and import-RT values
+for the VNI/VRF in question — they should match (or, for hub-and-spoke
+designs, be deliberately asymmetric, which should be confirmed against
+design intent). Confirm the VNI is present in `show nve vni` / `show vxlan
+vni` / `show evpn instance` and that a Type-3 route was actually generated
+and received for it.
+
+Common failure symptom: intermittent reachability to specific (silent) hosts
+-------------------------------------------------------------------------------
+Symptom: most hosts on a VNI work; one or a few — especially hosts that send
+almost no traffic (printers, IoT devices, idle servers) — become unreachable
+after some period, then work again after they generate traffic.
+Root cause: EVPN Type-2 MAC/IP routes are refreshed based on local MAC-table
+aging on the originating VTEP. If a host is silent long enough that its MAC
+entry ages out of the local L2 table, the VTEP withdraws the Type-2 route it
+had advertised for that host — remote VTEPs then lose their only reachability
+information for it until the host transmits again (e.g., a gratuitous ARP,
+or a receiver ARP-request wakes it up). This produces "asymmetric" or
+flapping reachability that looks like an intermittent network fault but is
+actually a MAC-aging/silent-host interaction.
+Verify/fix: check the MAC-table aging timer on the VLAN in question versus
+the host's actual idle interval; increase the aging timer for that VLAN, or
+prefer static/Type-5-based reachability (advertising the host's subnet as a
+routed prefix rather than depending on per-host MAC discovery) for
+known-silent endpoints such as printers or monitoring appliances.
+
+Common failure symptom: ARP suppression not working / excessive BUM flooding
+--------------------------------------------------------------------------------
+Symptom: broadcast/ARP traffic volume across the fabric is much higher than
+expected for a VXLAN/EVPN design that is supposed to suppress it locally.
+Root causes:
+  - ARP suppression relies on the ingress VTEP already having a Type-2 route
+    for the target IP; if the target's Type-2 route was never learned
+    (RT mismatch, VNI misconfiguration, or the target is a genuinely new/
+    silent host) the ARP request must still be flooded as BUM traffic — this
+    is expected behavior, not a bug, but is frequently misdiagnosed as one.
+  - Ingress-replication (unicast BUM replication) peer list is incomplete —
+    a VTEP that should be a BUM-flooding target for a VNI never received (or
+    never sent) the Type-3 IMET route that would add it to the list, so BUM
+    traffic silently fails to reach it while unicast (Type-2-derived) traffic
+    works fine — again pointing back to a Type-3/RT issue rather than an ARP-
+    suppression feature bug.
+Verify/fix: confirm the destination's Type-2 route actually exists in the
+ingress VTEP's EVPN table before assuming ARP suppression should have fired;
+separately verify the VNI's Type-3/ingress-replication peer list includes
+every VTEP that should receive BUM traffic for it.
+
+Common failure symptom: VNI/VLAN mapping inconsistency across VTEPs
+------------------------------------------------------------------------
+Symptom: traffic for a stretched VLAN works between some pairs of VTEPs but
+not others, or hosts land in the wrong broadcast domain after moving.
+Root cause: the local VLAN-to-VNI mapping is a per-switch configuration
+choice; if VLAN 20 is mapped to VNI 10020 on one leaf but VLAN 20 is
+(mistakenly) mapped to a different VNI — or the same VNI is mapped from a
+different local VLAN — on another leaf, frames are still exchanged correctly
+at the VXLAN/VNI layer, but they land on the wrong local VLAN at the far end,
+which looks like an intermittent, host-specific Layer-2 fault.
+Verify/fix: audit VLAN-to-VNI mapping consistency across every VTEP that
+participates in a given VNI; this is a common casualty of copy/pasted,
+per-switch configuration in fabrics without a central intent-based
+provisioning system.
+
+Underlay considerations worth checking first
+-----------------------------------------------
+Because VXLAN rides on top of an IP underlay, always confirm before digging
+into EVPN specifics: the VTEP source-interface (loopback) is up and its
+address is reachable end to end (ICMP and, if used, the underlay IGP
+neighbor state); MTU along the underlay path accounts for the ~50-byte VXLAN/
+UDP/outer-IP overhead (a path MTU that is exactly line-rate 1500 with no
+adjustment silently drops or fragments encapsulated traffic even though the
+inner frame itself would have fit); and multicast-based (non-EVPN)
+flood-and-learn designs additionally require a working PIM/IGMP underlay for
+BUM replication.

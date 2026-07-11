@@ -1,0 +1,134 @@
+EIGRP Neighbor and Adjacency Troubleshooting
+================================================
+
+What EIGRP is
+----------------
+EIGRP (Enhanced Interior Gateway Routing Protocol) is a Cisco-originated
+(now open, RFC 7868) advanced distance-vector routing protocol. Two routers
+become EIGRP neighbors by exchanging Hello packets on a shared link; once a
+neighbor relationship forms, they exchange the full routing topology and
+then only incremental updates, using the DUAL (Diffusing Update Algorithm)
+finite-state machine to guarantee loop-free paths, including loop-free
+alternate ("feasible successor") backup paths that let some topology changes
+be repaired locally without a full recomputation. Because EIGRP builds its
+neighbor relationship first and only trusts topology information from
+established neighbors, nearly all real-world EIGRP problems are neighbor-
+formation problems rather than DUAL/metric computation problems.
+
+The five conditions that must match for two EIGRP routers to become
+neighbors: they must be on a common subnet, use the same Autonomous System
+number, use matching K-values (the metric-weighting constants), pass
+authentication (if either side has it configured), and — in the newer
+named-mode configuration — belong to the same process/VRF context.
+
+Common failure symptom: neighbor never forms — AS number or subnet mismatch
+--------------------------------------------------------------------------------
+Symptom: no `%DUAL-5-NBRCHANGE` message ever appears; `show ip eigrp
+neighbors` never lists the expected router even though the link is up.
+Root causes:
+  - Different EIGRP Autonomous System numbers configured on each side (in
+    classic mode, the AS number is part of the `router eigrp <AS>` command;
+    in named mode it's the process name plus an underlying AS) — Hellos from
+    an AS the receiving router isn't configured for are simply ignored, with
+    no explicit "AS mismatch" error visible without a debug.
+  - The interface EIGRP is meant to run over isn't actually included in the
+    `network` statement (classic mode) or address-family/interface
+    activation (named mode) on one side — a very common typo/oversight,
+    especially with wildcard-mask network statements that don't cover the
+    intended interface.
+  - The two routers aren't on the same IP subnet (e.g., different masks
+    configured on each end of a point-to-point link) — EIGRP hellos require
+    the neighbor to be on a matching subnet.
+Verify/fix: confirm both sides use the identical AS/process configuration,
+confirm the interface is actually included in EIGRP's network/activation
+configuration on both ends, and confirm the subnet/mask matches on the link.
+
+Common failure symptom: neighbor flaps or never forms — K-value mismatch
+-------------------------------------------------------------------------------
+Symptom: routers exchange Hellos (link and Hello timers look fine) but the
+neighbor relationship never completes, or logs show a specific K-value
+mismatch message rather than a generic timeout.
+Root cause: EIGRP's composite metric is computed from a weighted combination
+of bandwidth, delay, load, reliability, and MTU, controlled by five tunable
+K-value constants; unlike most interface parameters, K-values are Hello-
+packet fields that are explicitly compared, and if the two neighbors are not
+using the identical set (default K1=K3=1, others 0, on most platforms), the
+router immediately refuses to form the adjacency and logs the mismatch
+explicitly, rather than silently degrading — most commonly caused by one
+router in a merger/acquisition or template-drift scenario having customized
+K-values (e.g., to factor in load or reliability) while its neighbor was
+left at default.
+Verify/fix: check `show ip eigrp interfaces detail` or the equivalent
+K-value display, and standardize the K-values across every router in the
+same EIGRP AS — this is normally a "leave at default everywhere" decision
+unless there's a specific, deliberate reason to change them.
+
+Common failure symptom: neighbor drops due to authentication failure
+-------------------------------------------------------------------------
+Symptom: neighbor was up, then silently disappears (goes down without any
+explicit rejection visible from the far end); repeated silent drop/retry
+cycling.
+Root cause: EIGRP authentication (classic MD5, or newer named-mode
+HMAC-SHA-256) validates every Hello and update packet; if the key, key
+mode, or key-chain configuration doesn't match between neighbors (wrong
+password, mismatched key ID, expired key lifetime in a key-chain), the
+receiving router simply discards the packet as failing authentication —
+there is no explicit "auth failed" signal sent back to the other router, so
+from the perspective of a router whose Hellos are being silently dropped,
+the neighbor just appears to have gone away, which is a very quiet failure
+mode that's easy to mistake for a Layer 1/2 problem.
+Verify/fix: confirm authentication mode (MD5 vs. HMAC-SHA-256) and the
+actual key/password value match on both sides; if using a key-chain, check
+key lifetimes/validity windows (a key-chain with a lifetime that expired on
+one router but not the other is a subtle, time-based cause of a "neighbor
+just dropped for no reason" incident).
+
+Common failure symptom: neighbor forms but wrong/no routes are learned
+-----------------------------------------------------------------------------
+Symptom: `show ip eigrp neighbors` looks healthy, but expected routes are
+missing from the routing table, or unexpected routes/metrics appear.
+Root causes:
+  - Stub-router misconfiguration: an EIGRP stub router (typically at a
+    remote/spoke site) only advertises specific route categories (connected,
+    summary, redistributed, etc., depending on stub flags) and does not
+    accept being used as a transit path — a stub configured with the wrong
+    flags, or a hub router that doesn't realize a neighbor is a stub,
+    produces routes that look "missing" but are actually being correctly
+    withheld by design.
+  - Passive-interface or distribute-list/route-map filtering applied to the
+    EIGRP process suppressing specific routes from being advertised or
+    accepted — an easy thing to forget was configured months earlier when
+    troubleshooting a "why don't I see this route" complaint today.
+  - Split-horizon on a shared multipoint interface (e.g., Frame Relay,
+    DMVPN hub) preventing a route learned on an interface from being
+    re-advertised back out the same interface to a different spoke — a
+    classic hub-and-spoke EIGRP gotcha that requires disabling split-horizon
+    on the hub's multipoint interface for spoke-to-spoke connectivity via
+    the hub to work.
+Verify/fix: check stub configuration and flags on both the stub and the
+router treating it as a neighbor; audit distribute-lists/route-maps applied
+to the EIGRP process; check split-horizon state on multipoint/NBMA
+interfaces in hub-and-spoke topologies.
+
+Common failure symptom: routing instability / frequent SIA (Stuck-in-Active)
+---------------------------------------------------------------------------------
+Symptom: EIGRP logs `%DUAL-3-SIA` (Stuck In Active) events, or routes flap
+repeatedly without an obvious link failure.
+Root cause: when a route's successor fails and no feasible successor
+(backup path meeting DUAL's loop-free criterion) exists, EIGRP must go
+"Active" for that route and query all neighbors, waiting for replies before
+it can converge; if any queried neighbor is slow to reply (often because
+that neighbor itself is waiting on a further downstream neighbor, or has a
+control-plane resource problem such as high CPU), the route can sit Active
+past its timeout and get forcibly cleared, briefly dropping the neighbor(s)
+that failed to reply in time. This is usually a symptom of a large,
+flat EIGRP domain with too few opportunities for feasible successors, or
+undersized query boundaries (no summarization/stub configuration limiting
+how far a query has to propagate), rather than a single misconfigured
+router.
+Verify/fix: identify which specific neighbor(s) failed to reply to the
+active query in time (often visible in `show ip eigrp topology active` or
+equivalent during the event); address root cause by increasing route
+summarization at logical network boundaries and/or configuring stub routers
+at the network edge so queries don't have to propagate across the entire
+domain.

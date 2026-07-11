@@ -1,0 +1,124 @@
+QoS (Quality of Service) Troubleshooting — Policy Not Applying / Unexpected Drops
+====================================================================================
+
+What QoS is and how it's configured
+--------------------------------------
+QoS lets a network device treat traffic differently based on class —
+classifying packets (deciding which "class" a packet belongs to), then
+marking, policing, shaping, queuing, or scheduling them differently per
+class so latency-sensitive or business-critical traffic gets preferential
+treatment during congestion, and lower-priority traffic is rate-limited or
+dropped first. On Cisco-family platforms this is almost always configured
+through MQC — the Modular QoS CLI — three building blocks used together:
+a class-map (defines how to match traffic — by ACL, DSCP/CoS/precedence, or
+other criteria), a policy-map (defines what to do with each matched class —
+mark, police, queue, priority, drop), and a service-policy (applies a given
+policy-map to an interface, sub-interface, or VLAN, in a specific direction —
+input or output). Because QoS behavior depends on the correct combination of
+all three plus the direction and interface it's applied to, most real-world
+"QoS isn't working" complaints trace back to a mismatch somewhere in that
+chain rather than a scheduling-algorithm problem.
+
+Common failure symptom: policy has no visible effect at all
+-----------------------------------------------------------------
+Symptom: `show policy-map interface` shows zero (or implausibly low) match
+counters for a class that should clearly be matching real traffic.
+Root causes:
+  - The service-policy was applied in the wrong direction (input vs output)
+    or to the wrong sub-object (e.g., applied to the physical interface when
+    traffic actually egresses a sub-interface, VLAN, or port-channel member
+    that needs its own policy applied).
+  - The class-map's match criteria doesn't actually match the traffic in
+    practice — e.g., matching on a DSCP/CoS value that upstream trust
+    boundaries have already reset to 0 (untrusted marking), or an ACL used
+    for classification that has a subtly wrong source/destination/port that
+    never matches real flows.
+  - Trust boundary is misconfigured: a port configured "untrusted" strips or
+    overwrites incoming CoS/DSCP markings before the classification even
+    happens, so a class-map matching on DSCP will never see the value the
+    end host set on the wire.
+Verify/fix: confirm the service-policy is applied to the correct
+interface/sub-interface and direction with `show policy-map interface`,
+then check the class match counters increment as expected; verify the trust
+setting on ingress ports if classification depends on a marking made by an
+upstream device rather than by an ACL.
+
+Common failure symptom: queuing configuration accepted but has no effect
+------------------------------------------------------------------------------
+Symptom: a queuing action (e.g., bandwidth percent, priority queue) is
+configured under a class but congestion behavior doesn't change, or the
+device logs an "invalid queuing class-map" style error when the policy is
+applied as an output service-policy.
+Root causes:
+  - Queuing actions are only supported on classes whose classification is
+    limited to certain fields on many platforms — mixing a general/complex
+    ACL-based class-map with a queuing action can be rejected or silently
+    unsupported, where the same class works fine for marking/policing.
+  - A hardware or platform limitation: certain marking actions (e.g., setting
+    DSCP/CoS via a table-map) combined with a priority queue are unsupported
+    on specific ASICs/platforms even though the CLI accepts the
+    configuration without an error — the mismatch only shows up as
+    "queuing had no effect" behavior in the data plane.
+  - No default class was explicitly configured: MQC always has an implicit
+    class-default, but if it's left unconfigured, traffic falling into it
+    gets no QoS treatment at all (no guaranteed bandwidth, no queuing
+    policy) — often the cause of "everything else got starved during
+    congestion" complaints, since class-default traffic in that state is
+    handled with no protections.
+Verify/fix: check the platform's QoS configuration guide for supported
+match-criteria/action combinations for queuing (as opposed to marking or
+policing, which are usually more permissive); explicitly configure
+class-default's queuing behavior (a minimum bandwidth percentage, or fair-
+queuing) rather than leaving it to defaults.
+
+Common failure symptom: unexpected drops / high latency during congestion
+--------------------------------------------------------------------------------
+Symptom: interface counters show output drops or tail-drops on a queue,
+despite QoS being configured, or drops occur even when overall link
+utilization looks well below capacity.
+Root causes:
+  - Buffer/queue exhaustion: queues fill during any period of true
+    congestion, and once an output queue is full, tail-drop takes over and
+    packets are dropped indiscriminately until the queue drains — this is
+    the queue actually doing its job under sustained oversubscription, not
+    a misconfiguration, but is frequently escalated as "QoS is dropping my
+    traffic."
+  - Microburst congestion: average utilization looks fine over a polling
+    interval (e.g., 5-minute SNMP averages) but sub-second bursts saturate
+    the queue and cause drops that never show up in the coarse-grained
+    utilization graph — a classic case where the visible counters
+    contradict the reported symptom.
+  - Policing (rather than shaping) configured on a class: policing simply
+    drops (or re-marks) traffic that exceeds a configured rate instantly,
+    with no buffering — if a policer's rate is set below the actual offered
+    load, drops are the expected and correct behavior, not a bug.
+  - High CPU/memory utilization on the device itself interfering with
+    packet forwarding and queue servicing, producing drops that look
+    QoS-related but are actually a platform resource-exhaustion symptom.
+Verify/fix: check queue-depth/drop counters per class (`show policy-map
+interface`, `show interface queue` style commands) and correlate with
+finer-grained (sub-second, if available) utilization data rather than
+5-minute averages; distinguish policing-drops (expected, rate-enforcement)
+from queuing tail-drops (congestion); check device CPU/memory health as a
+contributing factor before assuming the QoS policy itself is wrong.
+
+Common failure symptom: markings don't survive across a network segment
+-------------------------------------------------------------------------------
+Symptom: DSCP/CoS markings set at the edge are present at ingress to a
+downstream device but arrive stripped or reset by the time they reach the
+final destination or another administrative domain.
+Root causes:
+  - A device or link along the path has an untrusted port or explicit
+    "set dscp default"/re-marking policy that resets classification —
+    common at trust boundaries between administrative domains (e.g.,
+    campus-to-WAN handoff, or a provider edge that re-marks everything to
+    its own scheme) and at Layer 2 devices that don't preserve CoS across
+    an 802.1Q tag that gets stripped/re-added.
+  - Tunnel encapsulation (e.g., IPsec, GRE, MPLS) with a QoS-unaware
+    tunnel/pipe mode that doesn't copy the inner marking to the outer
+    header, so downstream devices that classify only on the outer header
+    see no meaningful DSCP value at all.
+Verify/fix: trace markings hop-by-hop with packet captures or per-hop
+`show policy-map interface` counters to find exactly where a marking
+changes; confirm tunnel QoS mode (pipe vs. uniform) matches the intended
+end-to-end marking behavior.

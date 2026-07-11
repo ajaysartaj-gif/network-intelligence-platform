@@ -662,7 +662,7 @@ class TroubleshootingEngine:
             except Exception:
                 pass
         q = (query or "").lower()
-        for p in ("ospf", "bgp", "eigrp", "stp", "vlan", "acl", "nat"):
+        for p in ("ospf", "bgp", "eigrp", "stp", "lacp", "vlan", "acl", "nat"):
             if p in q:
                 return p
         return "general"
@@ -756,7 +756,7 @@ class TroubleshootingEngine:
 
     # ── conclusion ──────────────────────────────────────────────────────────────
     def _compiled_remediation_intent(self, session: Session, root_cause_statement: str,
-                                     allowed_intents: List[str]) -> Optional[dict]:
+                                     allowed_intents: List[str], protocol: str) -> Optional[dict]:
         """Checks the NKC's compiled RemediationTemplate mapping
         (core.knowledge.compiler.reasoning_artifact_compiler) for a
         deterministic cause->intent mapping BEFORE asking the LLM to guess
@@ -766,12 +766,22 @@ class TroubleshootingEngine:
         RemediationTemplate.applicable_signature carries, so a hypothesis
         that originated from compiled knowledge gets a compiled remediation
         too, not a fresh LLM guess. Returns None (falls through to the LLM)
-        for any cause the compiled library doesn't cover."""
+        for any cause the compiled library doesn't cover.
+
+        `protocol` is passed in by the caller (already correctly detected
+        from session.goal.query) rather than re-derived from the hypothesis
+        statement text here — re-deriving it from the statement only ever
+        worked for OSPF by coincidence (every OSPF signature's likely_cause
+        happens to mention "OSPF" literally); BGP's signatures don't all
+        mention "BGP" (e.g. "Repeated TCP connection failures..."), so
+        re-detecting from that text would silently fall back to "general"
+        and never find a match — the same class of bug as the earlier
+        query-wording seeding issue, fixed the same way: use the value
+        that's already known to be correct instead of re-guessing it."""
         try:
             from core.knowledge.compiler.reasoning_artifact_compiler import ReasoningArtifactCompiler
         except Exception:
             return None
-        protocol = self._detect_protocol(root_cause_statement)
         try:
             for template in ReasoningArtifactCompiler().compile_remediation(protocol):
                 if template.applicable_signature != root_cause_statement:
@@ -779,13 +789,21 @@ class TroubleshootingEngine:
                 if allowed_intents and template.intent_name not in allowed_intents:
                     continue
                 iface = ""
+                neighbor_ip = ""
                 for o in session.observations:
-                    if o.subject.startswith("interface.") and o.attribute == "mtu":
+                    if o.subject.startswith("interface.") and o.attribute == "mtu" and not iface:
                         iface = o.subject.split(".", 1)[1]
-                        break
+                    # BGP (and any future neighbor-scoped protocol) remediation
+                    # intents act on a specific peer, not an interface — e.g.
+                    # "no neighbor <ip> shutdown" needs the actual neighbor
+                    # identity, which OSPF's interface-scoped intents never
+                    # needed to carry.
+                    if o.subject.startswith("neighbor.") and o.attribute == "state" and not neighbor_ip:
+                        neighbor_ip = o.subject.split(".", 1)[1]
                 self._note_knowledge_source(
                     session, f"compiled remediation template: {protocol}/{template.intent_name}")
-                return {"name": template.intent_name, "params": {"protocol": protocol, "interface": iface},
+                return {"name": template.intent_name,
+                       "params": {"protocol": protocol, "interface": iface, "neighbor_ip": neighbor_ip},
                        "rationale": f"Compiled remediation template (risk={template.risk_level}): "
                                    f"{'; '.join(template.prerequisites)}"}
         except Exception as exc:
@@ -847,7 +865,7 @@ class TroubleshootingEngine:
             except Exception:
                 allowed = []
             protocol = self._detect_protocol(session.goal.query)
-            intent_raw = self._compiled_remediation_intent(session, top.statement, allowed) or \
+            intent_raw = self._compiled_remediation_intent(session, top.statement, allowed, protocol) or \
                         self.reasoner.propose_intent(
                             top.statement, session.goal.objective, self._evidence_summary(session), allowed)
             intent = RemediationIntent(

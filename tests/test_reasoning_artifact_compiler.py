@@ -39,8 +39,23 @@ def test_stp_signature_present():
     assert any(s.stuck_state == "Blocking" for s in sigs)
 
 
+def test_bgp_signatures_include_active_and_idle():
+    sigs = failure_signatures.compile_failure_signatures("bgp")
+    by_state = {s.stuck_state: s for s in sigs}
+    assert set(by_state) == {"Idle", "Connect", "Active", "OpenSent", "OpenConfirm"}
+    # Active (repeated TCP failures) is the most commonly reported real cause
+    # and gets the highest confidence; Idle is genuinely ambiguous (admin
+    # shutdown vs. no route) and gets the lowest — confidence is honestly
+    # hedged by real-world frequency, not uniform across states.
+    assert by_state["Active"].confidence > by_state["Idle"].confidence
+    assert "tcp" in by_state["Active"].likely_cause.lower()
+
+
 def test_unmodeled_protocol_returns_empty_list_not_a_guess():
-    assert failure_signatures.compile_failure_signatures("bgp") == []
+    # "bgp" was the example unmodeled protocol before BGP support was added
+    # (protocol_models.py/failure_signatures.py) — "eigrp" is still genuinely
+    # unmodeled and exercises the exact same "never fabricate" behavior.
+    assert failure_signatures.compile_failure_signatures("eigrp") == []
     assert failure_signatures.compile_failure_signatures("vxlan") == []
 
 
@@ -112,16 +127,27 @@ def test_compile_troubleshooting_excludes_risk_compile_reasoning_includes_it():
 
 
 def test_unmodeled_protocol_every_method_degrades_gracefully():
+    # "eigrp" replaces the old "bgp" example now that BGP is modeled — see
+    # test_bgp_signatures_include_active_and_idle for BGP's own coverage.
     compiler = ReasoningArtifactCompiler(graph=KnowledgeGraph())
-    assert compiler.compile_root_causes("bgp") == []
-    assert compiler.compile_verification("bgp") == []
-    assert compiler.compile_remediation("bgp") == []
-    assert compiler.compile_decision_graph("bgp") is None
-    risk = compiler.compile_risk("bgp")
+    assert compiler.compile_root_causes("eigrp") == []
+    assert compiler.compile_verification("eigrp") == []
+    assert compiler.compile_remediation("eigrp") == []
+    assert compiler.compile_decision_graph("eigrp") is None
+    risk = compiler.compile_risk("eigrp")
     assert risk.severity == "unknown"
-    artifact = compiler.compile_reasoning("bgp")
+    artifact = compiler.compile_reasoning("eigrp")
     assert artifact.failure_signatures == []
     assert artifact.decision_graph is None
+
+
+def test_bgp_full_reasoning_artifact_composes_correctly():
+    compiler = ReasoningArtifactCompiler(graph=KnowledgeGraph())
+    full = compiler.compile_reasoning("bgp", affected_object_count=2)
+    assert full.risk is not None
+    assert full.failure_signatures and full.verification and full.remediation
+    assert full.decision_graph is not None
+    assert any(t.intent_name == "add_bgp_ebgp_multihop" for t in full.remediation)
 
 
 def test_optimize_artifacts_dedups_identical_content():
