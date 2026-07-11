@@ -14,6 +14,7 @@ with a distinct badge + accent colour so the end user can see the difference.
 """
 
 import logging
+import re
 import streamlit as st
 from uuid import uuid4
 from typing import List, Any, Dict, Optional
@@ -394,6 +395,49 @@ def _apply_cfg(call_ai_fn, pending_state) -> List[str]:
     return summary or ["ℹ️ No configuration commands resolved to apply."]
 
 
+_NEIGHBOR_STATE_ROW = re.compile(
+    r"(?P<ip>\d{1,3}(?:\.\d{1,3}){3})\s+\d+\s+"
+    r"(?P<state>FULL|2-?WAY|EXSTART|EXCHANGE|LOADING|INIT|ATTEMPT|DOWN)(?:/\S+)?"
+    r"\s+\S+\s+\S+\s+(?P<iface>\S+)", re.I)
+
+
+def _not_full_neighbors(protocol: str, output: str) -> List[Dict[str, str]]:
+    """Deterministic scan of FRESH, just-re-collected verification output for
+    any OSPF neighbor not in FULL state — reuses the same neighbor-row
+    vocabulary IosLikeAdapter's own parser uses (core/vendor/adapters/
+    cisco_ios_like.py), so no new fragile heuristic is introduced. Returns
+    structured {"ip", "state", "interface"} dicts (interface is the LOCAL
+    interface facing that neighbor, the last column of a real "show ip ospf
+    neighbor" row) so a caller can both warn a human AND scope a follow-up
+    investigation into exactly that remaining adjacency."""
+    if protocol != "ospf":
+        return []
+    out = []
+    for m in _NEIGHBOR_STATE_ROW.finditer(output or ""):
+        state = m.group("state").upper().replace("-", "")
+        if state != "FULL":
+            out.append({"ip": m.group("ip"), "state": state, "interface": m.group("iface")})
+    return out
+
+
+def _verification_state_warning(protocol: str, output: str) -> str:
+    """Catches exactly the case where a fix resolves ONE neighbor but a
+    second, separate adjacency on the same device is still stuck: the report
+    can legitimately say "resolved" for the hypothesis that was tested, while
+    the RAW verification text right below it still shows a neighbor stuck in
+    a non-FULL state — something a human skimming past two similar-looking
+    table rows can easily miss. This never blocks or auto-decides anything;
+    it only makes an inconsistency in the evidence impossible to miss at the
+    exact point the human is asked to confirm."""
+    not_full = _not_full_neighbors(protocol, output)
+    if not not_full:
+        return ""
+    total = len(_NEIGHBOR_STATE_ROW.findall(output or ""))
+    details = "; ".join(f"{n['ip']} still {n['state']}" for n in not_full)
+    return (f"⚠️ Verification shows {len(not_full)} of {total} neighbor(s) NOT yet FULL "
+           f"({details}) — this fix may have only resolved PART of the issue.")
+
+
 def _infer_protocol(text: str) -> str:
     """Minimal keyword fallback — same technique
     core.troubleshooting.engine.TroubleshootingEngine._detect_protocol uses when
@@ -450,13 +494,16 @@ def _apply_ts_fix(call_ai_fn, pending_state) -> Dict[str, Any]:
                "verification_output": {}, "applied_any": False}
 
     gov = get_governance_engine()
+    protocol = _infer_protocol(root_cause)
     summary: List[str] = []
     verification_output: Dict[str, str] = {}
+    verification_warnings: Dict[str, str] = {}
+    verification_targets: Dict[str, List[Dict[str, str]]] = {}
     applied_any = False
     for dev in targets:
         label = getattr(dev, "hostname", None) or dev.ip
         contract = gov.govern(device=dev.ip, commands=cfg, intent=root_cause,
-                              protocol=_infer_protocol(root_cause),
+                              protocol=protocol,
                               rollback_commands=rollback, strict=False)
         if contract.status in (GovernanceStatus.COMPLIANCE_FAILURE, GovernanceStatus.REJECTED):
             reasons = "; ".join(contract.blocking_conditions) or "policy denied this change."
@@ -471,7 +518,12 @@ def _apply_ts_fix(call_ai_fn, pending_state) -> Dict[str, Any]:
             if verification_cmds:
                 try:
                     dr = ie._ssh_collect(dev, verification_cmds)
-                    verification_output[dev.ip] = "\n".join(dr.outputs.values())
+                    out = "\n".join(dr.outputs.values())
+                    verification_output[dev.ip] = out
+                    not_full = _not_full_neighbors(protocol, out)
+                    if not_full:
+                        verification_targets[dev.ip] = not_full
+                        verification_warnings[dev.ip] = _verification_state_warning(protocol, out)
                 except Exception as exc:
                     verification_output[dev.ip] = f"(verification collection failed: {exc})"
         except Exception as exc:
@@ -479,7 +531,9 @@ def _apply_ts_fix(call_ai_fn, pending_state) -> Dict[str, Any]:
 
     if not summary:
         summary = ["ℹ️ No config commands resolved to apply."]
-    return {"summary_lines": summary, "verification_output": verification_output, "applied_any": applied_any}
+    return {"summary_lines": summary, "verification_output": verification_output,
+           "verification_warnings": verification_warnings,
+           "verification_targets": verification_targets, "applied_any": applied_any}
 
 
 def _record_ts_outcome(pending_state, success: bool) -> str:
@@ -516,6 +570,64 @@ def _record_ts_outcome(pending_state, success: bool) -> str:
            if success else
            "📝 Recorded as unresolved — flagged for review; a recurring pattern here "
            "will be surfaced automatically.")
+
+
+def _continue_investigation_if_needed(call_ai_fn, pending_state) -> Dict[str, Any]:
+    """After a human answers Confirm/Deny for the fix that was just applied,
+    automatically continue investigating any OTHER neighbor _apply_ts_fix's
+    fresh verification found still not FULL (see _not_full_neighbors) — it
+    may have an entirely different root cause than the one just fixed, and a
+    human shouldn't have to notice that and manually re-type a new question.
+    Read-only investigation runs immediately here, mirroring how diagnostic
+    steps WITHIN one investigation already chain automatically
+    (TroubleshootingEngine.run()'s plan->collect->analyze loop); deploying
+    whatever fix this turns up (if any) still always requires its own
+    explicit human approval via the normal "ts_fix" Deploy/Discard flow,
+    exactly like every other fix in this UI — only the "notice and
+    investigate" step is automatic, never "apply".
+
+    Returns {"messages": [chat message dicts to append],
+    "next_pending_state": {} or a fresh "ts_fix" pending_state}."""
+    verification_targets = pending_state.get("verification_targets") or {}
+    target = next((t for targets in verification_targets.values() for t in targets), None)
+    if target is None:
+        return {"messages": [], "next_pending_state": {}}
+
+    devices = pending_state.get("devices", [])
+    query = (f"why is the OSPF neighbor {target['ip']} on interface "
+            f"{target['interface']} stuck in {target['state']}")
+    try:
+        from core.troubleshooting import TroubleshootingEngine, TSConfig
+        gw = _make_troubleshooting_gateway(call_ai_fn, devices)
+        tse = TroubleshootingEngine(ai_call=call_ai_fn, devices=devices, gateway=gw,
+                                    config=TSConfig(max_steps=6))
+        report = tse.run(query)
+    except Exception as exc:
+        return {"messages": [{
+            "role": "assistant",
+            "content": f"⚠️ Could not continue investigating {target['ip']} ({target['interface']}): {exc}",
+            "mode": "troubleshoot",
+        }], "next_pending_state": {}}
+
+    content = ("🔁 **Continuing — investigating the remaining issue "
+              f"({target['ip']} on {target['interface']}, still {target['state']}):**\n\n"
+              + report.to_markdown())
+    messages = [{"role": "assistant", "content": content, "mode": "troubleshoot"}]
+
+    s = report.session
+    next_state: Dict[str, Any] = {}
+    if s.fix and s.fix.config_commands:
+        target_ip = s.goal.devices[0] if (s.goal and s.goal.devices) else ""
+        next_state = {
+            "kind": "ts_fix",
+            "root_cause": s.fix.root_cause,
+            "fix_commands": list(s.fix.config_commands),
+            "rollback_commands": list(s.fix.rollback_commands),
+            "verification_commands": list(s.verification.commands) if s.verification else [],
+            "target_ip": target_ip,
+            "devices": devices,
+        }
+    return {"messages": messages, "next_pending_state": next_state}
 
 
 def _render_assistant_message(content: str, mode_key: Optional[str]) -> None:
@@ -1107,14 +1219,24 @@ def render_copilot_page(call_ai_fn):
                         if result["verification_output"]:
                             vlines = [f"**{ip}**\n```\n{out}\n```"
                                      for ip, out in result["verification_output"].items()]
+                            content = "🔍 **Post-fix verification (re-collected live):**\n\n" + "\n".join(vlines)
+                            # A deterministic check on the SAME fresh text above —
+                            # catches the case where a fix resolves one neighbor
+                            # but a second, separate adjacency on the same device
+                            # is still stuck, which is easy to miss when skimming
+                            # two similar-looking table rows.
+                            warnings = list(result.get("verification_warnings", {}).values())
+                            if warnings:
+                                content += "\n\n" + "\n".join(warnings)
                             active_conversation["messages"].append({
-                                "role": "assistant",
-                                "content": "🔍 **Post-fix verification (re-collected live):**\n\n"
-                                          + "\n".join(vlines),
-                                "mode": "troubleshoot",
+                                "role": "assistant", "content": content, "mode": "troubleshoot",
                             })
                         if result["applied_any"]:
-                            action_states[active_conversation["id"]] = {**pending_state, "kind": "ts_verify"}
+                            action_states[active_conversation["id"]] = {
+                                **pending_state, "kind": "ts_verify",
+                                "verification_warnings": result.get("verification_warnings", {}),
+                                "verification_targets": result.get("verification_targets", {}),
+                            }
                         else:
                             action_states[active_conversation["id"]] = {}
                         st.rerun()
@@ -1126,6 +1248,12 @@ def render_copilot_page(call_ai_fn):
                 st.markdown("### 🔍 Confirm the fix")
                 if pending_state.get("root_cause"):
                     st.markdown(f"**Root cause addressed:** {pending_state['root_cause']}")
+                verify_warnings = pending_state.get("verification_warnings") or {}
+                if verify_warnings:
+                    st.warning(
+                        "This fix only resolved PART of the issue — the fresh verification "
+                        "output above still shows at least one neighbor NOT yet FULL:\n\n"
+                        + "\n".join(verify_warnings.values()))
                 st.caption("Review the fresh verification output above. Your answer trains the "
                           "platform's operational memory — it is never guessed automatically.")
                 _tv_col1, _tv_col2 = st.columns(2)
@@ -1134,14 +1262,18 @@ def render_copilot_page(call_ai_fn):
                         msg = _record_ts_outcome(pending_state, success=True)
                         active_conversation["messages"].append(
                             {"role": "assistant", "content": msg, "mode": "troubleshoot"})
-                        action_states[active_conversation["id"]] = {}
+                        cont = _continue_investigation_if_needed(call_ai_fn, pending_state)
+                        active_conversation["messages"].extend(cont["messages"])
+                        action_states[active_conversation["id"]] = cont["next_pending_state"]
                         st.rerun()
                 with _tv_col2:
                     if st.button("❌ Still Broken", key=f"cp_ts_deny_{active_conversation['id']}", use_container_width=True):
                         msg = _record_ts_outcome(pending_state, success=False)
                         active_conversation["messages"].append(
                             {"role": "assistant", "content": msg, "mode": "troubleshoot"})
-                        action_states[active_conversation["id"]] = {}
+                        cont = _continue_investigation_if_needed(call_ai_fn, pending_state)
+                        active_conversation["messages"].extend(cont["messages"])
+                        action_states[active_conversation["id"]] = cont["next_pending_state"]
                         st.rerun()
             elif pending_state.get("kind") == "cfg_approval":
                 st.markdown("### 📦 Approve configuration deployment")
