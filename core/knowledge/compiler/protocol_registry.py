@@ -198,17 +198,33 @@ def parse_log_lines(spec: LogLineParserSpec, text: str, ip: str) -> List[Normali
 # ── remediation: one generic renderer replaces a hand-written recipe per intent ─
 
 @dataclass
-class RemediationSpec:
+class RemediationPolicy:
+    """The vendor-NEUTRAL half of a remediation: WHAT semantic operation
+    fixes WHICH stuck state, and how risky it is — used by
+    reasoning_artifact_compiler.py to decide policy (_REMEDIATION_INTENTS/
+    _RISK_LEVEL_BY_INTENT), the same regardless of which vendor's adapter
+    ultimately renders it. `intent_name` links to a per-vendor
+    RemediationRecipe with the same name."""
     intent_name: str
-    trigger_state: Optional[str]           # FailureSignature.stuck_state this remediates (reasoning_artifact_compiler)
+    trigger_state: Optional[str]           # FailureSignature.stuck_state this remediates
+    risk_level: str = "medium"
+
+
+@dataclass
+class RemediationRecipe:
+    """The vendor-SPECIFIC half: HOW to realize `intent_name` in one
+    vendor's actual config syntax. One AdapterSpec (below) holds a list
+    of these per vendor — the same intent_name gets a different recipe
+    per vendor (e.g. Cisco's "ip ospf mtu-ignore" vs Junos's "set
+    protocols ospf area 0 interface X no-check-mtu")."""
+    intent_name: str
     context_template: Optional[str]        # e.g. "interface {iface}" — OPTIONAL, rendered only if context_param is truthy
     command_template: str                  # e.g. "standby {fhrp_group} preempt"
     context_param: str = "iface"           # which rendered ctx key gates the optional context line
-    risk_level: str = "medium"
     defaults: Dict[str, str] = field(default_factory=dict)
 
 
-def render_remediation_fix(spec: RemediationSpec, protocol: str, params: Dict[str, str]) -> List[str]:
+def render_remediation_fix(spec: RemediationRecipe, protocol: str, params: Dict[str, str]) -> List[str]:
     """Replaces cisco_ios_like.py's old per-intent `recipes` dict literal.
     Every current remediation intent (OSPF/BGP/LACP/HSRP/VRRP, 9 total)
     reduces to this one substitution: an optional context line (rendered
@@ -315,31 +331,25 @@ def compile_vlan_native_mismatch_signature(vlan_objects: List[NormalizedObject])
 
 @dataclass
 class ProtocolSpec:
+    """VENDOR-NEUTRAL protocol knowledge — the same for every vendor's
+    adapter. State models, failure signatures, and remediation POLICY
+    (which semantic intent fixes which stuck state, and how risky it is)
+    don't change between Cisco and Juniper; only the CLI syntax used to
+    observe/realize them does (see AdapterSpec below, one per vendor)."""
     name: str
     keywords: List[str]
     state_model: Optional[ProtocolStateModel] = None
     signatures: List[FailureSignature] = field(default_factory=list)
-    table_parsers: List[TableRowParserSpec] = field(default_factory=list)
-    headered_parser: Optional[HeaderedRowParserSpec] = None
-    log_parser: Optional[LogLineParserSpec] = None
-    remediations: List[RemediationSpec] = field(default_factory=list)
+    remediation_policies: List[RemediationPolicy] = field(default_factory=list)
     verification: Optional[VerificationTemplate] = None
     regression_states: List[str] = field(default_factory=list)
-    # Op name string (e.g. "get_neighbors") -> command template, rendered
-    # via str.format(suffix=...) — replaces cisco_ios_like.py's old
-    # shared `table` dict's per-protocol entries.
-    commands: Dict[str, str] = field(default_factory=dict)
-    # The (usually shorter/simpler) command list IosLikeAdapter.
-    # build_verification() returns for a DEPLOYED fix — deliberately a
-    # separate field from `verification.commands` above, which is the
-    # richer knowledge-artifact template (they differ for OSPF: this one
-    # is just ["show ip ospf neighbor"], that one also includes the
-    # interface/MTU-detail commands).
-    verify_commands: List[str] = field(default_factory=list)
     # For reactive (non-FSM) protocols: a compile_fn that takes the
     # matching NormalizedObjects and returns FailureSignatures, reactively
     # bound the moment they're observed (engine.py._bind_reactive_evidence)
     # instead of seeded as a prior beforehand. None for FSM protocols.
+    # Vendor-neutral: by the time a NormalizedObject reaches here, the
+    # per-vendor adapter has already normalized it into the same shape
+    # regardless of whether it came from Cisco or Junos text.
     reactive_object_type: Optional[str] = None
     reactive_compile_fn: Optional[Callable[[List[NormalizedObject]], List[FailureSignature]]] = None
     reactive_evidence_weight: float = 0.9
@@ -350,6 +360,31 @@ class ProtocolSpec:
     reactive_rationale_label: str = ""   # usually same as note_label; VLAN's differs ("VLAN native-mismatch")
     reactive_rationale_reason: str = ""  # e.g. "reads the deny rule directly, not an inference."
     reactive_evidence_reason: str = ""
+
+
+@dataclass
+class AdapterSpec:
+    """VENDOR-SPECIFIC realization of a protocol: the actual CLI syntax
+    used to observe it (parsers) and to fix it (recipes). One AdapterSpec
+    per (vendor, protocol) pair — e.g. CISCO_ADAPTER_SPECS["ospf"] and
+    JUNOS_ADAPTER_SPECS["ospf"] both point at the SAME vendor-neutral
+    ProtocolSpec["ospf"] (same FSM, same signatures) but carry
+    completely different parsing regexes and command templates."""
+    table_parsers: List[TableRowParserSpec] = field(default_factory=list)
+    headered_parser: Optional[HeaderedRowParserSpec] = None
+    log_parser: Optional[LogLineParserSpec] = None
+    # Op name string (e.g. "get_neighbors") -> command template, rendered
+    # via str.format(suffix=...) — replaces the adapter's old shared
+    # `table` dict's per-protocol entries.
+    commands: Dict[str, str] = field(default_factory=dict)
+    recipes: List[RemediationRecipe] = field(default_factory=list)
+    # The (usually shorter/simpler) command list build_verification()
+    # returns for a DEPLOYED fix — deliberately a separate field from
+    # ProtocolSpec.verification.commands, which is the richer knowledge-
+    # artifact template (they differ for OSPF: this one is just
+    # ["show ip ospf neighbor"], that one also includes interface/MTU
+    # detail commands).
+    verify_commands: List[str] = field(default_factory=list)
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -411,21 +446,27 @@ _OSPF_NEIGHBOR_PARSER = TableRowParserSpec(
     success_state="FULL",
 )
 
-_OSPF_REMEDIATIONS = [
-    RemediationSpec(intent_name="ignore_protocol_mtu", trigger_state="ExStart",
-                    context_template="interface {iface}", command_template="ip {proto} mtu-ignore",
-                    risk_level="medium"),
-    RemediationSpec(intent_name="set_protocol_network_point_to_point", trigger_state="2-Way",
-                    context_template="interface {iface}",
-                    command_template="ip {proto} network point-to-point", risk_level="medium"),
-    RemediationSpec(intent_name="configure_ospf_interface", trigger_state="Init",
-                    context_template="interface {iface}",
-                    command_template="ip {proto} {process} area {area}",
-                    defaults={"process": "1", "area": "0"}, risk_level="medium"),
-    RemediationSpec(intent_name="enable_ospf_on_interface", trigger_state="Down",
-                    context_template="interface {iface}",
-                    command_template="ip ospf {process} area {area}",
-                    defaults={"process": "1", "area": "0"}, risk_level="low"),
+_OSPF_REMEDIATION_POLICIES = [
+    RemediationPolicy(intent_name="ignore_protocol_mtu", trigger_state="ExStart", risk_level="medium"),
+    RemediationPolicy(intent_name="set_protocol_network_point_to_point", trigger_state="2-Way", risk_level="medium"),
+    RemediationPolicy(intent_name="configure_ospf_interface", trigger_state="Init", risk_level="medium"),
+    RemediationPolicy(intent_name="enable_ospf_on_interface", trigger_state="Down", risk_level="low"),
+]
+
+_OSPF_CISCO_RECIPES = [
+    RemediationRecipe(intent_name="ignore_protocol_mtu",
+                      context_template="interface {iface}", command_template="ip {proto} mtu-ignore"),
+    RemediationRecipe(intent_name="set_protocol_network_point_to_point",
+                      context_template="interface {iface}",
+                      command_template="ip {proto} network point-to-point"),
+    RemediationRecipe(intent_name="configure_ospf_interface",
+                      context_template="interface {iface}",
+                      command_template="ip {proto} {process} area {area}",
+                      defaults={"process": "1", "area": "0"}),
+    RemediationRecipe(intent_name="enable_ospf_on_interface",
+                      context_template="interface {iface}",
+                      command_template="ip ospf {process} area {area}",
+                      defaults={"process": "1", "area": "0"}),
 ]
 
 _OSPF_VERIFICATION = VerificationTemplate(
@@ -565,17 +606,22 @@ _BGP_SUMMARY_PARSER = TableRowParserSpec(
     success_state="ESTABLISHED",
 )
 
-_BGP_REMEDIATIONS = [
+_BGP_REMEDIATION_POLICIES = [
+    RemediationPolicy(intent_name="remove_bgp_neighbor_shutdown", trigger_state="Idle", risk_level="low"),
+    RemediationPolicy(intent_name="add_bgp_ebgp_multihop", trigger_state="Active", risk_level="medium"),
+]
+
+_BGP_CISCO_RECIPES = [
     # BGP fixes operate under "router bgp <asn>" config mode, not an
     # interface context — local_as is optional (falls through if unknown,
     # same "context line is optional" pattern as OSPF's interface context).
-    RemediationSpec(intent_name="remove_bgp_neighbor_shutdown", trigger_state="Idle",
-                    context_template="router bgp {local_as}", context_param="local_as",
-                    command_template="no neighbor {neighbor_ip} shutdown", risk_level="low"),
-    RemediationSpec(intent_name="add_bgp_ebgp_multihop", trigger_state="Active",
-                    context_template="router bgp {local_as}", context_param="local_as",
-                    command_template="neighbor {neighbor_ip} ebgp-multihop {hops}",
-                    defaults={"hops": "2"}, risk_level="medium"),
+    RemediationRecipe(intent_name="remove_bgp_neighbor_shutdown",
+                      context_template="router bgp {local_as}", context_param="local_as",
+                      command_template="no neighbor {neighbor_ip} shutdown"),
+    RemediationRecipe(intent_name="add_bgp_ebgp_multihop",
+                      context_template="router bgp {local_as}", context_param="local_as",
+                      command_template="neighbor {neighbor_ip} ebgp-multihop {hops}",
+                      defaults={"hops": "2"}),
 ]
 
 _BGP_VERIFICATION = VerificationTemplate(
@@ -644,16 +690,20 @@ _LACP_ETHERCHANNEL_PARSER = TableRowParserSpec(
     success_state="BUNDLED",
 )
 
-_LACP_REMEDIATIONS = [
+_LACP_REMEDIATION_POLICIES = [
     # LACP's "neighbor" IS the member port itself (parse_output emits the
     # port name as the NEIGHBOR subject) — neighbor_ip here holds the
     # interface name, not a peer IP. Only "Individual" (mode mismatch)
     # gets an intent: "Suspended" has too many possible mismatched
     # parameters to safely auto-fix, "Down" is a physical-layer issue.
-    RemediationSpec(intent_name="set_lacp_mode_active", trigger_state="Individual",
-                    context_template="interface {neighbor_ip}", context_param="neighbor_ip",
-                    command_template="channel-group {channel_group} mode active",
-                    defaults={"channel_group": "1"}, risk_level="medium"),
+    RemediationPolicy(intent_name="set_lacp_mode_active", trigger_state="Individual", risk_level="medium"),
+]
+
+_LACP_CISCO_RECIPES = [
+    RemediationRecipe(intent_name="set_lacp_mode_active",
+                      context_template="interface {neighbor_ip}", context_param="neighbor_ip",
+                      command_template="channel-group {channel_group} mode active",
+                      defaults={"channel_group": "1"}),
 ]
 
 _LACP_VERIFICATION = VerificationTemplate(
@@ -727,12 +777,16 @@ _HSRP_STANDBY_PARSER = TableRowParserSpec(
     success_state="ACTIVE",
 )
 
-_HSRP_REMEDIATIONS = [
+_HSRP_REMEDIATION_POLICIES = [
     # HSRP defaults preempt OFF — "won't fail over" is fixed by
     # explicitly turning it on for this group.
-    RemediationSpec(intent_name="add_hsrp_preempt", trigger_state="Standby",
-                    context_template="interface {fhrp_iface}", context_param="fhrp_iface",
-                    command_template="standby {fhrp_group} preempt", risk_level="low"),
+    RemediationPolicy(intent_name="add_hsrp_preempt", trigger_state="Standby", risk_level="low"),
+]
+
+_HSRP_CISCO_RECIPES = [
+    RemediationRecipe(intent_name="add_hsrp_preempt",
+                      context_template="interface {fhrp_iface}", context_param="fhrp_iface",
+                      command_template="standby {fhrp_group} preempt"),
 ]
 
 _HSRP_VERIFICATION = VerificationTemplate(
@@ -792,12 +846,16 @@ _VRRP_BRIEF_PARSER = TableRowParserSpec(
     success_state="MASTER",
 )
 
-_VRRP_REMEDIATIONS = [
+_VRRP_REMEDIATION_POLICIES = [
     # VRRP defaults preempt ON, so re-asserting it is idempotent-safe
     # whether or not it was actually the cause.
-    RemediationSpec(intent_name="enable_vrrp_preempt", trigger_state="Backup",
-                    context_template="interface {fhrp_iface}", context_param="fhrp_iface",
-                    command_template="vrrp {fhrp_group} preempt", risk_level="low"),
+    RemediationPolicy(intent_name="enable_vrrp_preempt", trigger_state="Backup", risk_level="low"),
+]
+
+_VRRP_CISCO_RECIPES = [
+    RemediationRecipe(intent_name="enable_vrrp_preempt",
+                      context_template="interface {fhrp_iface}", context_param="fhrp_iface",
+                      command_template="vrrp {fhrp_group} preempt"),
 ]
 
 _VRRP_VERIFICATION = VerificationTemplate(
@@ -857,63 +915,46 @@ _VLAN_MISMATCH_PARSER = LogLineParserSpec(
 # ── the registry ─────────────────────────────────────────────────────────
 # ═════════════════════════════════════════════════════════════════════════
 
+# Vendor-NEUTRAL protocol knowledge — same state model/signatures/policy
+# regardless of which vendor's adapter ultimately observes/fixes them.
 PROTOCOL_SPECS: Dict[str, ProtocolSpec] = {
     "ospf": ProtocolSpec(
         name="ospf", keywords=["ospf"], state_model=_OSPF_STATE_MODEL,
-        signatures=_OSPF_SIGNATURES, table_parsers=[_OSPF_NEIGHBOR_PARSER],
-        remediations=_OSPF_REMEDIATIONS, verification=_OSPF_VERIFICATION,
-        regression_states=["Down"],
-        commands={"get_neighbors": "show ip ospf neighbor",
-                 "get_interface_details": "show ip ospf interface{suffix}",
-                 "get_routing_information": "show ip route ospf",
-                 "get_configuration": "show running-config | section router ospf"},
-        verify_commands=["show ip ospf neighbor"]),
+        signatures=_OSPF_SIGNATURES, remediation_policies=_OSPF_REMEDIATION_POLICIES,
+        verification=_OSPF_VERIFICATION, regression_states=["Down"]),
     "stp": ProtocolSpec(
         name="stp", keywords=["stp"], state_model=_STP_STATE_MODEL,
         signatures=_STP_SIGNATURES,
-        table_parsers=[_STP_SPANNING_TREE_PARSER, _STP_ERRDISABLE_PARSER],
-        remediations=[],   # no matching vendor-adapter intent exists yet, by design (see ErrDisabled's docstring)
-        verification=_STP_VERIFICATION, regression_states=["Blocking", "Disabled"],
-        commands={"get_interface_details": "show spanning-tree"},
-        verify_commands=["show spanning-tree", "show interfaces status"]),
+        remediation_policies=[],   # no matching vendor-adapter intent exists yet, by design (see ErrDisabled's docstring)
+        verification=_STP_VERIFICATION, regression_states=["Blocking", "Disabled"]),
     "bgp": ProtocolSpec(
         name="bgp", keywords=["bgp"], state_model=_BGP_STATE_MODEL,
-        signatures=_BGP_SIGNATURES, table_parsers=[_BGP_SUMMARY_PARSER],
-        remediations=_BGP_REMEDIATIONS, verification=_BGP_VERIFICATION,
-        regression_states=["Idle"],
-        commands={"get_neighbors": "show ip bgp summary"},
-        verify_commands=["show ip bgp summary"]),
+        signatures=_BGP_SIGNATURES, remediation_policies=_BGP_REMEDIATION_POLICIES,
+        verification=_BGP_VERIFICATION, regression_states=["Idle"]),
     "lacp": ProtocolSpec(
         name="lacp", keywords=["lacp"], state_model=_LACP_STATE_MODEL,
-        signatures=_LACP_SIGNATURES, table_parsers=[_LACP_ETHERCHANNEL_PARSER],
-        remediations=_LACP_REMEDIATIONS, verification=_LACP_VERIFICATION,
-        regression_states=["Down"],
-        commands={"get_interface_details": "show etherchannel summary"},
-        verify_commands=["show etherchannel summary"]),
+        signatures=_LACP_SIGNATURES, remediation_policies=_LACP_REMEDIATION_POLICIES,
+        verification=_LACP_VERIFICATION, regression_states=["Down"]),
+    # HSRP is Cisco-proprietary — it has no Juniper (or any other vendor)
+    # equivalent at all, unlike every other protocol here. There is
+    # deliberately no JUNOS_ADAPTER_SPECS["hsrp"] entry: Juniper only
+    # supports VRRP for first-hop redundancy.
     "hsrp": ProtocolSpec(
         name="hsrp", keywords=["hsrp"], state_model=_HSRP_STATE_MODEL,
-        signatures=_HSRP_SIGNATURES, table_parsers=[_HSRP_STANDBY_PARSER],
-        remediations=_HSRP_REMEDIATIONS, verification=_HSRP_VERIFICATION,
-        regression_states=["Init"],
-        commands={"get_interface_details": "show standby brief"},
-        verify_commands=["show standby brief"]),
+        signatures=_HSRP_SIGNATURES, remediation_policies=_HSRP_REMEDIATION_POLICIES,
+        verification=_HSRP_VERIFICATION, regression_states=["Init"]),
     "vrrp": ProtocolSpec(
         name="vrrp", keywords=["vrrp"], state_model=_VRRP_STATE_MODEL,
-        signatures=_VRRP_SIGNATURES, table_parsers=[_VRRP_BRIEF_PARSER],
-        remediations=_VRRP_REMEDIATIONS, verification=_VRRP_VERIFICATION,
-        regression_states=["Initialize"],
-        commands={"get_interface_details": "show vrrp brief"},
-        verify_commands=["show vrrp brief"]),
+        signatures=_VRRP_SIGNATURES, remediation_policies=_VRRP_REMEDIATION_POLICIES,
+        verification=_VRRP_VERIFICATION, regression_states=["Initialize"]),
     "acl": ProtocolSpec(
-        name="acl", keywords=["acl"], headered_parser=_ACL_PARSER,
+        name="acl", keywords=["acl"],
         reactive_object_type="acl", reactive_compile_fn=compile_acl_deny_signature,
         reactive_evidence_weight=0.9,
         reactive_note_label="ACL deny", reactive_rationale_label="ACL deny-hit",
         reactive_rationale_reason="reads the deny rule directly, not an inference.",
         reactive_evidence_reason="deny rule directly observed in ACL config — "
-                                 "not an inference from a state machine",
-        commands={"get_configuration": "show access-lists"},
-        verify_commands=["show access-lists"]),
+                                 "not an inference from a state machine"),
     # "vlan" is declared BEFORE "nat" deliberately: all_keywords() below
     # preserves dict insertion order for the plain-substring keyword scan
     # in engine.py._detect_protocol/intent_engine.py._detect_scenario, and
@@ -921,28 +962,279 @@ PROTOCOL_SPECS: Dict[str, ProtocolSpec] = {
     # VLAN mismatch" (this exact feature's own standard terminology) would
     # falsely match "nat" first if it came before "vlan" in this dict.
     "vlan": ProtocolSpec(
-        name="vlan", keywords=["vlan"], log_parser=_VLAN_MISMATCH_PARSER,
+        name="vlan", keywords=["vlan"],
         reactive_object_type="vlan_native_mismatch", reactive_compile_fn=compile_vlan_native_mismatch_signature,
         reactive_evidence_weight=0.95,
         reactive_note_label="VLAN", reactive_rationale_label="VLAN native-mismatch",
         reactive_rationale_reason="reads CDP's own mismatch detection directly, not our own inference.",
         reactive_evidence_reason="CDP's own native-VLAN-mismatch detection, "
-                                 "directly observed — not an inference",
-        commands={"collect_evidence": "show logging | include NATIVE_VLAN"},
-        verify_commands=["show logging | include NATIVE_VLAN", "show interfaces trunk"]),
+                                 "directly observed — not an inference"),
     "nat": ProtocolSpec(
         name="nat", keywords=["nat"],
-        # No parser spec here — "show ip nat statistics"'s section-list
-        # format stays a dedicated function in cisco_ios_like.py (see
-        # this module's docstring for why).
         reactive_object_type="nat", reactive_compile_fn=compile_nat_role_signature,
         reactive_evidence_weight=0.9,
         reactive_note_label="NAT role", reactive_rationale_label="NAT role",
         reactive_rationale_reason="reads the missing interface role directly, not an inference.",
         reactive_evidence_reason="missing interface role directly observed in "
-                                 "NAT statistics — not an inference",
+                                 "NAT statistics — not an inference"),
+}
+
+# Vendor-SPECIFIC realization of the protocols above, for the Cisco
+# IOS-like adapter. cisco_ios_like.py reads ONLY from this dict for
+# parsing/commands/remediation-recipes/verification-commands — never
+# from PROTOCOL_SPECS directly, keeping the vendor-neutral/vendor-
+# specific split real rather than cosmetic.
+CISCO_ADAPTER_SPECS: Dict[str, AdapterSpec] = {
+    "ospf": AdapterSpec(
+        table_parsers=[_OSPF_NEIGHBOR_PARSER], recipes=_OSPF_CISCO_RECIPES,
+        commands={"get_neighbors": "show ip ospf neighbor",
+                 "get_interface_details": "show ip ospf interface{suffix}",
+                 "get_routing_information": "show ip route ospf",
+                 "get_configuration": "show running-config | section router ospf"},
+        verify_commands=["show ip ospf neighbor"]),
+    "stp": AdapterSpec(
+        table_parsers=[_STP_SPANNING_TREE_PARSER, _STP_ERRDISABLE_PARSER], recipes=[],
+        commands={"get_interface_details": "show spanning-tree"},
+        verify_commands=["show spanning-tree", "show interfaces status"]),
+    "bgp": AdapterSpec(
+        table_parsers=[_BGP_SUMMARY_PARSER], recipes=_BGP_CISCO_RECIPES,
+        commands={"get_neighbors": "show ip bgp summary"},
+        verify_commands=["show ip bgp summary"]),
+    "lacp": AdapterSpec(
+        table_parsers=[_LACP_ETHERCHANNEL_PARSER], recipes=_LACP_CISCO_RECIPES,
+        commands={"get_interface_details": "show etherchannel summary"},
+        verify_commands=["show etherchannel summary"]),
+    "hsrp": AdapterSpec(
+        table_parsers=[_HSRP_STANDBY_PARSER], recipes=_HSRP_CISCO_RECIPES,
+        commands={"get_interface_details": "show standby brief"},
+        verify_commands=["show standby brief"]),
+    "vrrp": AdapterSpec(
+        table_parsers=[_VRRP_BRIEF_PARSER], recipes=_VRRP_CISCO_RECIPES,
+        commands={"get_interface_details": "show vrrp brief"},
+        verify_commands=["show vrrp brief"]),
+    "acl": AdapterSpec(
+        headered_parser=_ACL_PARSER,
+        commands={"get_configuration": "show access-lists"},
+        verify_commands=["show access-lists"]),
+    "vlan": AdapterSpec(
+        log_parser=_VLAN_MISMATCH_PARSER,
+        commands={"collect_evidence": "show logging | include NATIVE_VLAN"},
+        verify_commands=["show logging | include NATIVE_VLAN", "show interfaces trunk"]),
+    "nat": AdapterSpec(
+        # No parser spec here — "show ip nat statistics"'s section-list
+        # format stays a dedicated function in cisco_ios_like.py (see
+        # this module's docstring for why).
         commands={"get_configuration": "show ip nat statistics"},
         verify_commands=["show ip nat statistics"]),
+}
+
+
+# ═════════════════════════════════════════════════════════════════════════
+# ── JUNOS (second vendor — proves the ProtocolSpec/AdapterSpec split is
+#    real, not cosmetic: same state models/signatures/policies above,
+#    completely different parsing regexes and command syntax below) ───────
+# ═════════════════════════════════════════════════════════════════════════
+#
+# Every regex and command here is grounded in real, verified Junos
+# documentation and community-confirmed output (not guessed):
+#   - "show ospf neighbor": Address/Interface/State/ID/Pri/Dead columns
+#     (Juniper KB + community examples showing Full and ExStart rows).
+#   - "show bgp summary": Peer/AS/InPkt/OutPkt/OutQ/Flaps/Last Up-Dwn/State
+#     — Junos always prints a LITERAL state word (including "Establ" for
+#     established), unlike Cisco's digit-vs-name ambiguity, so no
+#     state_transform is needed here.
+#   - "show lacp interfaces": three sub-tables (LACP State / LACP Protocol
+#     summary / per-link); only the "LACP Protocol" table's Receive-
+#     State/Transmit-State/Mux-State row is parsed, anchored on the
+#     distinctive Receive-State vocabulary (Current/Expired/Defaulted) so
+#     it can't be confused with the Actor/Partner table's different
+#     column words. The fix applies to the ae* AGGREGATE interface (the
+#     "Aggregated interface: ae0" header line), not the physical member —
+#     a genuine, verified difference from Cisco's per-member channel-group.
+#   - "show vrrp": Interface/State/Group/VR state/VR Mode/Timer/Address.
+#   - "show spanning-tree interface": Interface/Port ID/Designated port
+#     ID/Designated bridge ID/Cost/State/Role (State BEFORE Role — the
+#     reverse order from Cisco's Role-then-Sts), confirmed against a
+#     complete real example with actual data rows.
+#
+# Deliberately NOT built for Junos in this pass (each a real, verified
+# reason, not a shortcut):
+#   - OSPF's "ignore_protocol_mtu" equivalent: no confirmed Junos
+#     statement disables OSPF's MTU check the way Cisco's "mtu-ignore"
+#     does; real operator guidance is to fix the actual MTU instead, and
+#     the correct target MTU isn't derivable from this signature alone.
+#   - VRRP's preempt remediation: the real command needs the full
+#     interface/unit/family/address hierarchy ("set interfaces <if> unit
+#     <n> family inet address <addr> vrrp-group <n> preempt"), and the
+#     address isn't available from a single-device signature — detection
+#     stays, auto-fix doesn't, rather than guess at the hierarchy.
+#   - HSRP: doesn't exist on Juniper at all (Cisco-proprietary) — no
+#     JUNOS_ADAPTER_SPECS["hsrp"] entry, matching PROTOCOL_SPECS itself
+#     never claiming Junos supports it.
+#   - ACL/NAT/VLAN (all three reactive protocols): Junos firewall filters
+#     require explicitly-configured named counters/logs to have ANY
+#     per-rule visibility at all (unlike Cisco ACLs, which show action=
+#     permit/deny inline for every rule automatically) — there is no
+#     confirmed, reliable "show" format that self-describes a deny hit
+#     the way Cisco's does. Junos NAT configuration varies materially by
+#     platform (SRX security zones vs MX interface-level) with no single
+#     canonical statistics command verified. Junos has no CDP equivalent
+#     that automatically detects and logs a native VLAN mismatch — this
+#     entire detection mechanism doesn't exist on this platform. Building
+#     any of these three would mean guessing at an unverified format,
+#     exactly what this registry's whole design exists to avoid.
+
+_OSPF_NEIGHBOR_PARSER_JUNOS = TableRowParserSpec(
+    protocol="ospf", command_key="ospf neighbor",
+    row_pattern=(r"(?P<id>\d+\.\d+\.\d+\.\d+)\s+(?P<iface>\S+)\s+"
+                r"(?P<state>Full|ExStart|Exchange|Loading|2Way|Init|Attempt|Down)\b"),
+    state_map={"Full": "FULL", "ExStart": "EXSTART", "Exchange": "EXCHANGE",
+              "Loading": "LOADING", "2Way": "2WAY", "Init": "INIT",
+              "Attempt": "ATTEMPT", "Down": "DOWN"},
+    extra_attrs={"iface": lambda m: m.group("iface")},
+    success_state="FULL",
+)
+
+_OSPF_JUNOS_RECIPES = [
+    RemediationRecipe(intent_name="set_protocol_network_point_to_point",
+                      context_template=None,
+                      command_template="set protocols {proto} area {area} interface {iface} interface-type p2p",
+                      defaults={"area": "0.0.0.0"}),
+    RemediationRecipe(intent_name="configure_ospf_interface",
+                      context_template=None,
+                      command_template="set protocols {proto} area {area} interface {iface}",
+                      defaults={"area": "0.0.0.0"}),
+    RemediationRecipe(intent_name="enable_ospf_on_interface",
+                      context_template=None,
+                      # Junos has no separate "enable" step — an interface
+                      # IS OSPF-enabled by being listed under an area, the
+                      # same real command as configure_ospf_interface above.
+                      command_template="set protocols ospf area {area} interface {iface}",
+                      defaults={"area": "0.0.0.0"}),
+]
+
+_BGP_SUMMARY_PARSER_JUNOS = TableRowParserSpec(
+    protocol="bgp", command_key="bgp summary",
+    # Junos always prints a LITERAL state word — "Establ" when
+    # established, or Idle/Connect/Active/OpenSent/OpenConfirm otherwise —
+    # never a bare digit the way Cisco's PfxRcd column can read. No
+    # state_transform/digit-disambiguation needed here, a genuine,
+    # verified difference from Cisco's own parsing wrinkle.
+    row_pattern=(r"(?P<id>\d{1,3}(?:\.\d{1,3}){3})\s+(?P<remote_as>\d+)\s+\d+\s+\d+\s+"
+                r"\d+\s+\d+\s+\S+\s+(?P<state>\S+)"),
+    state_map=None,   # falls through to raw.upper(); "Establ" -> "ESTABL" handled via success_state below
+    success_state="ESTABL",
+)
+
+_BGP_JUNOS_RECIPES = [
+    # Junos's general activate/deactivate mechanism (not BGP-specific) is
+    # the real equivalent of Cisco's per-neighbor "shutdown" — group is
+    # syntactically required by Junos's config hierarchy; "external" is a
+    # placeholder default if the caller doesn't know the real group name
+    # (same "best-effort default, human reviews before deploying" pattern
+    # OSPF's process/area defaults already use).
+    RemediationRecipe(intent_name="remove_bgp_neighbor_shutdown",
+                      context_template=None,
+                      command_template="activate protocols bgp group {group} neighbor {neighbor_ip}",
+                      defaults={"group": "external"}),
+    RemediationRecipe(intent_name="add_bgp_ebgp_multihop",
+                      context_template=None,
+                      command_template="set protocols bgp group {group} multihop ttl {hops}",
+                      defaults={"group": "external", "hops": "2"}),
+]
+
+_LACP_INTERFACES_PARSER_JUNOS = HeaderedRowParserSpec(
+    # object_type="neighbor" (the literal string ObjectType.NEIGHBOR.value
+    # resolves to) — NOT a custom reactive-only type string — so this
+    # flows through the SAME "neighbor.*"/"state" evidence-binding
+    # pipeline engine.py._gateway_object_facts()/_bind_compiled_signature_
+    # evidence already use for every other FSM protocol's NEIGHBOR
+    # objects. Using a custom type here would silently make LACP's
+    # observed state invisible to compiled-signature matching, the exact
+    # ObjectType.INTERFACE-vs-NEIGHBOR bug already found once this
+    # session for Cisco's own LACP parsing.
+    object_type="neighbor", command_key="lacp interfaces",
+    header_pattern=r"Aggregated interface:\s*(?P<ae>\S+)",
+    header_group="ae",
+    # Anchored on the Receive-State vocabulary (Current/Expired/Defaulted)
+    # so this can't be confused with the SAME command's other two tables
+    # (Actor/Partner rows use completely different column words).
+    row_pattern=(r"(?P<id>\S+)\s+(?:Current|Expired|Defaulted)\s+"
+                r"(?:Fast periodic|Slow periodic|No periodic)\s+"
+                r"(?P<mux>Detached|Waiting|Attached|Collecting distributing)\s*$"),
+    id_template="{id}",
+    attrs={
+        "protocol": lambda m, hv: "lacp",
+        "state": lambda m, hv: {"Collecting distributing": "BUNDLED", "Detached": "DOWN"}.get(m.group("mux"), "UNKNOWN"),
+        "aggregate": lambda m, hv: hv,
+    },
+)
+
+_LACP_JUNOS_RECIPES = [
+    # Applies to the ae* AGGREGATE interface, not the physical member —
+    # "aggregate" is threaded through from the parser's header capture via
+    # engine.py's neighbor_ip plumbing is Cisco-shaped (interface name
+    # directly); for Junos the caller must supply "aggregate" explicitly.
+    RemediationRecipe(intent_name="set_lacp_mode_active",
+                      context_template=None,
+                      command_template="set interfaces {aggregate} aggregated-ether-options lacp active",
+                      defaults={"aggregate": "ae0"}),
+]
+
+_VRRP_PARSER_JUNOS = TableRowParserSpec(
+    protocol="vrrp", command_key="show vrrp",
+    # Real "show vrrp" rows: Interface, (interface) State, Group, VR
+    # state, VR Mode, Timer Type, Timer value, then address fields
+    # ("lcl <ip>", optionally "vip <ip>", "mas <ip>" on a Backup row).
+    row_pattern=(r"^(?P<iface>\S+)\s+(?:up|down)\s+(?P<grp>\d+)\s+"
+                r"(?P<state>master|backup|init)\b"),
+    state_map={"master": "MASTER", "backup": "BACKUP", "init": "INITIALIZE"},
+    id_template="{iface}:{grp}",
+    success_state="MASTER",
+)
+# No remediation recipes for Junos VRRP — see module docstring above for
+# why (the real preempt command needs address context this signature
+# doesn't carry).
+
+_STP_INTERFACE_PARSER_JUNOS = TableRowParserSpec(
+    protocol="stp", command_key="spanning-tree interface",
+    # Real "show spanning-tree interface" columns: Interface/Port ID/
+    # Designated port ID/Designated bridge ID/Cost/State/Role — State
+    # BEFORE Role, the reverse of Cisco's Role-then-Sts order (confirmed
+    # against a complete real example with actual ge-0/0/0.0-style rows).
+    row_pattern=(r"^(?P<id>\S+)\s+\S+\s+\S+\s+\S+\s+\d+\s+"
+                r"(?P<state>FWD|BLK|LRN|LIS)\s+(?P<role>DESG|ROOT|ALT|DIS|BKUP)\b"),
+    state_map={"FWD": "FORWARDING", "BLK": "BLOCKING", "LRN": "LEARNING", "LIS": "LISTENING"},
+    extra_attrs={"role": lambda m: m.group("role")},
+    success_state="FORWARDING",
+)
+# No remediation recipes for Junos STP — matches Cisco's own STP, which
+# also has none (no matching vendor-adapter intent exists for either).
+
+JUNOS_ADAPTER_SPECS: Dict[str, AdapterSpec] = {
+    "ospf": AdapterSpec(
+        table_parsers=[_OSPF_NEIGHBOR_PARSER_JUNOS], recipes=_OSPF_JUNOS_RECIPES,
+        commands={"get_neighbors": "show ospf neighbor",
+                 "get_interface_details": "show ospf interface{suffix}",
+                 "get_routing_information": "show route protocol ospf",
+                 "get_configuration": "show configuration protocols ospf"},
+        verify_commands=["show ospf neighbor"]),
+    "bgp": AdapterSpec(
+        table_parsers=[_BGP_SUMMARY_PARSER_JUNOS], recipes=_BGP_JUNOS_RECIPES,
+        commands={"get_neighbors": "show bgp summary"},
+        verify_commands=["show bgp summary"]),
+    "lacp": AdapterSpec(
+        headered_parser=_LACP_INTERFACES_PARSER_JUNOS, recipes=_LACP_JUNOS_RECIPES,
+        commands={"get_interface_details": "show lacp interfaces"},
+        verify_commands=["show lacp interfaces"]),
+    "vrrp": AdapterSpec(
+        table_parsers=[_VRRP_PARSER_JUNOS], recipes=[],
+        commands={"get_interface_details": "show vrrp"},
+        verify_commands=["show vrrp"]),
+    "stp": AdapterSpec(
+        table_parsers=[_STP_INTERFACE_PARSER_JUNOS], recipes=[],
+        commands={"get_interface_details": "show spanning-tree interface"},
+        verify_commands=["show spanning-tree interface"]),
 }
 
 

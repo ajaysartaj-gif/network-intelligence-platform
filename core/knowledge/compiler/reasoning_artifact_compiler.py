@@ -32,20 +32,21 @@ from core.knowledge_graph import KnowledgeGraph
 # All four of these used to be hand-maintained module-level dicts here —
 # one more file to touch per protocol. Now derived from protocol_registry.
 # py's PROTOCOL_SPECS, the single place a new protocol's verification
-# template, remediation mapping, risk level, and regression states are
-# declared (see protocol_registry.py's own ProtocolSpec.verification/
-# remediations/regression_states fields).
+# template, remediation POLICY (vendor-neutral: which intent fixes which
+# state, and how risky it is — never the vendor syntax itself), and
+# regression states are declared (see protocol_registry.py's own
+# ProtocolSpec.verification/remediation_policies/regression_states fields).
 _VERIFICATION_TEMPLATES: Dict[str, VerificationTemplate] = {
     name: spec.verification for name, spec in PROTOCOL_SPECS.items() if spec.verification is not None
 }
 
 _REMEDIATION_INTENTS: Dict[str, Dict[str, str]] = {
-    name: {r.trigger_state: r.intent_name for r in spec.remediations if r.trigger_state}
-    for name, spec in PROTOCOL_SPECS.items() if spec.remediations
+    name: {r.trigger_state: r.intent_name for r in spec.remediation_policies if r.trigger_state}
+    for name, spec in PROTOCOL_SPECS.items() if spec.remediation_policies
 }
 
 _RISK_LEVEL_BY_INTENT = {
-    r.intent_name: r.risk_level for spec in PROTOCOL_SPECS.values() for r in spec.remediations
+    r.intent_name: r.risk_level for spec in PROTOCOL_SPECS.values() for r in spec.remediation_policies
 }
 
 _REGRESSION_STATES = {s for spec in PROTOCOL_SPECS.values() for s in spec.regression_states}

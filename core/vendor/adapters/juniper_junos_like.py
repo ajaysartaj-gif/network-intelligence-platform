@@ -1,12 +1,31 @@
-"""ILLUSTRATIVE reference adapter for a JUNOS-like CLI family.
+"""Junos-like adapter for a JUNOS CLI family.
 
-Demonstrates that the SAME normalized Operation/Intent maps to DIFFERENT vendor
-syntax — proving the engine never needs to know vendor commands.
+Real production depth for OSPF/BGP/LACP/VRRP/STP, built the same way as
+IosLikeAdapter: parsing regexes and remediation commands grounded in
+verified real Junos documentation and command output (see each
+JUNOS_ADAPTER_SPECS entry in protocol_registry.py for the specific
+sources/reasoning behind every regex and command).
+
+Proves core/knowledge/compiler/protocol_registry.py's ProtocolSpec/
+AdapterSpec split is real, not cosmetic: this adapter shares the EXACT
+same vendor-neutral protocol knowledge (state models, failure
+signatures, remediation policy) as cisco_ios_like.py — only the parsing
+regexes and command syntax below differ.
+
+Deliberately does NOT support HSRP (Cisco-proprietary, no Juniper
+equivalent) or ACL/NAT/VLAN-native-mismatch (real, verified architectural
+differences — see protocol_registry.py's JUNOS_ADAPTER_SPECS docstring
+for why each was intentionally left unbuilt rather than guessed at).
 """
 from __future__ import annotations
 
 import re
 from typing import Dict, List
+
+from core.knowledge.compiler.protocol_registry import (
+    JUNOS_ADAPTER_SPECS, parse_headered_rows, parse_log_lines, parse_table_rows,
+    render_remediation_fix,
+)
 
 from ..models import (ErrorClass, NormalizedError, NormalizedObject, ObjectType,
                       ValidationResult, VendorProfile, obj)
@@ -31,60 +50,97 @@ class JunosLikeAdapter(VendorAdapter):
                              attributes={"ip": getattr(probe.device, "ip", "")})
 
     def _caps(self) -> List[str]:
-        return ["routing.ospf", "routing.bgp", "mpls", "cli"]
+        return ["routing.ospf", "routing.bgp", "switching", "cli"]
 
     def capabilities(self, profile: VendorProfile) -> List[str]:
         return self._caps()
 
     def build_command(self, operation: Operation, profile: VendorProfile) -> List[str]:
         proto = str(operation.params.get("protocol", "")).lower()
-        table = {
-            (Op.GET_NEIGHBORS, "ospf"): "show ospf neighbor",
-            (Op.GET_NEIGHBORS, "bgp"): "show bgp summary",
+        iface = str(operation.params.get("interface", "")).strip()
+        scoped = iface if iface and iface.lower() != "all" else ""
+        suffix = f" {scoped}" if scoped else ""
+        generic = {
             (Op.GET_INTERFACE_DETAILS, ""): "show interfaces extensive",
             (Op.GET_ROUTING_INFORMATION, ""): "show route",
             (Op.GET_CONFIGURATION, ""): "show configuration",
         }
-        cmd = table.get((operation.name, proto)) or table.get((operation.name, "")) \
-            or f"show {operation.name.replace('_', ' ')}"
-        return [cmd]
+        spec = JUNOS_ADAPTER_SPECS.get(proto)
+        cmd = None
+        if spec and operation.name in spec.commands:
+            cmd = spec.commands[operation.name].format(suffix=suffix)
+        if not cmd:
+            cmd = generic.get((operation.name, ""))
+        return [cmd] if cmd else []
+
+    @staticmethod
+    def _dispatch_registry_parser(low: str, t: str, ip: str, out: List[NormalizedObject]) -> bool:
+        for spec in JUNOS_ADAPTER_SPECS.values():
+            hit = False
+            for parser in spec.table_parsers:
+                if parser.command_key in low:
+                    out.extend(parse_table_rows(parser, t, ip))
+                    hit = True
+            if spec.headered_parser and spec.headered_parser.command_key in low:
+                out.extend(parse_headered_rows(spec.headered_parser, t, ip))
+                hit = True
+            if spec.log_parser and spec.log_parser.command_key in low:
+                out.extend(parse_log_lines(spec.log_parser, t, ip))
+                hit = True
+            if hit:
+                return True
+        return False
 
     def parse_output(self, operation: Operation, raw: Dict[str, str],
                      profile: VendorProfile) -> List[NormalizedObject]:
         ip = profile.attributes.get("ip", "")
         out: List[NormalizedObject] = []
-        if operation.name == Op.GET_NEIGHBORS:
-            for text in raw.values():
-                for line in text.splitlines():
-                    m = re.search(r"(\d+\.\d+\.\d+\.\d+)\s+\S+\s+(\w+)", line)
-                    if m:
-                        out.append(obj(ObjectType.NEIGHBOR, device=ip, id=m.group(1),
-                                       protocol=operation.params.get("protocol", ""),
-                                       state=m.group(2)))
+        for cmd, text in (raw or {}).items():
+            low = cmd.lower()
+            t = text or ""
+            if "syntax error" in t.lower() or "unknown command" in t.lower():
+                continue                                  # error, not evidence
+            if self._dispatch_registry_parser(low, t, ip, out):
+                continue
+            out.append(obj(ObjectType.CONFIGURATION, device=ip, id=cmd, raw=t[:500]))
         if not out:
-            for cmd, text in raw.items():
-                out.append(obj(ObjectType.CONFIGURATION, device=ip, id=cmd, raw=text[:500]))
+            out.append(obj(ObjectType.EVENT, device=ip, id="no_data",
+                           note="no parseable data for this operation"))
         return out
+
+    def supported_intents(self, profile: VendorProfile) -> List[str]:
+        return [r.intent_name for spec in JUNOS_ADAPTER_SPECS.values() for r in spec.recipes]
 
     def build_fix(self, intent: RemediationIntent, profile: VendorProfile) -> List[str]:
         proto = str(intent.params.get("protocol", "")).lower()
-        iface = intent.params.get("interface", "<interface>")
-        # JUNOS-style set syntax — deliberately different from the ios-like adapter
-        recipes = {
-            "ignore_protocol_mtu": [f"set protocols {proto} area 0 interface {iface} no-check-mtu"] if proto else [],
-            "set_protocol_network_point_to_point": [
-                f"set protocols {proto} area 0 interface {iface} interface-type p2p"],
-            "configure_ospf_interface": [
-                f"set protocols {proto} area {intent.params.get('area', '0')} interface {iface}"],
-        }
-        return recipes.get(intent.name, [])
+        spec = JUNOS_ADAPTER_SPECS.get(proto)
+        if not spec:
+            return []
+        rspec = next((r for r in spec.recipes if r.intent_name == intent.name), None)
+        if not rspec:
+            return []
+        return render_remediation_fix(rspec, proto, intent.params)
 
     def build_rollback(self, intent: RemediationIntent, profile: VendorProfile) -> List[str]:
-        return [c.replace("set ", "delete ", 1) for c in self.build_fix(intent, profile)]
+        # "set"/"activate" -> "delete"/"deactivate" is Junos's own general
+        # config-hierarchy mechanism (works for ANY statement, not
+        # protocol-specific) — the real rollback for anything this
+        # adapter's build_fix can produce.
+        fix = self.build_fix(intent, profile)
+        rollback = []
+        for c in fix:
+            if c.startswith("set "):
+                rollback.append("delete " + c[len("set "):])
+            elif c.startswith("activate "):
+                rollback.append("deactivate " + c[len("activate "):])
+            else:
+                rollback.append(f"delete {c}")
+        return rollback
 
     def build_verification(self, intent: RemediationIntent, profile: VendorProfile) -> List[str]:
         proto = str(intent.params.get("protocol", "")).lower()
-        return [f"show {proto} neighbor"] if proto else []
+        spec = JUNOS_ADAPTER_SPECS.get(proto)
+        return list(spec.verify_commands) if spec else []
 
     def validate(self, commands: List[str], profile: VendorProfile) -> ValidationResult:
         blocked = [c for c in commands if re.search(r"\b(request system reboot|delete all)\b", c, re.I)]
@@ -99,4 +155,4 @@ class JunosLikeAdapter(VendorAdapter):
         return NormalizedError(ErrorClass.UNKNOWN, raw_error, raw=raw_error, source=self.name)
 
     def supports_intent(self, intent_name: str, profile: VendorProfile) -> bool:
-        return intent_name in {"ignore_protocol_mtu", "set_protocol_network_point_to_point", "configure_ospf_interface"}
+        return intent_name in self.supported_intents(profile)

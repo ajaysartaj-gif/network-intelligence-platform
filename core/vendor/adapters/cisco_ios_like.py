@@ -9,7 +9,7 @@ import re
 from typing import Dict, List
 
 from core.knowledge.compiler.protocol_registry import (
-    PROTOCOL_SPECS, parse_headered_rows, parse_log_lines, parse_table_rows,
+    CISCO_ADAPTER_SPECS, parse_headered_rows, parse_log_lines, parse_table_rows,
     render_remediation_fix,
 )
 
@@ -73,7 +73,7 @@ class IosLikeAdapter(VendorAdapter):
             (Op.GET_ROUTING_INFORMATION, ""): "show ip route",
             (Op.GET_CONFIGURATION, ""): "show running-config",
         }
-        spec = PROTOCOL_SPECS.get(proto)
+        spec = CISCO_ADAPTER_SPECS.get(proto)
         cmd = None
         if spec and operation.name in spec.commands:
             cmd = spec.commands[operation.name].format(suffix=suffix)
@@ -119,7 +119,7 @@ class IosLikeAdapter(VendorAdapter):
         hand-written elif chain had) — extends `out` in place, returns
         True if something matched so parse_output can skip its remaining
         bespoke branches for this command."""
-        for spec in PROTOCOL_SPECS.values():
+        for spec in CISCO_ADAPTER_SPECS.values():
             hit = False
             for parser in spec.table_parsers:
                 if parser.command_key in low:
@@ -264,14 +264,14 @@ class IosLikeAdapter(VendorAdapter):
         return out
 
     def supported_intents(self, profile: VendorProfile) -> List[str]:
-        return [r.intent_name for spec in PROTOCOL_SPECS.values() for r in spec.remediations]
+        return [r.intent_name for spec in CISCO_ADAPTER_SPECS.values() for r in spec.recipes]
 
     def build_fix(self, intent: RemediationIntent, profile: VendorProfile) -> List[str]:
         proto = str(intent.params.get("protocol", "")).lower()
-        spec = PROTOCOL_SPECS.get(proto)
+        spec = CISCO_ADAPTER_SPECS.get(proto)
         if not spec:
             return []
-        rspec = next((r for r in spec.remediations if r.intent_name == intent.name), None)
+        rspec = next((r for r in spec.recipes if r.intent_name == intent.name), None)
         if not rspec:
             return []
         return render_remediation_fix(rspec, proto, intent.params)
@@ -293,7 +293,7 @@ class IosLikeAdapter(VendorAdapter):
 
     def build_verification(self, intent: RemediationIntent, profile: VendorProfile) -> List[str]:
         proto = str(intent.params.get("protocol", "")).lower()
-        spec = PROTOCOL_SPECS.get(proto)
+        spec = CISCO_ADAPTER_SPECS.get(proto)
         return list(spec.verify_commands) if spec else []
 
     def validate(self, commands: List[str], profile: VendorProfile) -> ValidationResult:
