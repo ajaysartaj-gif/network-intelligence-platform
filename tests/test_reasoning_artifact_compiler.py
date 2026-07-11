@@ -109,10 +109,14 @@ def test_compile_root_causes_verification_remediation_decision_graph_risk():
     assert "GovernanceEngine" in risk.mitigation_reference
 
 
-def test_compile_remediation_returns_empty_for_stp_no_matching_intent():
+def test_compile_remediation_stp_only_covers_the_safe_errdisable_cause():
     compiler = ReasoningArtifactCompiler(graph=KnowledgeGraph())
-    # No STP-related vendor-adapter intent exists yet — must not invent one.
-    assert compiler.compile_remediation("stp") == []
+    # ErrDisabled (BPDU Guard) still has no matching intent, by design — only
+    # ErrDisabledLinkIntegrity (UDLD/link-flap/PAgP-DTP flap) does, since only
+    # that cause class is safe to auto-recover (see protocol_registry.py's
+    # own docstring on _STP_SIGNATURES for the full safety rationale).
+    templates = compiler.compile_remediation("stp")
+    assert [t.intent_name for t in templates] == ["enable_errdisable_recovery"]
 
 
 def test_compile_troubleshooting_excludes_risk_compile_reasoning_includes_it():

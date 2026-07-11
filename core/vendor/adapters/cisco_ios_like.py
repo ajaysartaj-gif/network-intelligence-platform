@@ -110,6 +110,15 @@ class IosLikeAdapter(VendorAdapter):
         # the same class of gap MTU was for OSPF's ExStart above.
         if operation.name == Op.GET_INTERFACE_DETAILS and proto == "stp":
             commands.append("show interfaces status")
+            # The PLAIN "show interfaces status" above only ever shows a
+            # Vlan NUMBER after "err-disabled", never a reason — Cisco puts
+            # the actual cause (udld, bpduguard, link-flap, ...) in a
+            # SEPARATE, filtered command's own Reason column. Without this,
+            # every err-disabled port looks identical regardless of cause,
+            # and the safe-to-auto-recover ones (UDLD/link-flap/PAgP-DTP
+            # flap) can never be told apart from the ones that deliberately
+            # stay fix-less (BPDU Guard, port-security violation).
+            commands.append("show interfaces status err-disabled")
         return commands
 
     @staticmethod

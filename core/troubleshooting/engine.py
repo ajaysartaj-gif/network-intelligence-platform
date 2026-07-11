@@ -462,6 +462,12 @@ class TroubleshootingEngine:
             if otype == "neighbor" and kv.get("state"):
                 facts.append({"subject": f"neighbor.{oid or '?'}",
                              "attribute": "state", "value": kv["state"]})
+                # STP's err-disable reason (udld/link-flap/bpduguard/...) —
+                # the one piece of evidence that decides whether this port
+                # is safe to auto-recover or must stay a human decision.
+                if kv.get("errdisable_reason"):
+                    facts.append({"subject": f"neighbor.{oid or '?'}",
+                                 "attribute": "errdisable_reason", "value": kv["errdisable_reason"]})
             elif otype == "protocol":
                 if kv.get("adjacency"):
                     facts.append({"subject": f"protocol.{oid or '?'}",
@@ -888,6 +894,7 @@ class TroubleshootingEngine:
                     continue
                 iface = ""
                 neighbor_ip = ""
+                errdisable_reason = ""
                 for o in session.observations:
                     if o.subject.startswith("interface.") and o.attribute == "mtu" and not iface:
                         iface = o.subject.split(".", 1)[1]
@@ -898,10 +905,18 @@ class TroubleshootingEngine:
                     # needed to carry.
                     if o.subject.startswith("neighbor.") and o.attribute == "state" and not neighbor_ip:
                         neighbor_ip = o.subject.split(".", 1)[1]
+                    # STP's enable_errdisable_recovery intent needs the actual
+                    # observed cause word (udld/link-flap/...) to fill in
+                    # "errdisable recovery cause {errdisable_reason}" — unlike
+                    # every other compiled intent, this value is a VALUE fact,
+                    # not an id recovered from the observation's subject.
+                    if o.subject.startswith("neighbor.") and o.attribute == "errdisable_reason" and not errdisable_reason:
+                        errdisable_reason = o.value
                 self._note_knowledge_source(
                     session, f"compiled remediation template: {protocol}/{template.intent_name}")
                 return {"name": template.intent_name,
-                       "params": {"protocol": protocol, "interface": iface, "neighbor_ip": neighbor_ip},
+                       "params": {"protocol": protocol, "interface": iface, "neighbor_ip": neighbor_ip,
+                                 "errdisable_reason": errdisable_reason},
                        "rationale": f"Compiled remediation template (risk={template.risk_level}): "
                                    f"{'; '.join(template.prerequisites)}"}
         except Exception as exc:

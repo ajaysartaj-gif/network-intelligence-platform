@@ -53,11 +53,12 @@ def test_stp_is_a_detectable_scenario_keyword():
 def test_stp_signatures_include_blocking_and_errdisabled():
     sigs = compile_failure_signatures("stp")
     by_state = {s.stuck_state: s for s in sigs}
-    assert set(by_state) == {"Blocking", "ErrDisabled"}
+    assert set(by_state) == {"Blocking", "ErrDisabled", "ErrDisabledLinkIntegrity"}
     # ErrDisabled is directly observed (an unambiguous status string), not
     # inferred like Blocking (which could legitimately be a healthy
     # redundant-path block) -- it earns higher confidence.
     assert by_state["ErrDisabled"].confidence > by_state["Blocking"].confidence
+    assert by_state["ErrDisabledLinkIntegrity"].confidence > by_state["Blocking"].confidence
 
 
 def test_stp_has_no_remediation_intent_for_errdisabled_by_design():
@@ -65,9 +66,15 @@ def test_stp_has_no_remediation_intent_for_errdisabled_by_design():
     (shut/no-shut) could reintroduce a real bridging loop if a switch/hub
     really was plugged into an access port -- this stays a human decision,
     same principle as the platform's deliberate exclusion of auto-enabled
-    debug/packet-capture."""
+    debug/packet-capture. ErrDisabledLinkIntegrity (UDLD/link-flap/PAgP-DTP
+    flap) carries no such risk and DOES get a compiled remediation -- this
+    proves the two stay separate, not that STP has zero fixes at all."""
     templates = ReasoningArtifactCompiler().compile_remediation("stp")
-    assert templates == []
+    assert len(templates) == 1
+    assert templates[0].intent_name == "enable_errdisable_recovery"
+    sigs = compile_failure_signatures("stp")
+    errdisabled_cause = next(s.likely_cause for s in sigs if s.stuck_state == "ErrDisabled")
+    assert templates[0].applicable_signature != errdisabled_cause
 
 
 # ── adapter parsing ──────────────────────────────────────────────────────
@@ -107,6 +114,50 @@ def test_adapter_detects_errdisabled_only_from_interfaces_status():
                                 {"show interfaces status": text}, profile)
     members = {o.id: o.attributes for o in objs if o.type == "neighbor"}
     assert members == {"Gi0/3": {"protocol": "stp", "state": "ERRDISABLED"}}
+
+
+def test_adapter_categorizes_errdisable_reason_from_filtered_command():
+    """The dedicated "show interfaces status err-disabled" command has a
+    real Reason column -- UDLD/link-flap/PAgP-DTP-flap are safe to
+    auto-recover (ERRDISABLEDLINKINTEGRITY); everything else (BPDU Guard,
+    port-security violation, ...) stays the original, fix-less
+    ERRDISABLED, preserving the existing safety scoping exactly."""
+    adapter = IosLikeAdapter()
+    profile = VendorProfile(vendor="ios-like", os="ios-like", version="", confidence=0.9,
+                            capabilities=[], attributes={"ip": "10.0.0.5"})
+    text = ("Port      Name               Status       Reason\n"
+           "Gi0/1                        err-disabled udld\n"
+           "Gi0/2                        err-disabled bpduguard\n"
+           "Gi0/3                        err-disabled psecure-violation\n")
+    objs = adapter.parse_output(Operation(Op.GET_INTERFACE_DETAILS, {"protocol": "stp"}),
+                                {"show interfaces status err-disabled": text}, profile)
+    members = {o.id: o.attributes for o in objs if o.type == "neighbor"}
+    assert members["Gi0/1"] == {"protocol": "stp", "state": "ERRDISABLEDLINKINTEGRITY",
+                                "errdisable_reason": "udld"}
+    assert members["Gi0/2"] == {"protocol": "stp", "state": "ERRDISABLED",
+                                "errdisable_reason": "bpduguard"}
+    assert members["Gi0/3"] == {"protocol": "stp", "state": "ERRDISABLED",
+                                "errdisable_reason": "psecure-violation"}
+
+
+def test_adapter_never_misreads_a_vlan_number_as_an_errdisable_reason():
+    """Adversarial case: the PLAIN (unfiltered) "show interfaces status"
+    command's Status column is followed by a VLAN NUMBER at the exact
+    text position a reason would occupy in the filtered command's output.
+    A bare "10" must never match the closed reason vocabulary -- if it
+    did, a real vlan-tagged err-disabled port could be silently
+    miscategorized as safe-to-auto-recover from a completely unrelated
+    number."""
+    adapter = IosLikeAdapter()
+    profile = VendorProfile(vendor="ios-like", os="ios-like", version="", confidence=0.9,
+                            capabilities=[], attributes={"ip": "10.0.0.5"})
+    text = (_STATUS_HEADER +
+           "Gi0/3                        err-disabled 10         auto    auto  10/100/1000BaseTX\n")
+    objs = adapter.parse_output(Operation(Op.GET_INTERFACE_DETAILS, {"protocol": "stp"}),
+                                {"show interfaces status": text}, profile)
+    members = {o.id: o.attributes for o in objs if o.type == "neighbor"}
+    assert members["Gi0/3"]["state"] == "ERRDISABLED"
+    assert "errdisable_reason" not in members["Gi0/3"]
 
 
 # ── end-to-end ────────────────────────────────────────────────────────────
@@ -152,6 +203,34 @@ def test_stp_errdisabled_identifies_cause_but_proposes_no_auto_fix():
     assert "BPDU Guard" in top.statement
     assert s.fix is None
     assert any("stp/ErrDisabled" in src for src in s.knowledge_sources)
+
+
+def test_stp_udld_errdisable_converges_to_real_auto_recovery_fix():
+    """The one STP err-disable cause class that's actually safe to
+    auto-recover: UDLD carries no bridging-loop risk (unlike BPDU Guard),
+    so this must converge to a real, deployable Cisco fix -- proving the
+    new safety-scoped remediation policy is genuinely reachable end to
+    end, not just present in the compiled signature library."""
+    devices = [Dev("10.0.0.1")]
+    command_outputs = {
+        "show spanning-tree": _STP_TABLE,
+        "show interfaces status": (_STATUS_HEADER +
+            "Gi0/1                        err-disabled 10         auto    auto  10/100/1000BaseTX\n"),
+        "show interfaces status err-disabled": (
+            "Port      Name               Status       Reason\n"
+            "Gi0/1                        err-disabled udld\n"),
+    }
+    gw = VendorGateway(send=lambda d, cmds: {c: command_outputs.get(c, "") for c in cmds},
+                       hint_provider=lambda d: {"device_type": "cisco_ios"})
+    eng = TroubleshootingEngine(ai_call=_make_ai("ErrDisabledLinkIntegrity"), devices=devices, gateway=gw,
+                                config=TSConfig(max_steps=6))
+    report = eng.run("why is the STP port err-disabled")
+    s = report.session
+    top = s.top()
+    assert top is not None
+    assert top.confidence >= 0.7
+    assert s.fix is not None
+    assert "errdisable recovery cause udld" in "\n".join(s.fix.config_commands)
 
 
 def test_stp_blocking_now_reachable_via_real_evidence():

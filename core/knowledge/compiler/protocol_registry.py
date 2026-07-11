@@ -131,7 +131,9 @@ def parse_table_rows(spec: TableRowParserSpec, text: str, ip: str) -> List[Norma
             attrs: Dict[str, Any] = {"protocol": spec.protocol, "state": state}
             if spec.extra_attrs:
                 for key, fn in spec.extra_attrs.items():
-                    attrs[key] = fn(m)
+                    val = fn(m)
+                    if val:   # skip falsy (e.g. an optional group that didn't match this row)
+                        attrs[key] = val
             members.append(state)
             out.append(obj(ObjectType.NEIGHBOR, device=ip, id=obj_id, **attrs))
     if spec.emit_summary:
@@ -516,6 +518,22 @@ _STP_SIGNATURES = [
                                  "connected to another switch/hub, or an unintended switch/hub "
                                  "was plugged into this access port",
                      evidence_fields=["portfast", "bpduguard"], confidence=0.8),
+    # A SEPARATE, narrower state from the generic ErrDisabled above —
+    # deliberately, not a confidence tweak on the same signature. The safety
+    # concern that keeps ErrDisabled fix-less (a real switch/hub might be
+    # looped into this port, and PortFast ports jump straight to Forwarding,
+    # skipping STP's own listen/learn delay) simply doesn't apply to these
+    # specific causes: UDLD, link-flap, and PAgP/DTP flap are physical-layer/
+    # protocol-negotiation integrity checks, not loop detectors — recovering
+    # one either fixes a transient blip or the same check re-trips
+    # immediately, with no window for a bridging loop to form. That's what
+    # makes this the one err-disable cause class safe to auto-recover.
+    FailureSignature(protocol="stp", stuck_state="ErrDisabledLinkIntegrity",
+                     likely_cause="Port was error-disabled by a physical-layer/negotiation "
+                                 "integrity check (UDLD, link-flap, or PAgP/DTP flap) rather "
+                                 "than a loop-forming condition — unlike BPDU Guard, there's "
+                                 "no risk a real bridging loop gets reintroduced by recovering it",
+                     evidence_fields=["errdisable_reason"], confidence=0.75),
 ]
 
 _STP_SPANNING_TREE_PARSER = TableRowParserSpec(
@@ -526,16 +544,51 @@ _STP_SPANNING_TREE_PARSER = TableRowParserSpec(
     success_state="FORWARDING",
 )
 
+# Reason tokens recognized ONLY when they appear verbatim as the closed
+# vocabulary Cisco's OWN "show interfaces status err-disabled" Reason
+# column and "errdisable recovery cause <x>" keyword both use — never a
+# free-form "next token" capture. That closed vocabulary is exactly what
+# keeps this safe against the PLAIN (unfiltered) "show interfaces status"
+# command, whose Status column is followed by a Vlan NUMBER at that same
+# text position, not a reason: a bare "10" can never match this
+# alternation, so the plain command's output still falls through to the
+# original, unchanged "ERRDISABLED" (no reason, no fix) behavior.
+_STP_ERRDISABLE_SAFE_REASONS = {"udld", "link-flap", "pagp-flap", "dtp-flap"}
+_STP_ERRDISABLE_REASON_ALT = "udld|link-flap|pagp-flap|dtp-flap|bpduguard|psecure-violation|" \
+                             "security-violation|dhcp-rate-limit|storm-control|arp-inspection|" \
+                             "channel-misconfig|mac-limit|loopback|l2ptguard|gbic-invalid|" \
+                             "sfp-config-mismatch"
+
 _STP_ERRDISABLE_PARSER = TableRowParserSpec(
     protocol="stp", command_key="interfaces status",
-    row_pattern=r"(?P<id>\S+)\s+.*?\berr-disabled\b",
-    state_transform=lambda m: "ERRDISABLED",
+    row_pattern=r"(?P<id>\S+)\s+.*?\berr-disabled\b(?:\s+(?P<reason>" + _STP_ERRDISABLE_REASON_ALT + r"))?",
+    state_transform=lambda m: ("ERRDISABLEDLINKINTEGRITY"
+                               if (m.group("reason") or "").lower() in _STP_ERRDISABLE_SAFE_REASONS
+                               else "ERRDISABLED"),
+    extra_attrs={"errdisable_reason": lambda m: (m.group("reason") or "").lower()},
     emit_summary=False,   # matches original behavior — no PROTOCOL summary from this table
 )
 
+_STP_REMEDIATION_POLICIES = [
+    RemediationPolicy(intent_name="enable_errdisable_recovery",
+                      trigger_state="ErrDisabledLinkIntegrity", risk_level="low"),
+]
+
+_STP_CISCO_RECIPES = [
+    # Global (not interface-scoped): enables the switch's OWN bounded
+    # auto-recovery timer for this one cause, which both clears the
+    # CURRENT incident (after the timer, default 300s) and prevents this
+    # cause from needing a manual shut/no-shut in the future. No
+    # context_template — unlike every other recipe in this file, this
+    # command doesn't take an "interface" line at all.
+    RemediationRecipe(intent_name="enable_errdisable_recovery",
+                      context_template=None, context_param="errdisable_reason",
+                      command_template="errdisable recovery cause {errdisable_reason}"),
+]
+
 _STP_VERIFICATION = VerificationTemplate(
     protocol="stp",
-    commands=["show spanning-tree", "show interfaces status"],
+    commands=["show spanning-tree", "show interfaces status", "show interfaces status err-disabled"],
     success_criteria="Port state is Forwarding for the expected root/designated role, and not err-disabled",
     failure_indicators=["port stuck in Blocking on a link expected to forward",
                         "port shows 'err-disabled' in show interfaces status (BPDU Guard triggered)"],
@@ -925,7 +978,9 @@ PROTOCOL_SPECS: Dict[str, ProtocolSpec] = {
     "stp": ProtocolSpec(
         name="stp", keywords=["stp"], state_model=_STP_STATE_MODEL,
         signatures=_STP_SIGNATURES,
-        remediation_policies=[],   # no matching vendor-adapter intent exists yet, by design (see ErrDisabled's docstring)
+        # Only ErrDisabledLinkIntegrity gets a policy — ErrDisabled (BPDU
+        # Guard) deliberately has none, see its own docstring above.
+        remediation_policies=_STP_REMEDIATION_POLICIES,
         verification=_STP_VERIFICATION, regression_states=["Blocking", "Disabled"]),
     "bgp": ProtocolSpec(
         name="bgp", keywords=["bgp"], state_model=_BGP_STATE_MODEL,
@@ -993,9 +1048,9 @@ CISCO_ADAPTER_SPECS: Dict[str, AdapterSpec] = {
                  "get_configuration": "show running-config | section router ospf"},
         verify_commands=["show ip ospf neighbor"]),
     "stp": AdapterSpec(
-        table_parsers=[_STP_SPANNING_TREE_PARSER, _STP_ERRDISABLE_PARSER], recipes=[],
+        table_parsers=[_STP_SPANNING_TREE_PARSER, _STP_ERRDISABLE_PARSER], recipes=_STP_CISCO_RECIPES,
         commands={"get_interface_details": "show spanning-tree"},
-        verify_commands=["show spanning-tree", "show interfaces status"]),
+        verify_commands=["show spanning-tree", "show interfaces status", "show interfaces status err-disabled"]),
     "bgp": AdapterSpec(
         table_parsers=[_BGP_SUMMARY_PARSER], recipes=_BGP_CISCO_RECIPES,
         commands={"get_neighbors": "show ip bgp summary"},
@@ -1208,8 +1263,11 @@ _STP_INTERFACE_PARSER_JUNOS = TableRowParserSpec(
     extra_attrs={"role": lambda m: m.group("role")},
     success_state="FORWARDING",
 )
-# No remediation recipes for Junos STP — matches Cisco's own STP, which
-# also has none (no matching vendor-adapter intent exists for either).
+# No remediation recipes for Junos STP: this adapter never parses an
+# err-disable equivalent at all (no _STP_INTERFACE_PARSER_JUNOS branch
+# for it), so ErrDisabled/ErrDisabledLinkIntegrity are unreachable here
+# regardless — unlike Cisco's STP, which now has one recipe for the
+# latter (see _STP_CISCO_RECIPES above).
 
 JUNOS_ADAPTER_SPECS: Dict[str, AdapterSpec] = {
     "ospf": AdapterSpec(
