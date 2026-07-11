@@ -1058,15 +1058,34 @@ class IntentEngine:
             logger.debug(f"_read_device_facts failed for {device.ip}: {exc}")
             return ""
 
+    def _ensure_general_corpus_ingested(self) -> None:
+        """Best-effort, safe to call on every request — corpus/general/*.txt
+        (real, researched prose for technologies with no compiled protocol
+        signatures: VXLAN/EVPN, PIM, QoS, MPLS L3VPN, EIGRP, VRRP, IPv6 ND/
+        SLAAC, 802.1X) sat on disk unused in production before this call
+        existed: nothing ingested it into the store rag_query() actually
+        reads from, so a live session could never be grounded in it no
+        matter how good the content was. See pipelines.
+        ensure_general_corpus_ingested()'s own docstring for the dedup
+        contract that makes calling this every time cheap."""
+        try:
+            from core.knowledge.enterprise.pipelines import ensure_general_corpus_ingested
+            ensure_general_corpus_ingested()
+        except Exception as exc:
+            logger.debug(f"General corpus ingestion skipped: {exc}")
+
     def _rag_context_for(self, query: str) -> str:
         """Pull grounding context from the RAG knowledge base (runbooks/incidents)
         so generation is informed by curated knowledge, not just the LLM's priors."""
         if not KNOWLEDGE_OK:
             return ""
         try:
+            self._ensure_general_corpus_ingested()
             hits = get_orchestrator().rag_query(query, top_k=3)
             if not hits:
                 return ""
+            for h in hits:
+                self._last_grounding_citations.append(f"RAG corpus: {h.source} — {h.title}")
             blocks = [f"[{h.source} · {h.title}]\n{h.text[:500]}" for h in hits]
             return "RELEVANT KNOWLEDGE (from your runbooks/past incidents):\n" + "\n---\n".join(blocks)
         except Exception as exc:
@@ -1110,6 +1129,8 @@ class IntentEngine:
                     contexts.append(
                         f"[{vendor.upper()} DOC/MCP] {title}{' — ' + url if url else ''}\n{snippet}"
                     )
+                    self._last_grounding_citations.append(
+                        f"vendor doc/MCP ({vendor}, confidence={entry.citation.confidence.value}): {title}")
             except Exception as exc:
                 logger.debug(f"Vendor doc/MCP context lookup failed for {vendor}: {exc}")
 
@@ -1117,7 +1138,16 @@ class IntentEngine:
 
     # ── RAG-FIRST grounding: enterprise knowledge + topology before any LLM call ──
     def _ground(self, query: str, devices: List[Any]) -> str:
-        """Assemble grounding for the model: RAG + vendor docs/MCP + live topology."""
+        """Assemble grounding for the model: RAG + vendor docs/MCP + live topology.
+
+        Also populates self._last_grounding_citations (reset fresh on every
+        call) — which document(s)/MCP result(s), if any, actually informed
+        this call — so a caller (core.troubleshooting.engine.py) can record
+        them into the final report's "Knowledge Sources Consulted" section.
+        Before this existed, grounding could genuinely execute (real RAG
+        hits, real Cisco DevNet MCP calls) with zero visible trace in the
+        report of what was actually consulted."""
+        self._last_grounding_citations: List[str] = []
         parts: List[str] = []
         rag = self._rag_context_for(query)
         if rag:

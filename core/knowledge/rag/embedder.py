@@ -77,6 +77,26 @@ class LocalEmbedder(Embedder):
                     "sentence-transformers is required for local embeddings. "
                     "Install it: pip install sentence-transformers"
                 ) from exc
+            except Exception as exc:
+                # sentence-transformers being INSTALLED doesn't guarantee its
+                # own import succeeds — its dependency chain pulls in torch,
+                # and an incompatible installed torch version (this package
+                # requires torch>=2.4) fails partway through torch's own
+                # internals, surfacing as an unrelated-looking NameError/
+                # AttributeError rather than a clean ImportError. Without
+                # this branch, that raw exception (e.g. "name 'nn' is not
+                # defined") propagates uncaught into every caller — RAG
+                # ingestion, corpus loading, retrieval — each logging a
+                # cryptic one-line warning with no indication of the real,
+                # fixable cause (upgrade torch), the same failure mode
+                # observed repeatedly across this session's test runs.
+                raise RuntimeError(
+                    "Local embedding model failed to load — this is very "
+                    "likely an incompatible installed torch version "
+                    "(sentence-transformers requires torch>=2.4). Original "
+                    f"error: {type(exc).__name__}: {exc}. Fix: upgrade torch "
+                    "in this environment (`pip install --upgrade torch`)."
+                ) from exc
             logger.info(f"Loading local embedding model: {self._model_name}")
             self._model = SentenceTransformer(self._model_name)
             self._dim = int(self._model.get_sentence_embedding_dimension())

@@ -141,6 +141,7 @@ class TroubleshootingEngine:
         session = Session()
         device_ips = [ip for ip in self._ip_to_dev.keys() if ip]
         grounding = self._grounder(query, self.devices)
+        self._record_grounding_citations(session)
         session.goal = Goal(query=query, devices=device_ips,
                             objective=self.reasoner.phrase_objective(query))
 
@@ -828,6 +829,23 @@ class TroubleshootingEngine:
         if source not in session.knowledge_sources:
             session.knowledge_sources.append(source)
 
+    def _record_grounding_citations(self, session: Session) -> None:
+        """IntentEngine._ground() genuinely executes real RAG/MCP lookups
+        (self._grounder(...), called just above) — but before this existed,
+        whatever it actually found (or didn't) left no trace in the final
+        report: a user had no way to tell whether their conclusion was
+        informed by real documentation or not. Reads IntentEngine._ground()'s
+        own self._last_grounding_citations (reset fresh on every _ground()
+        call) and records each into session.knowledge_sources, exactly like
+        every compiled-signature citation already is. Deliberately does NOT
+        feed these into ConfidenceCalculator — RAG/MCP relevance is a best-
+        effort heuristic (see core.knowledge.mcp.devnet_content_source's own
+        confidence scoring), not verified ground truth, so it stays
+        informational context a human can weigh, never a silent input to
+        the audited confidence math."""
+        for source in getattr(self._intent, "_last_grounding_citations", None) or []:
+            self._note_knowledge_source(session, source)
+
     def _persist(self, session: Session) -> None:
         try:
             self.session_memory.save(session)
@@ -980,6 +998,7 @@ class TroubleshootingEngine:
         if top and ranker.converged(session):
             # Fix Generator (approval-gated) + Verification Planner
             grounding = self._grounder(session.goal.query, self.devices)
+            self._record_grounding_citations(session)
             fix_raw = self.reasoner.generate_fix(
                 top.statement, session.goal.objective, self._evidence_summary(session), grounding)
             cfgs = [c for c in (fix_raw.get("config_commands") or []) if c and c.strip()]

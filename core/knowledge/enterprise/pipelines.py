@@ -120,6 +120,33 @@ def ingest_directory(
     return summary
 
 
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+
+def ensure_general_corpus_ingested(layer: Optional[EnterpriseKnowledgeLayer] = None) -> Dict[str, Any]:
+    """Idempotently ingests corpus/general/*.txt — real, researched prose
+    coverage for technologies with no compiled protocol signatures (VXLAN/
+    EVPN, multicast/PIM, QoS, MPLS L3VPN, EIGRP, VRRP, IPv6 ND/SLAAC, port
+    security/802.1X) — into the SAME EnterpriseKnowledgeLayer core.
+    knowledge.orchestrator.rag_query() reads from at query time.
+
+    Before this function existed and was wired into IntentEngine.
+    _rag_context_for(), this corpus sat on disk unused in production: only
+    tests/test_general_corpus.py ever ingested it, into an isolated temp
+    store nothing else could query — a live troubleshooting session could
+    never actually be grounded in it, regardless of how good the content
+    was.
+
+    Safe to call on every request: ingest_directory()/layer.ingest() dedup
+    by content hash, so re-ingesting unchanged files is a cheap no-op, the
+    same "safe to call every time" contract core.troubleshooting.
+    strategies.live_retriever.ensure_corpus_ingested() already relies on
+    for the top-level corpus/ files."""
+    corpus_dir = os.path.join(_REPO_ROOT, "corpus", "general")
+    return ingest_directory(corpus_dir, SourceType.BEST_PRACTICE,
+                            tags=["general-corpus"], layer=layer, recursive=False)
+
+
 def ingest_rfc(
     number: int,
     layer: Optional[EnterpriseKnowledgeLayer] = None,
