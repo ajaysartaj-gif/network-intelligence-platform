@@ -952,7 +952,7 @@ class IntentEngine:
         these queries, breaking every compiled-signature feature keyed off
         the detected protocol."""
         q = (q or "").lower()
-        for scenario in ("ospf", "bgp", "eigrp", "lacp", "vlan", "acl",
+        for scenario in ("ospf", "bgp", "eigrp", "lacp", "hsrp", "vrrp", "stp", "vlan", "acl",
                          "dhcp", "nat", "performance", "interface"):
             if scenario in q:
                 return scenario

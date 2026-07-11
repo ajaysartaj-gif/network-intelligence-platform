@@ -65,6 +65,9 @@ class IosLikeAdapter(VendorAdapter):
             (Op.GET_NEIGHBORS, "bgp"): "show ip bgp summary",
             (Op.GET_INTERFACE_DETAILS, "ospf"): f"show ip ospf interface{suffix}",
             (Op.GET_INTERFACE_DETAILS, "lacp"): "show etherchannel summary",
+            (Op.GET_INTERFACE_DETAILS, "hsrp"): "show standby brief",
+            (Op.GET_INTERFACE_DETAILS, "vrrp"): "show vrrp brief",
+            (Op.GET_INTERFACE_DETAILS, "stp"): "show spanning-tree",
             (Op.GET_INTERFACE_DETAILS, ""): "show ip interface brief",
             (Op.GET_ROUTING_INFORMATION, "ospf"): "show ip route ospf",
             (Op.GET_ROUTING_INFORMATION, ""): "show ip route",
@@ -94,6 +97,15 @@ class IosLikeAdapter(VendorAdapter):
             # real mismatch or reporting a false one.
             commands.append(f"show running-config interface {scoped}" if scoped
                             else "show running-config | section ^interface")
+        # BPDU Guard's err-disable action is NOT visible in "show spanning-
+        # tree" at all (the port simply disappears from that output once
+        # it's down) — it only shows up in "show interfaces status"'s
+        # dedicated status column. Without this second command, the single
+        # most commonly reported real STP complaint (an access port BPDU-
+        # Guard shut down) would be structurally invisible to this adapter,
+        # the same class of gap MTU was for OSPF's ExStart above.
+        if operation.name == Op.GET_INTERFACE_DETAILS and proto == "stp":
+            commands.append("show interfaces status")
         return commands
 
     def parse_output(self, operation: Operation, raw: Dict[str, str],
@@ -178,6 +190,95 @@ class IosLikeAdapter(VendorAdapter):
                                neighbor_count=len(members),
                                adjacency=(",".join(members) if members else "none"),
                                state=("up" if any(m == "BUNDLED" for m in members) else "down")))
+            elif "standby brief" in low:
+                # Real "show standby brief" rows: interface, group, priority,
+                # an OPTIONAL literal "P" column (present only if preempt is
+                # configured — absent, not a placeholder character, so column
+                # alignment shifts row-to-row), then the state name. Anchoring
+                # on the state-name alternation (rather than counting a fixed
+                # number of whitespace-separated columns) sidesteps that
+                # shift entirely, the same lesson learned from LACP's flags.
+                # Group id keys as "iface:group" (":" never appears in a
+                # Cisco interface name) so build_fix can recover the group
+                # number needed for "standby <group> preempt" syntax.
+                _HSRP_ROW = re.compile(
+                    r"^(?P<iface>\S+)\s+(?P<grp>\d+)\s+(?P<prio>\d+)\s+(?P<preempt>P)?\s*"
+                    r"(?P<state>Init|Learn|Listen|Speak|Standby|Active)\b", re.I)
+                members = []
+                for line in t.splitlines():
+                    m = _HSRP_ROW.match(line.strip())
+                    if not m:
+                        continue
+                    state = m.group("state").upper()
+                    members.append(state)
+                    out.append(obj(ObjectType.NEIGHBOR, device=ip,
+                                   id=f"{m.group('iface')}:{m.group('grp')}",
+                                   protocol="hsrp", state=state,
+                                   preempt_configured=("true" if m.group("preempt") else "false")))
+                out.append(obj(ObjectType.PROTOCOL, device=ip, id="hsrp",
+                               neighbor_count=len(members),
+                               adjacency=(",".join(members) if members else "none"),
+                               state=("up" if any(m == "ACTIVE" for m in members) else "down")))
+            elif "vrrp brief" in low:
+                # Real "show vrrp brief" rows: interface, group, priority,
+                # a timer value, then two single-letter Y/N columns (Own,
+                # Pre[empt]) before the state name — anchored the same way
+                # as HSRP, on the state-name alternation, not fixed columns.
+                _VRRP_ROW = re.compile(
+                    r"^(?P<iface>\S+)\s+(?P<grp>\d+)\s+(?P<prio>\d+)\s+\S+\s+"
+                    r"(?P<own>[YN])\s+(?P<pre>[YN])\s+"
+                    r"(?P<state>Initialize|Backup|Master)\b", re.I)
+                members = []
+                for line in t.splitlines():
+                    m = _VRRP_ROW.match(line.strip())
+                    if not m:
+                        continue
+                    state = m.group("state").upper()
+                    members.append(state)
+                    out.append(obj(ObjectType.NEIGHBOR, device=ip,
+                                   id=f"{m.group('iface')}:{m.group('grp')}",
+                                   protocol="vrrp", state=state,
+                                   preempt_enabled=("true" if m.group("pre").upper() == "Y" else "false")))
+                out.append(obj(ObjectType.PROTOCOL, device=ip, id="vrrp",
+                               neighbor_count=len(members),
+                               adjacency=(",".join(members) if members else "none"),
+                               state=("up" if any(m == "MASTER" for m in members) else "down")))
+            elif "spanning-tree" in low:
+                # Real "show spanning-tree" per-VLAN interface table: role
+                # (Root/Desg/Altn/Back) then the abbreviated status (FWD/
+                # BLK/LRN/LIS) — mapped back to the compiled STP model's own
+                # full state names so _bind_compiled_signature_evidence's
+                # state-name match works identically to every other
+                # protocol above.
+                _STP_STS = {"FWD": "FORWARDING", "BLK": "BLOCKING",
+                           "LRN": "LEARNING", "LIS": "LISTENING"}
+                members = []
+                for line in t.splitlines():
+                    m = re.match(r"(\S+)\s+(Root|Desg|Altn|Back)\s+(FWD|BLK|LRN|LIS)\s",
+                                line.strip())
+                    if not m:
+                        continue
+                    state = _STP_STS[m.group(3)]
+                    members.append(state)
+                    out.append(obj(ObjectType.NEIGHBOR, device=ip, id=m.group(1),
+                                   protocol="stp", state=state, role=m.group(2)))
+                out.append(obj(ObjectType.PROTOCOL, device=ip, id="stp",
+                               neighbor_count=len(members),
+                               adjacency=(",".join(members) if members else "none"),
+                               state=("up" if any(m == "FORWARDING" for m in members) else "down")))
+            elif "interfaces status" in low:
+                # BPDU Guard's err-disable action never appears in "show
+                # spanning-tree" (the port simply vanishes from that table)
+                # — this is the ONLY command that surfaces it, as a literal
+                # "err-disabled" status string. Tagged protocol="stp" since
+                # BPDU Guard is an STP feature, using the SAME "neighbor.*"
+                # evidence shape every other per-port/per-peer state uses.
+                for line in t.splitlines():
+                    m = re.match(r"(\S+)\s+.*?\berr-disabled\b", line.strip(), re.I)
+                    if not m:
+                        continue
+                    out.append(obj(ObjectType.NEIGHBOR, device=ip, id=m.group(1),
+                                   protocol="stp", state="ERRDISABLED"))
             elif "ospf interface" in low:
                 for block in re.split(r"\n(?=\S)", t):
                     mi = re.match(r"(\S+) is (up|down|administratively down)", block)
@@ -261,12 +362,18 @@ class IosLikeAdapter(VendorAdapter):
         return ["ignore_protocol_mtu", "set_protocol_network_point_to_point",
                 "configure_ospf_interface", "enable_ospf_on_interface",
                 "remove_bgp_neighbor_shutdown", "add_bgp_ebgp_multihop",
-                "set_lacp_mode_active"]
+                "set_lacp_mode_active", "add_hsrp_preempt", "enable_vrrp_preempt"]
 
     def build_fix(self, intent: RemediationIntent, profile: VendorProfile) -> List[str]:
         proto = str(intent.params.get("protocol", "")).lower()
         iface = intent.params.get("interface", "")
         neighbor_ip = intent.params.get("neighbor_ip", "")
+        # HSRP/VRRP's "neighbor" id is "iface:group" (parse_output()'s own
+        # encoding, since both the interface AND the group number are
+        # needed for "standby/vrrp <group> preempt" syntax) — split it back
+        # apart here rather than threading a second id shape through engine.py.
+        fhrp_iface, _, fhrp_group = neighbor_ip.partition(":")
+        fhrp_group = fhrp_group or intent.params.get("group", "1")
         recipes = {
             "ignore_protocol_mtu": (f"interface {iface}" if iface else None,
                                     f"ip {proto} mtu-ignore"),
@@ -300,6 +407,18 @@ class IosLikeAdapter(VendorAdapter):
             "set_lacp_mode_active": (
                 f"interface {neighbor_ip}" if neighbor_ip else None,
                 f"channel-group {intent.params.get('channel_group', '1')} mode active"),
+            # HSRP defaults preempt OFF — "won't fail over" is fixed by
+            # explicitly turning it on for this group.
+            "add_hsrp_preempt": (
+                f"interface {fhrp_iface}" if fhrp_iface else None,
+                f"standby {fhrp_group} preempt"),
+            # VRRP defaults preempt ON, so a router stuck in Backup despite
+            # higher priority almost always means it was explicitly disabled
+            # ("no vrrp <group> preempt") — re-asserting it is the fix,
+            # idempotent-safe whether or not it was actually the cause.
+            "enable_vrrp_preempt": (
+                f"interface {fhrp_iface}" if fhrp_iface else None,
+                f"vrrp {fhrp_group} preempt"),
         }
         recipe = recipes.get(intent.name)
         if not recipe:
@@ -329,6 +448,12 @@ class IosLikeAdapter(VendorAdapter):
             return ["show ip bgp summary"]
         if proto == "lacp":
             return ["show etherchannel summary"]
+        if proto == "hsrp":
+            return ["show standby brief"]
+        if proto == "vrrp":
+            return ["show vrrp brief"]
+        if proto == "stp":
+            return ["show spanning-tree", "show interfaces status"]
         return []
 
     def validate(self, commands: List[str], profile: VendorProfile) -> ValidationResult:
@@ -349,4 +474,4 @@ class IosLikeAdapter(VendorAdapter):
         return intent_name in {"ignore_protocol_mtu", "set_protocol_network_point_to_point",
                                "configure_ospf_interface", "enable_ospf_on_interface",
                                "remove_bgp_neighbor_shutdown", "add_bgp_ebgp_multihop",
-                               "set_lacp_mode_active"}
+                               "set_lacp_mode_active", "add_hsrp_preempt", "enable_vrrp_preempt"}

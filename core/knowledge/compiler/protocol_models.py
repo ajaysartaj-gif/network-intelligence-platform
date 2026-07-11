@@ -2,11 +2,14 @@
 core/knowledge/compiler/protocol_models.py
 =============================================
 Protocol State Model Compiler — a small, generic state-machine
-representation, seeded with four verified models: OSPF neighbor adjacency
+representation, seeded with six verified models: OSPF neighbor adjacency
 (RFC 2328), STP port states (802.1D), BGP peer session states (RFC 4271),
-and LACP port-bundling state (802.3ad/802.1AX). All four are textbook,
-unambiguous, and their states already appear in this package's
-tokens.py::_STATE_WORDS and semantic_analyzer.py::_NEIGHBOR_ROW.
+LACP port-bundling state (802.3ad/802.1AX), HSRP group state (RFC 2281,
+Cisco proprietary but textbook-documented), and VRRP router state
+(RFC 5798). All six are textbook, unambiguous, and their states already
+appear in this package's tokens.py::_STATE_WORDS and
+semantic_analyzer.py::_NEIGHBOR_ROW (or are added there alongside this
+model, for HSRP/VRRP).
 
 LACP's model is deliberately scoped to the OBSERVABLE port-bundling state
 from "show etherchannel summary" (Down/Individual/Suspended/Bundled) —
@@ -17,9 +20,17 @@ and would risk asserting internal detail I can't verify precisely enough.
 Same principle as OSPF/BGP: model what's textbook AND observable, not
 protocol internals.
 
-Deliberately NOT seeded (yet): EIGRP/ISIS/MPLS/VXLAN/EVPN/VRRP/HSRP.
-Several of these have real vendor/version-specific nuance (HSRP vs VRRP
-timers and state names differ) that I cannot verify precisely enough to
+HSRP and VRRP are DELIBERATELY kept as two SEPARATE models rather than
+one generic "FHRP" model, because their real, vendor-documented state
+names and defaults genuinely differ: HSRP's RFC 2281 states are
+Init/Learn/Listen/Speak/Standby/Active with preemption OFF by default;
+VRRP's RFC 5798 states are Initialize/Backup/Master with preemption ON
+by default. Asserting a single shared model would blur a real, commonly
+misunderstood difference (a lot of real-world VRRP "won't fail back"
+reports trace to someone assuming HSRP's off-by-default behavior).
+
+Deliberately NOT seeded (yet): EIGRP/ISIS/MPLS/VXLAN/EVPN. These have
+real vendor/version-specific nuance I cannot verify precisely enough to
 assert as "compiled knowledge" without risking a WRONG transition table —
 worse than no table at all. The registry mechanism is fully generic
 (PROTOCOL_STATE_MODELS is just a dict); adding a new protocol is one new
@@ -121,11 +132,44 @@ _LACP_PORT = ProtocolStateModel(
     ],
 )
 
+_HSRP_GROUP = ProtocolStateModel(
+    protocol="hsrp",
+    states=["Init", "Learn", "Listen", "Speak", "Standby", "Active"],
+    transitions=[
+        ProtocolTransition("Init", "Learn", "interface up, virtual IP not yet known"),
+        ProtocolTransition("Init", "Listen", "interface up, virtual IP already configured"),
+        ProtocolTransition("Learn", "Listen", "virtual IP learned from an Active router's hello"),
+        ProtocolTransition("Listen", "Speak", "active/standby timer expires, no hello heard from a peer"),
+        ProtocolTransition("Speak", "Standby", "lost the priority election to a peer"),
+        ProtocolTransition("Speak", "Active", "won the priority election (highest priority/IP)"),
+        ProtocolTransition("Standby", "Active", "Active router's hold timer expires (stops hearing hellos)"),
+        # regression edges — an interface flap restarts the whole FSM
+        ProtocolTransition("Active", "Init", "interface down / HSRP disabled"),
+        ProtocolTransition("Standby", "Init", "interface down / HSRP disabled"),
+    ],
+)
+
+_VRRP_ROUTER = ProtocolStateModel(
+    protocol="vrrp",
+    states=["Initialize", "Backup", "Master"],
+    transitions=[
+        ProtocolTransition("Initialize", "Master", "is the IP address owner, or priority 255, or no Master seen"),
+        ProtocolTransition("Initialize", "Backup", "not the address owner and a Master is already present"),
+        ProtocolTransition("Backup", "Master", "Master_Down_Timer expires (Master stops advertising)"),
+        # regression edges
+        ProtocolTransition("Master", "Backup", "higher-priority advertisement received AND preempt is enabled"),
+        ProtocolTransition("Master", "Initialize", "interface down / VRRP disabled"),
+        ProtocolTransition("Backup", "Initialize", "interface down / VRRP disabled"),
+    ],
+)
+
 PROTOCOL_STATE_MODELS: Dict[str, ProtocolStateModel] = {
     "ospf": _OSPF_NEIGHBOR,
     "stp": _STP_PORT,
     "bgp": _BGP_NEIGHBOR,
     "lacp": _LACP_PORT,
+    "hsrp": _HSRP_GROUP,
+    "vrrp": _VRRP_ROUTER,
 }
 
 

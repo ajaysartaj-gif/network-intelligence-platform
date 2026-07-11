@@ -43,10 +43,13 @@ _VERIFICATION_TEMPLATES: Dict[str, VerificationTemplate] = {
         alternative_checks=["show ip ospf database"]),
     "stp": VerificationTemplate(
         protocol="stp",
-        commands=["show spanning-tree", "show spanning-tree interface <interface> detail"],
-        success_criteria="Port state is Forwarding for the expected root/designated role",
-        failure_indicators=["port stuck in Blocking on a link expected to forward"],
-        alternative_checks=["show spanning-tree detail"]),
+        commands=["show spanning-tree", "show interfaces status"],
+        success_criteria="Port state is Forwarding for the expected root/designated role, "
+                         "and not err-disabled",
+        failure_indicators=["port stuck in Blocking on a link expected to forward",
+                            "port shows 'err-disabled' in show interfaces status "
+                            "(BPDU Guard triggered)"],
+        alternative_checks=["show spanning-tree detail", "show errdisable recovery"]),
     "bgp": VerificationTemplate(
         protocol="bgp",
         commands=["show ip bgp summary"],
@@ -60,6 +63,22 @@ _VERIFICATION_TEMPLATES: Dict[str, VerificationTemplate] = {
         success_criteria="Member port flag is 'P' (Bundled) in the Port-channel",
         failure_indicators=["member port stuck at 'I' (Individual) or 's' (Suspended)"],
         alternative_checks=["show lacp neighbor"]),
+    "hsrp": VerificationTemplate(
+        protocol="hsrp",
+        commands=["show standby brief"],
+        success_criteria="This router shows Active, or Standby with 'preempt' configured "
+                         "so it will take over if the Active router fails",
+        failure_indicators=["stuck in Listen or Speak past the hold timer",
+                            "Standby with no 'P' (preempt) flag when failover is expected"],
+        alternative_checks=["show standby"]),
+    "vrrp": VerificationTemplate(
+        protocol="vrrp",
+        commands=["show vrrp brief"],
+        success_criteria="This router shows Master, or Backup with 'Pre'=Y so it will "
+                         "take over if the Master fails",
+        failure_indicators=["stuck in Initialize past the startup timer",
+                            "Backup with 'Pre'=N despite a higher configured priority"],
+        alternative_checks=["show vrrp"]),
 }
 
 # Failure-cause -> EXISTING vendor-adapter intent name (from
@@ -91,6 +110,16 @@ _REMEDIATION_INTENTS: Dict[str, Dict[str, str]] = {
     "lacp": {
         "Individual": "set_lacp_mode_active",
     },
+    # Only the "won't fail over" states get a mapped intent — Init/Listen/
+    # Speak (HSRP) and Initialize (VRRP) have too many possible causes
+    # (VLAN, ACL, auth, priority tie) to safely auto-fix without more
+    # specific evidence, same honest scoping as every other protocol above.
+    "hsrp": {
+        "Standby": "add_hsrp_preempt",
+    },
+    "vrrp": {
+        "Backup": "enable_vrrp_preempt",
+    },
 }
 
 _RISK_LEVEL_BY_INTENT = {
@@ -101,13 +130,17 @@ _RISK_LEVEL_BY_INTENT = {
     "remove_bgp_neighbor_shutdown": "low",       # removes an admin block, no side effects
     "add_bgp_ebgp_multihop": "medium",           # changes real session parameters
     "set_lacp_mode_active": "medium",            # changes real channel-group membership mode
+    "add_hsrp_preempt": "low",                   # only affects failover behavior, not current forwarding
+    "enable_vrrp_preempt": "low",                # same — re-asserts a default-on VRRP behavior
 }
 
 # States a "forward progress" transition should never regress into, when
 # choosing which outgoing transition represents the decision graph's
 # success path. LACP's own reset state, "Down", is already covered by the
-# existing generic entry.
-_REGRESSION_STATES = {"Down", "Blocking", "Disabled", "Idle"}
+# existing generic entry. HSRP's "Init" and VRRP's "Initialize" are their
+# OWN distinct reset-state names (not literally "Down"), so each needs its
+# own entry rather than silently falling through.
+_REGRESSION_STATES = {"Down", "Blocking", "Disabled", "Idle", "Init", "Initialize"}
 
 
 class ReasoningArtifactCompiler:

@@ -662,7 +662,7 @@ class TroubleshootingEngine:
             except Exception:
                 pass
         q = (query or "").lower()
-        for p in ("ospf", "bgp", "eigrp", "stp", "lacp", "vlan", "acl", "nat"):
+        for p in ("ospf", "bgp", "eigrp", "stp", "lacp", "hsrp", "vrrp", "vlan", "acl", "nat"):
             if p in q:
                 return p
         return "general"

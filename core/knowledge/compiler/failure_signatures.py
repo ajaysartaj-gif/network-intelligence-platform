@@ -4,20 +4,28 @@ core/knowledge/compiler/failure_signatures.py
 Failure Signature Library — deterministic, textbook root-cause signatures
 compiled from each protocol's VERIFIED state model
 (core/knowledge/compiler/protocol_models.py, seeded with OSPF, STP, BGP,
-and LACP). Confidence is honestly hedged per signature, grounded in
-real-world reported frequency, not uniform: ExStart/MTU, BGP Active
-(repeated TCP failures), and LACP Individual (LACPDU/mode mismatch) are
-well-established, frequently-cited signatures (high confidence); a
-"stuck" state with many possible causes (Down, Exchange, Loading, BGP
-OpenSent) gets a lower confidence rather than false precision. 2-Way is
-explicitly noted as often a NORMAL stable state, not a failure, on
-broadcast networks between two DROTHERs — a real nuance worth stating
-rather than flagging every 2-Way sighting as a problem.
+LACP, HSRP, and VRRP). Confidence is honestly hedged per signature,
+grounded in real-world reported frequency, not uniform: ExStart/MTU, BGP
+Active (repeated TCP failures), and LACP Individual (LACPDU/mode
+mismatch) are well-established, frequently-cited signatures (high
+confidence); a "stuck" state with many possible causes (Down, Exchange,
+Loading, BGP OpenSent) gets a lower confidence rather than false
+precision. 2-Way is explicitly noted as often a NORMAL stable state, not
+a failure, on broadcast networks between two DROTHERs — a real nuance
+worth stating rather than flagging every 2-Way sighting as a problem.
+HSRP's Standby and VRRP's Backup get the same honest treatment: each is
+normally a healthy state, but the single most commonly reported real
+complaint in each ("won't fail over even though the peer is down") is a
+missing/disabled preempt configuration — well-documented enough in each
+protocol to earn the same confidence tier as BGP's Active/LACP's
+Individual, even though HSRP defaults preempt OFF while VRRP defaults it
+ON (so the wording of each cause deliberately differs even though the
+number doesn't).
 
 Returns [] for any protocol without a seeded model in protocol_models.py
-— NEVER fabricates a signature for EIGRP/ISIS/MPLS/VXLAN/EVPN/HSRP/VRRP/
-RSTP, consistent with the original scoping decision (those protocols are
-on the roadmap, not yet verified precisely enough to seed).
+— NEVER fabricates a signature for EIGRP/ISIS/MPLS/VXLAN/EVPN/RSTP,
+consistent with the original scoping decision (those protocols are on
+the roadmap, not yet verified precisely enough to seed).
 
 compile_acl_deny_signature() is independently grounded — it reads Phase
 1's already-compiled `acl` NormalizedObjects directly (a deny rule IS the
@@ -71,6 +79,26 @@ _STP_SIGNATURES = {
         likely_cause="Superior BPDU received from another switch (legitimate redundant-"
                     "path block, or a root-guard/BPDU-guard candidate if unexpected)",
         evidence_fields=[], confidence=0.6),
+    # "ErrDisabled" isn't one of 802.1D's own 5 FSM states (it's a Cisco
+    # port-administrative action BPDU Guard takes, layered ON TOP of STP) —
+    # but it's DIRECTLY observed (a specific, unambiguous status string in
+    # "show interfaces status"), not inferred, so it earns a high
+    # confidence the same way ACL's deny-hit signature does. Deliberately
+    # has NO mapped remediation intent (see _REMEDIATION_INTENTS below):
+    # blindly clearing an err-disabled BPDU-Guard port ("shutdown"/"no
+    # shutdown") could reintroduce a real bridging loop if a switch or hub
+    # really was plugged into what should be an access port — this is a
+    # judgment call that belongs to a human, not an automatic fix, same
+    # safety principle as this platform's deliberate exclusion of
+    # auto-enabled debug/packet-capture.
+    "ErrDisabled": FailureSignature(
+        protocol="stp", stuck_state="ErrDisabled",
+        likely_cause="Port was administratively disabled by BPDU Guard after receiving "
+                    "a BPDU on a PortFast-enabled edge port — almost always means "
+                    "either PortFast is misconfigured on a port that's actually "
+                    "connected to another switch/hub, or an unintended switch/hub "
+                    "was plugged into this access port",
+        evidence_fields=["portfast", "bpduguard"], confidence=0.8),
 }
 
 # Confidence grounded in real-world frequency (Cisco/Juniper docs, community
@@ -135,8 +163,70 @@ _LACP_SIGNATURES = {
         evidence_fields=["admin_state"], confidence=0.4),
 }
 
+# Init is generic (interface down/HSRP disabled/no IP — many possible
+# causes, same tier as OSPF's Down/BGP's Idle). Listen (never hearing a
+# hello from any Active/Standby peer) is the most commonly cited real
+# HSRP complaint — usually a VLAN/trunk misconfiguration or an ACL
+# blocking the HSRP multicast hello (UDP 1985 to 224.0.0.2). Speak (stuck
+# mid-election) is rarer/more ambiguous. Standby is normally healthy —
+# flagged only because "won't take over when Active fails" is real and
+# well-documented, and HSRP's preempt is OFF by default, so this is often
+# exactly what's missing.
+_HSRP_SIGNATURES = {
+    "Init": FailureSignature(
+        protocol="hsrp", stuck_state="Init",
+        likely_cause="HSRP not enabled on the interface, interface administratively "
+                    "down, or the interface has no usable IP address — the FSM "
+                    "never starts",
+        evidence_fields=["admin_state"], confidence=0.45),
+    "Listen": FailureSignature(
+        protocol="hsrp", stuck_state="Listen",
+        likely_cause="No HSRP hellos heard from any Active/Standby peer — commonly "
+                    "a VLAN or trunk native-VLAN misconfiguration, or an ACL "
+                    "blocking the HSRP multicast hello (UDP 1985 to 224.0.0.2) "
+                    "between the routers",
+        evidence_fields=["vlan", "acl"], confidence=0.65),
+    "Speak": FailureSignature(
+        protocol="hsrp", stuck_state="Speak",
+        likely_cause="Announcing itself as a candidate but the election with a "
+                    "peer isn't completing — most often a priority tie or an "
+                    "authentication-string mismatch between the HSRP group members",
+        evidence_fields=["priority", "auth"], confidence=0.55),
+    "Standby": FailureSignature(
+        protocol="hsrp", stuck_state="Standby",
+        likely_cause="Correctly Standby, but will NOT take over if the Active "
+                    "router fails, because 'standby preempt' is not configured — "
+                    "HSRP's preempt is OFF by default, so this is the single most "
+                    "commonly reported HSRP failover complaint",
+        evidence_fields=["preempt_configured"], confidence=0.7),
+}
+
+# Initialize mirrors OSPF's Down/BGP's Idle/HSRP's Init (generic, many
+# causes). Backup gets the SAME "won't fail over" treatment as HSRP's
+# Standby, but with a materially different story: VRRP enables preempt
+# BY DEFAULT, so a higher-priority router stuck in Backup while a
+# lower-priority peer keeps advertising almost always means preempt was
+# explicitly turned OFF ("no vrrp <group> preempt") — not merely "never
+# turned on" the way HSRP's equivalent gap works.
+_VRRP_SIGNATURES = {
+    "Initialize": FailureSignature(
+        protocol="vrrp", stuck_state="Initialize",
+        likely_cause="VRRP not enabled on the interface, interface administratively "
+                    "down, or the interface has no usable IP address — the FSM "
+                    "never starts",
+        evidence_fields=["admin_state"], confidence=0.45),
+    "Backup": FailureSignature(
+        protocol="vrrp", stuck_state="Backup",
+        likely_cause="This router has a higher configured priority but remains "
+                    "Backup behind a lower-priority Master — since VRRP enables "
+                    "preemption by default, this almost always means preemption "
+                    "was explicitly disabled ('no vrrp <group> preempt') on this "
+                    "router",
+        evidence_fields=["preempt_enabled", "priority"], confidence=0.7),
+}
+
 _SIGNATURE_LIBRARY = {"ospf": _OSPF_SIGNATURES, "stp": _STP_SIGNATURES, "bgp": _BGP_SIGNATURES,
-                      "lacp": _LACP_SIGNATURES}
+                      "lacp": _LACP_SIGNATURES, "hsrp": _HSRP_SIGNATURES, "vrrp": _VRRP_SIGNATURES}
 
 
 def compile_failure_signatures(protocol: str) -> List[FailureSignature]:
