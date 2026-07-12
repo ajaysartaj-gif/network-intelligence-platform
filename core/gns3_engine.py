@@ -65,7 +65,7 @@ class GNS3Engine:
             else:
                 logger.debug(f"GNS3 returned HTTP {r.status_code} — not connected")
         except Exception as e:
-            logger.info(f"GNS3 not reachable ({e}); running in simulation mode")
+            logger.info(f"GNS3 not reachable ({e}); topology features unavailable until it's reachable")
 
     # ── project loading ──────────────────────────────────────────────
 

@@ -1,13 +1,12 @@
 """
-Network Fixer — executes CLI remediation commands on network devices.
-Knows the right Netmiko commands for each anomaly type.
-Falls back to simulated execution when no live connection is available.
+Network Fixer — executes CLI remediation commands on real network devices.
+Knows the right Netmiko commands for each anomaly type. No live connection
+means no fix — this never fabricates a result.
 """
 from __future__ import annotations
 import logging
 import os
 import time
-import random
 import contextlib
 from typing import Dict, List, Any, Optional
 from datetime import datetime
@@ -36,6 +35,10 @@ class FixResult:
     commands_executed: List[str] = field(default_factory=list)
     outputs: List[str] = field(default_factory=list)
     verification_passed: bool = False
+    # Always False — kept only because callers (core.autonomous_monitor,
+    # app.py's UI) still read this field. No code path ever sets it True
+    # anymore: a fix that can't reach a real device fails with a clear
+    # error instead of fabricating a result.
     simulated: bool = False
     error: Optional[str] = None
     started_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
@@ -47,9 +50,9 @@ class FixResult:
 
 class NetworkFixer:
     """
-    Executes CLI fix commands on network devices via Netmiko.
-    Works with both live devices (SSH/telnet) and GNS3 console ports.
-    Falls back to simulated execution for demonstration when no device is reachable.
+    Executes CLI fix commands on real network devices via Netmiko — GNS3
+    console ports or direct SSH/telnet. No live connection means no fix;
+    this never fabricates a result to demonstrate one.
     """
 
     def __init__(self, gns3_engine=None):
@@ -247,54 +250,6 @@ class NetworkFixer:
 
         return result
 
-    # ── simulated execution ─────────────────────────────────────────────────
-
-    def _execute_simulated(
-        self,
-        commands: Dict[str, List[str]],
-        anomaly: Dict[str, Any],
-        result: FixResult,
-        log,
-    ) -> FixResult:
-        """Simulate command execution for demonstration when no live device is available."""
-        result.simulated = True
-        device = anomaly.get("device", "unknown")
-        anomaly_type = anomaly.get("type", "unknown")
-
-        log(f"[SIM] No live connection — running simulated remediation on {device}")
-        time.sleep(0.2)
-
-        sim_outputs = self._get_simulated_outputs(anomaly_type, device)
-
-        phase_labels = {
-            "diagnostic": "Diagnosing",
-            "fix": "Fixing",
-            "verify": "Verifying",
-        }
-
-        for phase, cmds in [("diagnostic", commands.get("diagnostic", [])),
-                             ("fix",        commands.get("fix",        [])),
-                             ("verify",     commands.get("verify",     []))]:
-            if not cmds:
-                continue
-            phase_label = phase_labels[phase]
-            for cmd in cmds:
-                cmd_rendered = self._interpolate(cmd, anomaly)
-                time.sleep(random.uniform(0.05, 0.2))
-                output = sim_outputs.get(phase, {}).get(
-                    cmd_rendered,
-                    f"% Simulated output for: {cmd_rendered}",
-                )
-                result.commands_executed.append(cmd_rendered)
-                result.outputs.append(output)
-                log(f"   {phase_label}: {cmd_rendered}")
-                log(f"      → {output[:100]}")
-
-        result.verification_passed = True
-        result.success = True
-        log(f"[SIM] Simulated remediation complete for {device} ({anomaly_type})")
-        return result
-
     # ── helpers ─────────────────────────────────────────────────────────────
 
     def _resolve_commands(self, anomaly_type: str, anomaly: Dict[str, Any]) -> Dict[str, List[str]]:
@@ -354,43 +309,6 @@ class NetworkFixer:
         )
         peer = anomaly.get("peer") or anomaly.get("peer_ip") or "*"
         return cmd.format(interface=interface, peer=peer)
-
-    def _get_simulated_outputs(self, anomaly_type: str, device: str) -> Dict[str, Dict[str, str]]:
-        return {
-            "diagnostic": {
-                "show interfaces status": (
-                    "Gi0/0  connected  1  a-full  a-1000  RJ45\n"
-                    "Gi0/1  notconnect 1  auto   auto   RJ45"
-                ),
-                "show ip bgp summary": (
-                    "Neighbor        V AS MsgRcvd MsgSent TblVer  InQ OutQ Up/Down  State/PfxRcd\n"
-                    "10.0.0.1        4 65000 1234  1234    1      0    0    00:20:32 Established 100"
-                ),
-                "show processes cpu sorted | head 10": (
-                    "CPU utilization for five seconds: 45%/2%; one minute: 43%"
-                ),
-            },
-            "fix": {
-                "no shutdown": "",
-                "clear ip bgp * soft": "",
-                "clear counters": "Clear \"show interface\" counters on all interfaces [confirm]",
-                "clear ip route *": "",
-            },
-            "verify": {
-                "show interfaces GigabitEthernet0/0 | include line protocol": (
-                    "GigabitEthernet0/0 is up, line protocol is up"
-                ),
-                "show ip bgp summary | include Established": (
-                    "10.0.0.1    4  65000  1234  1234  1  0  0  00:21:15  Established  100"
-                ),
-                "show processes cpu | include CPU utilization": (
-                    "CPU utilization for five seconds: 12%/1%; one minute: 18%"
-                ),
-                "show ip interface brief | include up": (
-                    "GigabitEthernet0/0  10.0.0.1  YES NVRAM  up  up"
-                ),
-            },
-        }
 
     def _record(self, result: FixResult) -> None:
         self.execution_log.insert(0, {

@@ -167,7 +167,7 @@ def _load_secrets_into_env() -> None:
         "GNS3_DEVICE_TYPE", "GNS3_SSH_USER", "GNS3_SSH_PASS", "GNS3_SSH_SECRET",
         "GNS3_TELNET_USER", "GNS3_ROUTER_USER", "GNS3_ROUTER_PASS",
         "GNS3_LOG_GITHUB_URL", "GNS3_LOG_DEFAULT_DEVICE", "GNS3_LOG_GITHUB_TOKEN",
-        "NETBRAIN_LIVE_ONLY", "GROQ_API_KEY",
+        "GROQ_API_KEY",
         # Operational Memory shared brain (Postgres/Supabase). When present,
         # all instances read/write ONE cloud brain in real time; absent, the
         # service falls back to a local SQLite file automatically.
@@ -924,7 +924,7 @@ with st.sidebar:
         "System</div>",
         unsafe_allow_html=True,
     )
-    mode      = "🟢 LIVE" if orchestrator.telemetry.live_mode else "🔵 SIM"
+    mode      = "🟢 LIVE" if orchestrator.telemetry.live_mode else "⚪ NO DEVICES"
     ai_status = "🟢 AI" if _resolve_api_key() else "🟡 AI"
     st.caption(f"{mode} | {ai_status}")
     poll_age = time.time() - st.session_state.get("last_poll_time", 0)
@@ -932,14 +932,10 @@ with st.sidebar:
 
     # ── Build / deploy diagnostic (confirms the running app has latest code) ──
     _dtype_now = os.environ.get("GNS3_DEVICE_TYPE", "(not set → SSH)")
-    try:
-        from core.autonomous_monitor import LIVE_ONLY as _LO
-    except Exception:
-        _LO = None
     _conn_method = "TELNET ✅" if str(_dtype_now).endswith("_telnet") else "SSH ⚠️"
     st.caption(f"🏷 Build: `{BUILD_VERSION}`")
     st.caption(f"🔧 Fix uses: **{_conn_method}** ({_dtype_now})")
-    st.caption(f"📡 Live-only: {'ON ✅' if _LO else 'OFF ⚠️'}")
+    st.caption("📡 Live-only: ON ✅ (real GNS3/equipment only — no simulation path exists)")
 
     # GNS3 / tunnel
     gns3_engine = getattr(orchestrator, "gns3", None)

@@ -20,10 +20,6 @@ from core.workflow_tracker import WorkflowTracker, WorkflowRun, StepStatus
 
 logger = logging.getLogger(__name__)
 
-# Live-only mode: show ONLY the real GNS3 network (devices + anomalies from the
-# log pipeline). Set NETBRAIN_LIVE_ONLY=0 to re-enable the built-in demo simulator.
-LIVE_ONLY = os.environ.get("NETBRAIN_LIVE_ONLY", "1").strip().lower() not in ("0", "false", "no")
-
 try:
     from netmiko import ConnectHandler, NetmikoTimeoutException, NetmikoAuthenticationException
     NETMIKO_AVAILABLE = True
@@ -115,47 +111,19 @@ class AutonomousMonitor:
                     logger.info(f"[MONITOR] Run {run_id} approved — starting Phase 2")
                     self._run_phase2(data["run"], data["anomaly"], data)
 
-            # ── 3. Telemetry + anomaly detection ─────────────────────────────
-            if LIVE_ONLY:
-                # Live network only: no simulated devices/anomalies. On the
-                # first cycle after a (re)start, purge any stale demo state.
-                if self.cycle_count == 1:
-                    self._purge_demo_state()
-                # Poll the GitHub log first (this discovers real routers), then
-                # register them so the dashboard shows the live topology.
-                anomalies = self._poll_github_logs()
-                self._register_live_devices()
-                telemetry = {"device_metrics": self.orchestrator.state.get_all_device_metrics()}
-            else:
-                # Legacy demo mode (set NETBRAIN_LIVE_ONLY=0 to enable).
-                self.orchestrator.simulator.step()
-                telemetry = self.orchestrator.telemetry.collect_all_telemetry()
-                anomalies = self.orchestrator.telemetry.detect_anomalies()
-
-            # ── 4. External log polling (merges unique anomalies) ────────────
-            existing_sigs = {
-                f"{a.get('device')}:{a.get('type')}" for a in anomalies
-            }
-
-            # 4a. GitHub log source (router → local → GitHub → here).
-            #     Primary source for cloud deployments.
-            if not LIVE_ONLY:
-                for ga in self._poll_github_logs():
-                    gsig = f"{ga.get('device')}:{ga.get('type')}"
-                    if gsig not in existing_sigs:
-                        anomalies.append(ga)
-                        existing_sigs.add(gsig)
-
-            # 4b. Direct GNS3 SSH syslog (only when NOT in live-only mode).
-            #     In live-only mode the GitHub log is the sole source, so we must
-            #     NOT open an SSH session every cycle — doing so spams the router
-            #     console with 'SSH-2.0-paramiko' and corrupts the Telnet console.
-            if not LIVE_ONLY:
-                for ga in self._poll_gns3_logs():
-                    gsig = f"{ga.get('device')}:{ga.get('type')}"
-                    if gsig not in existing_sigs:
-                        anomalies.append(ga)
-                        existing_sigs.add(gsig)
+            # ── 3. Telemetry + anomaly detection (real GNS3/log pipeline only) ──
+            # On the first cycle after a (re)start, purge any stale demo state
+            # left over from before simulation was removed.
+            if self.cycle_count == 1:
+                self._purge_demo_state()
+            # Poll the GitHub log first (this discovers real routers), then
+            # register them so the dashboard shows the live topology. Direct
+            # GNS3 SSH polling every cycle is deliberately not done here — it
+            # would spam the router console with 'SSH-2.0-paramiko' and
+            # corrupt the Telnet console; the GitHub log is the sole source.
+            anomalies = self._poll_github_logs()
+            self._register_live_devices()
+            telemetry = {"device_metrics": self.orchestrator.state.get_all_device_metrics()}
 
             # ── 5. Kick off Phase 1 for new high/critical anomalies ──────────
             workflows_started = []
