@@ -250,3 +250,89 @@ def test_versa_source_skips_already_downloaded_urls(tmp_path, monkeypatch):
     summary = v.run(str(tmp_path), limit=5)
     assert summary["skipped"] == 1
     assert summary["downloaded"] == 0
+
+
+# ── fortinet_source: mocked HTTP, no real network ───────────────────────
+def test_fortinet_source_downloads_and_classifies(tmp_path, monkeypatch):
+    from core.knowledge.doc_downloader import fortinet_source as f
+
+    seed = "https://docs.fortinet.com/product/fortigate/7.4.0"
+    doc_url = "https://docs.fortinet.com/document/fortigate/7.4.0/cli-reference"
+
+    monkeypatch.setattr(f, "_load_robots", lambda: object())
+    monkeypatch.setattr(f, "_crawl_delay_of", lambda rp, default=2.0: 0.0)
+    monkeypatch.setattr(f, "_can_fetch", lambda rp, url: True)
+    monkeypatch.setattr(f.time, "sleep", lambda s: None)
+    monkeypatch.setattr(f, "_discover_doc_links", lambda seed_url, session: [doc_url])
+    monkeypatch.setattr(f, "_discover_pdf_link", lambda url, session: (
+        "https://fortinetweb.s3.amazonaws.com/docs.fortinet.com/v2/attachments/x/FortiOS-7.4.0-CLI_Reference.pdf",
+        "CLI Reference"))
+
+    class FakeResp:
+        status_code = 200
+        content = b"%PDF-1.4 fake"
+    monkeypatch.setattr(f.requests, "Session", lambda: type(
+        "S", (), {"get": staticmethod(lambda *a, **k: FakeResp())})())
+
+    summary = f.run(str(tmp_path), limit=5, seed_pages=[seed])
+    assert summary["downloaded"] == 1
+    saved = list((tmp_path / "fortinet" / "command_reference").glob("*.pdf"))
+    assert len(saved) == 1
+
+
+def test_fortinet_source_does_not_collide_on_shared_title(tmp_path, monkeypatch):
+    """Same class of bug fixed in versa_source.py and
+    cisco_devnet_source.py: two different doc pages must not collide into
+    one file just because they render the same <title>."""
+    from core.knowledge.doc_downloader import fortinet_source as f
+
+    urls = [
+        "https://docs.fortinet.com/document/fortigate/7.4.0/administration-guide",
+        "https://docs.fortinet.com/document/fortimanager/7.4.0/administration-guide",
+    ]
+    monkeypatch.setattr(f, "_load_robots", lambda: object())
+    monkeypatch.setattr(f, "_crawl_delay_of", lambda rp, default=2.0: 0.0)
+    monkeypatch.setattr(f, "_can_fetch", lambda rp, url: True)
+    monkeypatch.setattr(f.time, "sleep", lambda s: None)
+    monkeypatch.setattr(f, "_discover_doc_links", lambda seed_url, session: urls)
+    monkeypatch.setattr(f, "_discover_pdf_link", lambda url, session: (
+        f"https://fortinetweb.s3.amazonaws.com/docs.fortinet.com/v2/attachments/{hash(url)}/Administration_Guide.pdf",
+        "Administration Guide"))   # SAME generic title for both
+
+    class FakeResp:
+        status_code = 200
+        content = b"%PDF-1.4 fake"
+    monkeypatch.setattr(f.requests, "Session", lambda: type(
+        "S", (), {"get": staticmethod(lambda *a, **k: FakeResp())})())
+
+    summary = f.run(str(tmp_path), limit=5, seed_pages=["https://docs.fortinet.com/product/fortigate/7.4.0"])
+    assert summary["downloaded"] == 2
+    saved = list((tmp_path / "fortinet" / "configuration").glob("*.pdf"))
+    assert len(saved) == 2, f"expected 2 distinct files, got {[p.name for p in saved]}"
+
+
+# ── rfc_source: mocked fetcher, no real network ─────────────────────────
+def test_rfc_source_downloads_and_dedups(tmp_path, monkeypatch):
+    from core.knowledge.doc_downloader import rfc_source as r
+
+    def fake_fetch(number):
+        return {"title": f"RFC {number} Fake Title", "content": f"body of rfc {number}"}
+    monkeypatch.setattr(r, "fetch_rfc_text", fake_fetch)
+
+    summary = r.run(str(tmp_path), rfc_numbers=[2328, 4271])
+    assert summary["downloaded"] == 2
+    assert (tmp_path / "rfc" / "rfc2328.txt").read_text() == "body of rfc 2328"
+    assert (tmp_path / "rfc" / "rfc4271.txt").read_text() == "body of rfc 4271"
+
+    summary2 = r.run(str(tmp_path), rfc_numbers=[2328, 4271])
+    assert summary2["skipped"] == 2
+    assert summary2["downloaded"] == 0
+
+
+def test_rfc_source_handles_fetch_failure_gracefully(tmp_path, monkeypatch):
+    from core.knowledge.doc_downloader import rfc_source as r
+
+    monkeypatch.setattr(r, "fetch_rfc_text", lambda number: None)
+    summary = r.run(str(tmp_path), rfc_numbers=[999999])
+    assert summary["downloaded"] == 0
+    assert len(summary["errors"]) == 1

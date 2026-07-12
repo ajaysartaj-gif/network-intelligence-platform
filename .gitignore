@@ -33,4 +33,6 @@ core/.env
 # NOT matched by these patterns.
 pdf_downloads/cisco/*/*.md
 pdf_downloads/versa/*/*.pdf
+pdf_downloads/fortinet/*/*.pdf
+pdf_downloads/rfc/*.txt
 pdf_downloads/.manifest.json

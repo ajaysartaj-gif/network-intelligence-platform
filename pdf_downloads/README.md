@@ -7,6 +7,8 @@ Real vendor documentation, organized `<vendor>/<doc_type>/`, populated by
 pdf_downloads/
   cisco/            configuration | troubleshooting | white_paper | data_sheet | command_reference
   versa/            configuration | troubleshooting | white_paper | data_sheet | command_reference
+  fortinet/         configuration | troubleshooting | white_paper | data_sheet | command_reference
+  rfc/              flat — RFCs are vendor-neutral protocol standards, not one OEM's doc type
 ```
 
 ## Run it
@@ -15,23 +17,41 @@ pdf_downloads/
 python3 -m core.knowledge.doc_downloader.run
 ```
 
-Options: `--versa-limit N` (default 20 — bounded on purpose, see below),
-`--skip-versa`, `--skip-cisco`, `--out <dir>`.
+Options: `--versa-limit N` / `--fortinet-limit N` (both default 20 —
+bounded on purpose, see below), `--skip-versa` / `--skip-cisco` /
+`--skip-fortinet` / `--skip-rfc`, `--out <dir>`.
 
-## Where each vendor's content actually comes from — and why
+## Where each source's content actually comes from — and why
 
-Before writing any code, the four sites given as samples were checked
-directly. Two returned **HTTP 403 on the very first request — including
-on their own `robots.txt`**:
+Every vendor here was evaluated the same way before any code was
+written: check `robots.txt`, check what an actual page returns, don't
+assume. Two of the four originally-given sample sites returned **HTTP 403
+on the very first request — including on their own `robots.txt`**:
 
 - `cisco.com`
 - `arubanetworking.hpe.com`
 
 That's their edge/WAF actively blocking non-browser automated access, on
-purpose. Making that work would mean deliberately defeating a vendor's own
-access control — fake browser fingerprints, stealth headless browsing,
-proxies. This project does not do that, regardless of technical
-feasibility.
+purpose. A later sweep of the remaining major OEMs found the same pattern
+in different forms:
+
+- `juniper.net`'s own `robots.txt` states outright: *"The use of robots or
+  other automated means to access the Juniper site... is strictly
+  prohibited"* — an explicit policy, honored regardless of the technical
+  rules below it.
+- `arista.com`'s `/robots.txt` returns its JS app shell, not a real robots
+  file — a CSP-locked SPA, not crawlable this way regardless of policy.
+- `paloaltonetworks.com` disallows its own real content paths; its
+  community site returns 403.
+- `support.checkpoint.com`'s `robots.txt` says `Allow: /` for everyone,
+  but its actual download endpoints return `x-amzn-waf-action: challenge`
+  — an active AWS WAF bot-challenge sitting underneath a permissive-looking
+  robots file.
+
+None of these are things this project works around — fake browser
+fingerprints, stealth headless browsing, proxies, WAF-challenge solving.
+That's deliberately defeating a vendor's own access control, not a coding
+problem to route past.
 
 **cisco/** — populated exclusively through Cisco's own free, official
 [DevNet Content Search MCP](https://devnet.cisco.com/v1/foundation-search-mcp/mcp)
@@ -50,10 +70,27 @@ visitor, not a reconstructed or hidden URL. The crawler parses and honors
 `robots.txt` itself (not assumed), sleeps the declared crawl-delay between
 every request, and only ever visits URLs the sitemap itself lists.
 
-**Aruba and every other vendor**: deliberately not included yet. No
-similar official, scraping-free channel has been identified for them. Add
-one the same way — a `<vendor>_source.py` with a `run(out_root) -> dict`
-function — only once a legitimate access path exists.
+**fortinet/** — `docs.fortinet.com`'s own `robots.txt` has no blanket
+disallow for unnamed agents (`Crawl-delay: 2`, a handful of specific
+archived-product exclusions). Real PDFs, confirmed directly in page HTML
+as S3-hosted "Download PDF" links
+(`fortinetweb.s3.amazonaws.com/docs.fortinet.com/v2/attachments/.../*.pdf`).
+No sitemap exists for this subdomain, so this source seeds from each
+product's own listing page (e.g. `/product/fortigate/7.4.0`) rather than
+enumerating the entire catalogue.
+
+**rfc/** — `rfc-editor.org` is IETF's public archive; no evaluation
+needed the way the vendor sites required. Reuses the already-existing
+`core.knowledge.fetchers.rfc_fetcher.fetch_rfc_text()`. Curated for this
+tool's actual protocol coverage (OSPF, BGP, VRRP, and the foundational
+specs those depend on) rather than attempting to mirror the whole RFC
+series. Flat, not vendor-nested — an RFC is a protocol standard, not one
+OEM's document.
+
+**Aruba, Juniper, Arista, Palo Alto, Check Point**: deliberately not
+included. No legitimate, scraping-free channel has been found for any of
+them yet. Add one the same way — a `<vendor>_source.py` with a
+`run(out_root) -> dict` function — only once one exists.
 
 ## Idempotency
 

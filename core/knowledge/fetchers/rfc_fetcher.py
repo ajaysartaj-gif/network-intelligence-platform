@@ -22,7 +22,14 @@ logger = logging.getLogger("NetBrain.Knowledge.RFCFetcher")
 
 TRUSTED_DOMAIN = "rfc-editor.org"
 HTTP_TIMEOUT = 10
-MAX_PAGE_SIZE = 500_000
+# Real bug caught while building core/knowledge/doc_downloader/rfc_source.py:
+# RFC 2328 (OSPF v2 — the single most relevant spec for this tool's own
+# protocol coverage) is 524,985 bytes, just over the previous 500,000-byte
+# cap, so it silently failed here every time despite fetching fine at the
+# HTTP level. 2MB comfortably covers real, legitimate RFC sizes (checked
+# directly: OSPFv3/BGP-4/IPv6-ND are all under 250KB; 2328 is the outlier)
+# while still guarding against something pathological.
+MAX_PAGE_SIZE = 2_000_000
 USER_AGENT = "NetBrain-AI/1.0 (network-intelligence-platform)"
 
 
