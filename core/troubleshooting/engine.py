@@ -36,7 +36,7 @@ from .models import (
     Effect, Evidence, Fix, Goal, HypothesisState, Observation, ResolutionStatus,
     Session, TroubleshootReport, VerificationPlan,
 )
-from .reasoning import Reasoner
+from .reasoning import Reasoner, safe_ai_call
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +76,12 @@ class TroubleshootingEngine:
         session_store: Optional[object] = None,
         gateway: Optional[object] = None,
     ) -> None:
-        self.ai = ai_call
+        # safe_ai_call filters out the raw ai_call's "AI Error: ..." string
+        # (returned deliberately by app.py's plain-chat mode so a human sees
+        # it inline) so a transient API failure is never mistaken for a real
+        # answer by structured consumers of self.ai — e.g. run_mismatch_
+        # investigation's ai_call=self.ai below.
+        self.ai = safe_ai_call(ai_call)
         self.devices = devices or []
         self.cfg = config or TSConfig()
         # Optional Universal Vendor Adapter Framework gateway. When present, the

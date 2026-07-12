@@ -12,8 +12,11 @@ engine fills from the platform's RAG / CommandResolver).
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any, Callable, Dict, List
+
+logger = logging.getLogger(__name__)
 
 AiCall = Callable[[str], str]
 
@@ -61,9 +64,32 @@ def _as_list(x: Any) -> List[dict]:
     return []
 
 
+def safe_ai_call(ai_call: AiCall) -> AiCall:
+    """Wraps a raw ai_call so a transport-level failure never gets mistaken
+    for a real answer. Some raw ai_call implementations (e.g. app.py's plain
+    chat mode) deliberately return f"AI Error: {err}" as a visible string so
+    a human sees it inline in chat — correct there, but every structured
+    caller in this module (and core.troubleshooting.engine) does
+    `ai(prompt) or <fallback>`, expecting empty-string-on-failure. Without
+    this, a transient API outage silently became a fabricated Goal
+    objective / hypothesis list / fix (whatever that error string happened
+    to overwrite), indistinguishable from a real AI response — the exact
+    "why does this look broken" class of bug this tool exists to avoid."""
+    def _wrapped(prompt: str) -> str:
+        try:
+            resp = ai_call(prompt)
+        except Exception:
+            return ""
+        if isinstance(resp, str) and resp.startswith("AI Error:"):
+            logger.warning("AI call failed (%s); treating as no response.", resp)
+            return ""
+        return resp
+    return _wrapped
+
+
 class Reasoner:
     def __init__(self, ai_call: AiCall) -> None:
-        self.ai = ai_call
+        self.ai = safe_ai_call(ai_call)
 
     # 1. Hypothesis Manager — generate candidate root causes
     def generate_hypotheses(self, objective: str, grounding: str,

@@ -265,6 +265,49 @@ def test_session_close_sets_terminal_resolution_status():
     print("[6c] Session.close() sets the terminal status: PASS")
 
 
+def test_ai_error_string_never_leaks_into_goal_objective_or_hypotheses():
+    """Regression: app.py's plain-chat ai_call deliberately returns
+    f"AI Error: {err}" as a visible string (so a human sees it inline in
+    chat) rather than raising. Every reasoning.py call site does
+    `self.ai(prompt) or <fallback>`, which treats ANY non-empty string as
+    a real answer — so a transient API outage was silently overwriting
+    session.goal.objective with the literal text "AI Error: Connection
+    error." instead of falling back to the raw query, making a live
+    outage indistinguishable from a real (garbage) AI response in the
+    user-facing report."""
+    from core.troubleshooting.reasoning import Reasoner
+
+    def failing_ai(_prompt: str) -> str:
+        return "AI Error: Connection error."
+
+    r = Reasoner(failing_ai)
+    assert r.ai("anything") == ""
+    # phrase_objective's own fallback (`self.ai(prompt) or query`) must
+    # therefore fall through to the real query, never the error string.
+    objective = r.phrase_objective("why is ospf down")
+    assert objective == "why is ospf down"
+    assert "AI Error" not in objective
+
+
+def test_ai_error_string_does_not_break_full_engine_run():
+    collector = lambda dev, cmds: {cmds[0]: "GigabitEthernet0/0 is up, line protocol is up"}
+    eng = TroubleshootingEngine(
+        ai_call=lambda _p: "AI Error: Connection error.",
+        devices=DEVICES,
+        collector=collector,
+        validator=lambda c: c.lower().strip().startswith("show"),
+        grounder=lambda q, d: "",
+        fix_validator=lambda cmds, ad, dr: "✅ 1 ok · 0 blocked",
+        config=TSConfig(max_steps=3, patience=2),
+    )
+    s = eng.run("why is ospf down").session
+    assert "AI Error" not in (s.goal.objective or "")
+    assert s.goal.query == "why is ospf down"
+    for h in s.hypotheses:
+        assert "AI Error" not in h.statement
+    print("[7] AI-error string never leaks into goal/hypotheses: PASS")
+
+
 def test_memory_dedup_unit():
     m = ExecutedCommandsMemory()
     m.record("10.0.0.1", "show ip ospf neighbor", "out", "p")
