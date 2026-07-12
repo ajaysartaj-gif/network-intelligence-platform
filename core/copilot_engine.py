@@ -334,9 +334,25 @@ def _make_troubleshooting_gateway(call_ai_fn, devices: List[Any]):
     def send(device, cmds):
         try:
             dr = ie._ssh_collect(device, list(cmds))
-            return dict(dr.outputs)
         except Exception as exc:
-            return {c: f"ERROR: {exc}" for c in cmds}
+            return {c: f"error[transport]: {exc}" for c in cmds}
+        if not dr.connected:
+            # _ssh_collect() never raises on a connection failure (bad
+            # host/port/credentials, GNS3 tunnel down, timeout — anything)
+            # — it swallows the exception into dr.error and returns
+            # normally with dr.outputs == {}. Silently returning {} here
+            # made every command look like it ran and simply found nothing,
+            # indistinguishable from a real device reporting no state —
+            # the exact "no observations collected, no explanation why"
+            # symptom this was causing. Log it clearly and tag the output
+            # with the SAME "error[...]:" prefix core.troubleshooting.
+            # engine._ingest_output() already recognizes as "not evidence"
+            # (see its `output.startswith("error[")` check), so a
+            # connection failure is skipped cleanly everywhere instead of
+            # being fed to the parser/LLM as if it were real CLI output.
+            logger.warning("SSH connection to %s failed: %s", device.ip, dr.error)
+            return {c: f"error[transport]: connection failed to {device.ip} - {dr.error}" for c in cmds}
+        return dict(dr.outputs)
 
     def hint_provider(device):
         hints = {}

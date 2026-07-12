@@ -33,8 +33,10 @@ class FakeDevice:
 
 
 class FakeDR:
-    def __init__(self, outputs):
+    def __init__(self, outputs, connected=True, error=None):
         self.outputs = outputs
+        self.connected = connected
+        self.error = error
 
 
 class FakeIntentEngine:
@@ -273,6 +275,51 @@ def _real_supply_chain(tmp_path):
         memory=OperationalMemory(db_path=str(tmp_path / "memory.sqlite"), dsn=""),
         learning_engine=_StubLearningEngine(),
     )
+
+
+def test_troubleshooting_gateway_send_surfaces_connection_failure(monkeypatch):
+    """Regression: _ssh_collect() never raises on a connection failure (bad
+    host/port/credentials, GNS3 tunnel down, timeout) — it swallows the
+    exception into DeviceResult.error and returns normally with
+    outputs == {}. _make_troubleshooting_gateway's send() used to just
+    `return dict(dr.outputs)` unconditionally, silently turning a real
+    connection failure into an empty dict indistinguishable from "the
+    device has nothing to report" — the exact "no observations collected,
+    no explanation why" symptom a live user hit repeatedly. send() must
+    now detect dr.connected is False and surface the real error instead."""
+    class FakeIE:
+        def _ssh_collect(self, device, cmds):
+            return FakeDR({}, connected=False, error="TimeoutError: connect timed out")
+
+    monkeypatch.setattr(copilot_engine, "_build_intent_engine", lambda call_ai_fn, devices: FakeIE())
+    dev = FakeDevice("192.168.96.136", "R1")
+    gw = copilot_engine._make_troubleshooting_gateway(None, [dev])
+
+    out = gw._transport.send(dev, ["show ip ospf neighbor"])
+
+    assert out, "must not silently return an empty dict on connection failure"
+    text = out["show ip ospf neighbor"]
+    # "error[...]:" prefix is the same convention
+    # core.troubleshooting.engine._ingest_output() already recognizes as
+    # "not evidence" — confirms this never gets fed to the parser/LLM as
+    # if it were real CLI output.
+    assert text.startswith("error["), text
+    assert "connection failed" in text.lower()
+    assert "192.168.96.136" in text
+    assert "TimeoutError" in text
+
+
+def test_troubleshooting_gateway_send_passes_through_real_output_when_connected(monkeypatch):
+    class FakeIE:
+        def _ssh_collect(self, device, cmds):
+            return FakeDR({c: f"real output for {c}" for c in cmds}, connected=True)
+
+    monkeypatch.setattr(copilot_engine, "_build_intent_engine", lambda call_ai_fn, devices: FakeIE())
+    dev = FakeDevice("192.168.96.136", "R1")
+    gw = copilot_engine._make_troubleshooting_gateway(None, [dev])
+
+    out = gw._transport.send(dev, ["show ip ospf neighbor"])
+    assert out == {"show ip ospf neighbor": "real output for show ip ospf neighbor"}
 
 
 def test_record_ts_outcome_success_writes_real_resolution(tmp_path, monkeypatch):

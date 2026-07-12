@@ -242,7 +242,7 @@ class TroubleshootReport:
             "current_state": s.status.value,
             "active_hypotheses": [
                 {"statement": h.statement, "confidence": h.confidence,
-                 "evidence_count": len(h.evidence_ids)}
+                 "evidence_count": len(h.evidence_ids), "rationale": h.rationale}
                 for h in s.ranked()
             ],
             "evidence_summary": [
@@ -290,6 +290,8 @@ class TroubleshootReport:
                 bar = "🟩" if h.confidence >= 0.8 else "🟨" if h.confidence >= 0.4 else "🟥"
                 lines.append(f"- {bar} **{h.confidence:.0%}** — {h.statement} "
                              f"_(evidence: {len(h.evidence_ids)})_")
+                if h.rationale:
+                    lines.append(f"  - _why: {h.rationale}_")
         else:
             lines.append("- _none active_")
 

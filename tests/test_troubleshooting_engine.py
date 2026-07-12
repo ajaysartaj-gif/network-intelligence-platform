@@ -153,6 +153,29 @@ def test_report_has_all_expected_fields():
     print("[4] structured report complete: PASS")
 
 
+def test_hypothesis_rationale_is_surfaced_in_report():
+    """Regression: Hypothesis.rationale was always computed/stored (set
+    on creation from either the LLM's own rationale or a compiled
+    signature's likely_cause) but never rendered anywhere in the report —
+    a real, narrow gap distinct from the "why does this look broken"
+    symptom caused by starved evidence (a separate, already-fixed bug).
+    Both to_markdown() and to_dict() must expose it."""
+    eng = build_engine(make_ai(mode="neutral"), cfg=TSConfig(max_steps=5, patience=2))
+    report = eng.run("ospf issue")
+    s = report.session
+    assert s.hypotheses and any(h.rationale for h in s.hypotheses)
+
+    md = report.to_markdown()
+    top = s.top()
+    assert top and top.rationale
+    assert top.rationale in md, "top hypothesis's rationale must appear in the markdown report"
+
+    d = report.to_dict()
+    assert d["active_hypotheses"], d
+    assert all("rationale" in h for h in d["active_hypotheses"])
+    print("[5c] hypothesis rationale surfaced in report: PASS")
+
+
 def test_escalates_instead_of_guessing():
     # Neither the LLM (mode="silent" → no facts, no impacts) NOR
     # deterministic extraction (no IP+state pattern in this output, so
