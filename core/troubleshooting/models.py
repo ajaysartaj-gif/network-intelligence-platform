@@ -199,6 +199,13 @@ class Session:
     # "compiled failure signature: ospf/ExStart", "compiled remediation
     # template") — distinct from a bare LLM guess, for explainability.
     knowledge_sources: List[str] = field(default_factory=list)
+    # One short, multi-source-cited answer (Reasoner.synthesize_answer()) —
+    # the search-engine-AI-overview-style synthesis of whatever real RAG/
+    # vendor-doc/MCP material was actually retrieved this session. Empty
+    # when nothing real was retrieved — never fabricated. Purely
+    # presentational: doesn't feed ConfidenceCalculator or hypothesis
+    # ranking, same boundary as knowledge_sources itself.
+    synthesized_answer: str = ""
 
     def active_hypotheses(self) -> List[Hypothesis]:
         return [h for h in self.hypotheses if h.state == HypothesisState.ACTIVE]
@@ -254,6 +261,7 @@ class TroubleshootReport:
             "final_resolution_status": s.status.value,
             "risk": s.risk,
             "knowledge_sources": list(s.knowledge_sources),
+            "synthesized_answer": s.synthesized_answer,
         }
 
     def to_markdown(self) -> str:
@@ -262,6 +270,10 @@ class TroubleshootReport:
         lines: List[str] = []
         lines.append(f"### 🎯 Goal\n{s.goal.objective or s.goal.query if s.goal else ''}")
         lines.append(f"\n**Current state:** `{s.status.value}`  ·  **Steps:** {s.steps_taken}")
+
+        if s.synthesized_answer:
+            lines.append("\n### 🔎 Synthesized Answer")
+            lines.append(s.synthesized_answer)
 
         lines.append("\n### 🧪 Active Hypotheses")
         if s.ranked():

@@ -112,6 +112,28 @@ legitimate, scraping-free channel has been found for any of them yet
 Add one the same way — a `<vendor>_source.py` with a
 `run(out_root) -> dict` function — only once one exists.
 
+## This corpus actually gets used, not just downloaded
+
+Downloading real documents was only half the job. `core.knowledge.
+enterprise.pipelines.ensure_pdf_downloads_ingested()` (wired into
+`IntentEngine._rag_context_for()`, called on every troubleshooting
+request) ingests this whole tree into the SAME RAG store live sessions
+query — before that bridge existed, this was real content sitting on
+disk with nothing reading it, the exact gap `corpus/general/*.txt` had
+before `ensure_general_corpus_ingested()`. Files over
+`core.knowledge.parsers.MAX_FILE_SIZE_BYTES` (15MB — e.g. Fortinet's
+3,468-page consolidated FortiOS guide) are skipped rather than parsed,
+logged clearly, never silently hung on.
+
+What a live session does with it once retrieved: `core.troubleshooting.
+reasoning.Reasoner.synthesize_answer()` turns multiple real retrieved
+hits into one short, inline-cited answer — the same shape as a search
+engine's own AI-overview answer (one synthesized paragraph citing
+"Cisco Systems +2", not a bare source list) — surfaced as a
+"🔎 Synthesized Answer" section in the troubleshooting report,
+`session.synthesized_answer`. Never fabricated: empty when nothing real
+was actually retrieved that session.
+
 ## Idempotency
 
 `.manifest.json` (gitignored, regenerates on first run) tracks every

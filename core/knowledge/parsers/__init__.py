@@ -27,6 +27,18 @@ from core.knowledge.parsers import (
 
 logger = logging.getLogger("NetBrain.Knowledge.Parsers")
 
+# Real bug caught ingesting core/knowledge/doc_downloader's pdf_downloads/
+# corpus: docs.fortinet.com's "Getting started" page links to Fortinet's
+# entire consolidated FortiOS documentation set as ONE PDF — 3,468 pages,
+# 133MB. pdf_parser.extract() iterates every page unconditionally with no
+# limit, so ingesting it alone took several minutes and blocked the whole
+# batch behind it. 15MB comfortably covers a real single guide/whitepaper/
+# datasheet (the entire corpus ingested here is under 200KB per file
+# except this one outlier); a mega-manual bundling an entire product's
+# docs into a single file is also a poor RAG-chunking candidate on its own
+# merits (no per-topic locality), not just a performance risk.
+MAX_FILE_SIZE_BYTES = 15_000_000
+
 _EXT_MAP: Dict[str, Callable[[str], Optional[str]]] = {
     ".pdf":  pdf_parser.extract,
     ".docx": docx_parser.extract,
@@ -56,6 +68,14 @@ def extract_text(path: str) -> Optional[str]:
     fn = _EXT_MAP.get(ext)
     if fn is None:
         return None
+    try:
+        size = os.path.getsize(path)
+        if size > MAX_FILE_SIZE_BYTES:
+            logger.warning(f"Skipping {path}: {size} bytes exceeds MAX_FILE_SIZE_BYTES "
+                           f"({MAX_FILE_SIZE_BYTES}) — too large to parse as one document")
+            return None
+    except OSError:
+        pass
     try:
         return fn(path)
     except ImportError as exc:

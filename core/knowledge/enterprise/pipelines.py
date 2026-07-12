@@ -147,6 +147,72 @@ def ensure_general_corpus_ingested(layer: Optional[EnterpriseKnowledgeLayer] = N
                             tags=["general-corpus"], layer=layer, recursive=False)
 
 
+# Doc-type folder name -> SourceType, mirroring core.knowledge.doc_downloader.
+# classify.DOC_TYPES. Kept here rather than imported to avoid this leaf
+# module depending on doc_downloader (which itself doesn't touch the RAG
+# layer at all — the two packages are deliberately independent; this is
+# the one bridge between them).
+_PDF_DOWNLOADS_SOURCE_TYPE = {
+    "white_paper": SourceType.WHITEPAPER,
+    "configuration": SourceType.VENDOR_DOCS,
+    "troubleshooting": SourceType.VENDOR_DOCS,
+    "data_sheet": SourceType.VENDOR_DOCS,
+    "command_reference": SourceType.VENDOR_DOCS,
+}
+
+
+def ensure_pdf_downloads_ingested(layer: Optional[EnterpriseKnowledgeLayer] = None) -> Dict[str, Any]:
+    """Idempotently ingests pdf_downloads/ (core.knowledge.doc_downloader's
+    real, live-verified Cisco/Versa/Fortinet/Palo Alto/RFC corpus — 77
+    documents at the time this was wired in) into the SAME
+    EnterpriseKnowledgeLayer core.knowledge.orchestrator.rag_query() reads
+    from at query time.
+
+    Exactly the same gap ensure_general_corpus_ingested() closed for
+    corpus/general/*.txt: before this function existed, pdf_downloads/ was
+    real content sitting on disk with nothing ever ingesting it into the
+    store a live troubleshooting session actually queries — grep confirms
+    zero references to "pdf_downloads" anywhere outside
+    core/knowledge/doc_downloader/ itself. Downloading real vendor
+    documents is only half the job; this is the other half.
+
+    Ingests per <vendor>/<doc_type>/ subfolder (not the whole tree in one
+    call) so each folder gets the SourceType its content actually is
+    (white_paper/ -> WHITEPAPER, everything else -> VENDOR_DOCS, rfc/ ->
+    RFC) and the correct `vendor` tag — ingest_directory() only accepts one
+    SourceType/vendor per call. Safe to call on every request: same
+    content-hash dedup contract as ensure_general_corpus_ingested() and
+    core.troubleshooting.strategies.live_retriever.ensure_corpus_ingested()."""
+    layer = layer or get_knowledge_layer()
+    root = os.path.join(_REPO_ROOT, "pdf_downloads")
+    summary = {"ingested": 0, "skipped": 0, "errors": []}
+    if not os.path.isdir(root):
+        return summary
+
+    for vendor in sorted(os.listdir(root)):
+        vendor_dir = os.path.join(root, vendor)
+        if not os.path.isdir(vendor_dir):
+            continue
+        if vendor == "rfc":
+            r = ingest_directory(vendor_dir, SourceType.RFC,
+                                 tags=["pdf_downloads", "rfc"], layer=layer, recursive=False)
+            summary["ingested"] += r["ingested"]
+            summary["skipped"] += r["skipped"]
+            summary["errors"].extend(r["errors"])
+            continue
+        for doc_type, source_type in _PDF_DOWNLOADS_SOURCE_TYPE.items():
+            doc_type_dir = os.path.join(vendor_dir, doc_type)
+            if not os.path.isdir(doc_type_dir):
+                continue
+            r = ingest_directory(doc_type_dir, source_type, vendor=vendor,
+                                 tags=["pdf_downloads", vendor, doc_type],
+                                 layer=layer, recursive=False)
+            summary["ingested"] += r["ingested"]
+            summary["skipped"] += r["skipped"]
+            summary["errors"].extend(r["errors"])
+    return summary
+
+
 def ingest_rfc(
     number: int,
     layer: Optional[EnterpriseKnowledgeLayer] = None,

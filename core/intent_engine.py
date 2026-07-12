@@ -1074,6 +1074,23 @@ class IntentEngine:
         except Exception as exc:
             logger.debug(f"General corpus ingestion skipped: {exc}")
 
+    def _ensure_pdf_downloads_ingested(self) -> None:
+        """Best-effort, safe to call on every request — pdf_downloads/
+        (core.knowledge.doc_downloader's real, live-verified Cisco/Versa/
+        Fortinet/Palo Alto/RFC corpus) sat on disk unused in production
+        before this call existed: a grep for "pdf_downloads" outside
+        core/knowledge/doc_downloader/ itself returned nothing. Downloading
+        real vendor documents was only half the job — same class of gap
+        _ensure_general_corpus_ingested() closed for corpus/general/*.txt,
+        same fix. See pipelines.ensure_pdf_downloads_ingested()'s own
+        docstring for the per-vendor/doc-type SourceType mapping and the
+        dedup contract that makes calling this every time cheap."""
+        try:
+            from core.knowledge.enterprise.pipelines import ensure_pdf_downloads_ingested
+            ensure_pdf_downloads_ingested()
+        except Exception as exc:
+            logger.debug(f"pdf_downloads ingestion skipped: {exc}")
+
     def _rag_context_for(self, query: str) -> str:
         """Pull grounding context from the RAG knowledge base (runbooks/incidents)
         so generation is informed by curated knowledge, not just the LLM's priors."""
@@ -1081,11 +1098,21 @@ class IntentEngine:
             return ""
         try:
             self._ensure_general_corpus_ingested()
-            hits = get_orchestrator().rag_query(query, top_k=3)
+            self._ensure_pdf_downloads_ingested()
+            # top_k raised from 3 -> 5: pdf_downloads/ now backs this with a
+            # real, multi-vendor corpus (Cisco/Versa/Fortinet/Palo Alto/RFC),
+            # so a narrow top_k that made sense for a handful of local
+            # runbooks under-uses that breadth — matches the "synthesize
+            # from multiple real sources" gap identified directly from a
+            # user's own Google AI Overview screenshot (see
+            # Reasoner.synthesize_answer()'s own docstring).
+            hits = get_orchestrator().rag_query(query, top_k=5)
             if not hits:
                 return ""
             for h in hits:
                 self._last_grounding_citations.append(f"RAG corpus: {h.source} — {h.title}")
+                self._last_grounding_materials.append(
+                    {"source": f"RAG: {h.source}", "title": h.title, "text": h.text})
             blocks = [f"[{h.source} · {h.title}]\n{h.text[:500]}" for h in hits]
             return "RELEVANT KNOWLEDGE (from your runbooks/past incidents):\n" + "\n---\n".join(blocks)
         except Exception as exc:
@@ -1131,6 +1158,8 @@ class IntentEngine:
                     )
                     self._last_grounding_citations.append(
                         f"vendor doc/MCP ({vendor}, confidence={entry.citation.confidence.value}): {title}")
+                    self._last_grounding_materials.append(
+                        {"source": f"{vendor.upper()} doc/MCP", "title": title, "text": snippet})
             except Exception as exc:
                 logger.debug(f"Vendor doc/MCP context lookup failed for {vendor}: {exc}")
 
@@ -1146,8 +1175,15 @@ class IntentEngine:
         them into the final report's "Knowledge Sources Consulted" section.
         Before this existed, grounding could genuinely execute (real RAG
         hits, real Cisco DevNet MCP calls) with zero visible trace in the
-        report of what was actually consulted."""
+        report of what was actually consulted.
+
+        Also populates self._last_grounding_materials (reset fresh here too)
+        — the actual retrieved {source, title, text} per hit, not just the
+        citation label — so a caller can feed real material into
+        Reasoner.synthesize_answer() for a genuine multi-source synthesized
+        answer, not just a trailing source list."""
         self._last_grounding_citations: List[str] = []
+        self._last_grounding_materials: List[Dict[str, str]] = []
         parts: List[str] = []
         rag = self._rag_context_for(query)
         if rag:

@@ -243,3 +243,43 @@ class Reasoner:
             "sentence (no preamble):\n\n" + query
         )
         return (self.ai(prompt) or query).strip().split("\n")[0][:200]
+
+    def synthesize_answer(self, query: str, materials: List[Dict[str, str]]) -> str:
+        """Synthesizes ONE short, coherent answer from the real material
+        actually retrieved this session (RAG hits + vendor doc/MCP
+        lookups) -- each claim attributed inline to which source backed
+        it. Same shape as a search engine's own AI-overview answer (one
+        synthesized paragraph citing "Vendor Docs +2", not a bare
+        source list) -- the gap identified directly from a user's own
+        Google AI Overview screenshot: multiple real sources synthesized
+        into one cited answer, which this tool's grounding could already
+        retrieve but never presented this way.
+
+        Deliberately never invents a source: if `materials` is empty
+        (nothing was actually retrieved this session), the caller should
+        skip calling this at all -- there is nothing real to synthesize,
+        and fabricating one would violate the same "never let something
+        ungrounded look like a grounded conclusion" discipline the whole
+        grounding/citation system already follows. Kept as a defensive
+        check here too, not just at the call site."""
+        if not materials:
+            return ""
+        numbered = "\n\n".join(
+            f"[{i + 1}] Source: {m.get('source', '?')} — {m.get('title', '?')}\n{m.get('text', '')[:600]}"
+            for i, m in enumerate(materials)
+        )
+        prompt = (
+            "You are synthesizing ONE short, coherent answer from the numbered "
+            "sources below, the way a search engine's AI overview does -- 2-4 "
+            "sentences of plain prose, citing the source number inline in "
+            "square brackets right after each claim it backs (e.g. \"NAT "
+            "translates private addresses to public ones [1].\"). Only state "
+            "what the sources actually say — never invent a source number "
+            "that isn't listed, and never add a claim no source supports. If "
+            "the sources disagree or don't cover the question, say so "
+            "plainly instead of guessing.\n\n"
+            f"QUESTION: {query}\n\nSOURCES:\n{numbered}\n\n"
+            "Return the synthesized answer only — no preamble, no JSON, no "
+            "restating the question."
+        )
+        return (self.ai(prompt) or "").strip()

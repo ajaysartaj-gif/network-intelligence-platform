@@ -139,6 +139,12 @@ class TroubleshootingEngine:
     # ── main entry ──────────────────────────────────────────────────────────────
     def run(self, query: str) -> TroubleshootReport:
         session = Session()
+        # Accumulates real {source, title, text} retrieved across BOTH
+        # _grounder(...) calls this run() makes (here, and again before fix
+        # generation) — used once at the end (_finish()) to synthesize one
+        # multi-source-cited answer. Kept off the persisted Session model
+        # itself since it's raw retrieved text, not a durable session fact.
+        self._grounding_materials: List[Dict[str, str]] = []
         device_ips = [ip for ip in self._ip_to_dev.keys() if ip]
         grounding = self._grounder(query, self.devices)
         self._record_grounding_citations(session)
@@ -932,9 +938,21 @@ class TroubleshootingEngine:
         effort heuristic (see core.knowledge.mcp.devnet_content_source's own
         confidence scoring), not verified ground truth, so it stays
         informational context a human can weigh, never a silent input to
-        the audited confidence math."""
+        the audited confidence math.
+
+        Also accumulates IntentEngine._last_grounding_materials (the real
+        {source, title, text} behind each citation, not just its label)
+        into self._grounding_materials, deduped by (source, title) so the
+        two _grounder(...) calls run() makes don't feed the same hit into
+        synthesize_answer() twice — see _finish()'s own use of this."""
         for source in getattr(self._intent, "_last_grounding_citations", None) or []:
             self._note_knowledge_source(session, source)
+        seen = {(m["source"], m["title"]) for m in self._grounding_materials}
+        for m in getattr(self._intent, "_last_grounding_materials", None) or []:
+            key = (m.get("source", ""), m.get("title", ""))
+            if key not in seen:
+                seen.add(key)
+                self._grounding_materials.append(m)
 
     def _persist(self, session: Session) -> None:
         try:
@@ -1031,8 +1049,38 @@ class TroubleshootingEngine:
         self._note_knowledge_source(session, f"compiled verification template: {protocol}")
         return {"commands": commands, "success_criteria": tmpl.success_criteria}
 
+    def _synthesize_answer(self, session: Session) -> None:
+        """Populates session.synthesized_answer — one short, multi-source-
+        cited answer from whatever real RAG/vendor-doc/MCP material
+        _grounder(...) actually retrieved this run (accumulated in
+        self._grounding_materials by _record_grounding_citations()).
+
+        Directly answers a gap identified from a user's own Google AI
+        Overview screenshot: that overview synthesizes ONE cited answer
+        from multiple real sources (e.g. "Vendor Docs +2") rather than
+        listing them separately. This tool already retrieved multiple
+        real sources and cited them (session.knowledge_sources) but never
+        synthesized them into a single coherent, attributed answer the
+        way a search engine's own overview does — this closes that gap.
+
+        A no-op (empty string, nothing set) when nothing real was
+        retrieved this session — matches Reasoner.synthesize_answer()'s
+        own refusal to synthesize from zero sources. Purely presentational:
+        does not feed ConfidenceCalculator or hypothesis ranking, same
+        boundary _record_grounding_citations() already documents for
+        session.knowledge_sources itself."""
+        materials = getattr(self, "_grounding_materials", None) or []
+        if not materials:
+            return
+        try:
+            query = session.goal.query if session.goal else ""
+            session.synthesized_answer = self.reasoner.synthesize_answer(query, materials)
+        except Exception as exc:
+            logger.debug("Answer synthesis skipped: %s", exc)
+
     def _finish(self, session: Session, ranker: RootCauseRanker) -> TroubleshootReport:
         top = session.top()
+        self._synthesize_answer(session)
 
         if top:
             try:
