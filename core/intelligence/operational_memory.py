@@ -157,10 +157,22 @@ class OperationalMemory:
     """
 
     def __init__(self, db_path: str = _DB_PATH, embedder: Optional[Any] = None,
-                 dsn: str = ""):
+                 dsn: Optional[str] = None):
         self.db_path = db_path
         self._embedder = embedder            # lazy; reuse RAG embedder
-        dsn = dsn or os.environ.get("NETBRAIN_MEMORY_DSN", "")
+        # None (the default) = "auto", read NETBRAIN_MEMORY_DSN from the
+        # environment. Any explicit str, INCLUDING "", is authoritative and
+        # is never overridden by the environment — callers that need a
+        # guaranteed-local store (tests, anything that must never reach the
+        # shared cloud backend) pass dsn="" and get exactly that, regardless
+        # of what else in the process has touched os.environ. Before this,
+        # `dsn or os.environ.get(...)` silently ignored an explicit dsn=""
+        # the moment anything else in the process (e.g. importing app.py,
+        # which bridges .streamlit/secrets.toml into os.environ) had set
+        # NETBRAIN_MEMORY_DSN — real production Postgres writes from what
+        # should have been fully isolated tests.
+        if dsn is None:
+            dsn = os.environ.get("NETBRAIN_MEMORY_DSN", "")
         try:
             self._be = _Backend(dsn=dsn, sqlite_path=db_path)
         except Exception as exc:
@@ -405,12 +417,16 @@ class OperationalMemory:
 
     def recurring_failures(self, min_count: int = 2, limit: int = 20) -> List[Dict[str, Any]]:
         """Signatures that have failed >= min_count times — the patterns worth fixing."""
+        # HAVING repeats COUNT(*) rather than referencing the SELECT-list
+        # alias `c` — SQLite/MySQL allow referencing an alias there, but
+        # PostgreSQL doesn't (HAVING is evaluated before SELECT aliases
+        # exist), so `HAVING c >= ?` raised UndefinedColumn on Postgres.
         rows = self._be.query("""
             SELECT signature, COUNT(*) c, MAX(ts) last_ts,
                    MAX(intent) intent, MAX(protocol) protocol
             FROM memory_events
             WHERE outcome='failure' AND signature != ''
-            GROUP BY signature HAVING c >= ?
+            GROUP BY signature HAVING COUNT(*) >= ?
             ORDER BY c DESC, last_ts DESC LIMIT ?
         """, (min_count, limit))
         return [{"signature": r["signature"], "count": r["c"],

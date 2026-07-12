@@ -263,7 +263,14 @@ def _real_supply_chain(tmp_path):
     return NetworkIntelligenceSupplyChain(
         layer=EnterpriseKnowledgeLayer(rag=rag),
         graph=KnowledgeGraph(),
-        memory=OperationalMemory(db_path=str(tmp_path / "memory.sqlite")),
+        # dsn="" forces local SQLite regardless of NETBRAIN_MEMORY_DSN in
+        # os.environ — see the matching comment in tests/test_supply_chain.py.
+        # This suite exercises GovernanceEngine, whose autonomy/policy stack
+        # can trigger a lazy `import app` that bridges the real Supabase DSN
+        # into os.environ for the rest of the process; without this, these
+        # tests (and any test file run after them in the same pytest
+        # process) would silently write to the real production database.
+        memory=OperationalMemory(db_path=str(tmp_path / "memory.sqlite"), dsn=""),
         learning_engine=_StubLearningEngine(),
     )
 
@@ -301,3 +308,52 @@ def test_record_ts_outcome_failure_feeds_recurring_failure_detection(tmp_path, m
     assert recurring, "two identical failed resolutions must be detected as recurring"
     assert sc.learning.learn_from_calls[-1].success is False
     assert "unresolved" in msg.lower()
+
+
+def test_record_ts_outcome_closes_the_live_session_as_resolved(tmp_path, monkeypatch):
+    """The terminal-status gap: RESOLVED_PENDING_APPROVAL used to sit forever
+    with no write-back once a human actually confirmed the fix worked.
+    _record_ts_outcome must mutate the SAME Session object it was given
+    (pending_state["session"]) via Session.close(), not just record learning."""
+    monkeypatch.delenv("NETBRAIN_MEMORY_DSN", raising=False)
+    import core.knowledge.compiler.supply_chain as sc_mod
+    from core.troubleshooting.models import ResolutionStatus, Session
+    sc = _real_supply_chain(tmp_path)
+    monkeypatch.setattr(sc_mod, "NetworkIntelligenceSupplyChain", lambda: sc)
+
+    session = Session()
+    session.status = ResolutionStatus.RESOLVED_PENDING_APPROVAL
+    pending = _pending_state(["ip ospf mtu-ignore"])
+    pending["session"] = session
+
+    copilot_engine._record_ts_outcome(pending, success=True)
+    assert session.status == ResolutionStatus.RESOLVED
+
+
+def test_record_ts_outcome_closes_the_live_session_as_unresolved(tmp_path, monkeypatch):
+    monkeypatch.delenv("NETBRAIN_MEMORY_DSN", raising=False)
+    import core.knowledge.compiler.supply_chain as sc_mod
+    from core.troubleshooting.models import ResolutionStatus, Session
+    sc = _real_supply_chain(tmp_path)
+    monkeypatch.setattr(sc_mod, "NetworkIntelligenceSupplyChain", lambda: sc)
+
+    session = Session()
+    session.status = ResolutionStatus.RESOLVED_PENDING_APPROVAL
+    pending = _pending_state(["ip ospf mtu-ignore"])
+    pending["session"] = session
+
+    copilot_engine._record_ts_outcome(pending, success=False)
+    assert session.status == ResolutionStatus.UNRESOLVED
+
+
+def test_record_ts_outcome_tolerates_pending_state_with_no_session(tmp_path, monkeypatch):
+    """Older/other pending_state dicts (e.g. built before this change, or in
+    a code path that never attached a session) must not raise."""
+    monkeypatch.delenv("NETBRAIN_MEMORY_DSN", raising=False)
+    import core.knowledge.compiler.supply_chain as sc_mod
+    sc = _real_supply_chain(tmp_path)
+    monkeypatch.setattr(sc_mod, "NetworkIntelligenceSupplyChain", lambda: sc)
+
+    pending = _pending_state(["ip ospf mtu-ignore"])  # no "session" key
+    msg = copilot_engine._record_ts_outcome(pending, success=True)
+    assert "resolved" in msg.lower()

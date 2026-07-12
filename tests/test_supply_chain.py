@@ -72,7 +72,11 @@ def _supply_chain(tmp_path, name="supply-chain-test"):
     return NetworkIntelligenceSupplyChain(
         layer=_layer(tmp_path, name=name),
         graph=KnowledgeGraph(),
-        memory=OperationalMemory(db_path=str(tmp_path / "memory.sqlite")),
+        # dsn="" (not the default None/"auto") forces local SQLite regardless
+        # of NETBRAIN_MEMORY_DSN in os.environ — these tests must never reach
+        # the real shared Postgres backend, even if something else in this
+        # pytest process (e.g. importing app.py) has bridged that env var in.
+        memory=OperationalMemory(db_path=str(tmp_path / "memory.sqlite"), dsn=""),
         learning_engine=_StubLearningEngine(),
     )
 

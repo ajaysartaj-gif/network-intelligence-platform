@@ -566,6 +566,15 @@ def _record_ts_outcome(pending_state, success: bool) -> str:
                                protocol=protocol, commands=cfg)
     except Exception as exc:
         return f"⚠️ Outcome recorded locally, but learning update failed: {exc}"
+
+    # Write the confirmed terminal outcome back onto the live Session object
+    # itself (pass-by-reference — the same object report.to_markdown() and
+    # session_memory.save() already touched), so ResolutionStatus stops
+    # sitting at RESOLVED_PENDING_APPROVAL forever once a human has actually
+    # confirmed whether the deployed fix worked.
+    session = pending_state.get("session")
+    if session is not None:
+        session.close(resolved=success)
     return ("✅ Recorded as resolved — this outcome now informs future troubleshooting."
            if success else
            "📝 Recorded as unresolved — flagged for review; a recurring pattern here "
@@ -626,6 +635,7 @@ def _continue_investigation_if_needed(call_ai_fn, pending_state) -> Dict[str, An
             "verification_commands": list(s.verification.commands) if s.verification else [],
             "target_ip": target_ip,
             "devices": devices,
+            "session": s,
         }
     return {"messages": messages, "next_pending_state": next_state}
 
@@ -1009,6 +1019,7 @@ def render_copilot_page(call_ai_fn):
                                     "verification_commands": list(s.verification.commands) if s.verification else [],
                                     "target_ip": target_ip,
                                     "devices": target_devices,
+                                    "session": s,
                                 }
                     else:
                         if mode_key == "configure":

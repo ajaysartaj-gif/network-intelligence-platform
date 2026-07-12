@@ -1078,6 +1078,34 @@ class TroubleshootingEngine:
         except Exception as exc:
             logger.debug("Answer synthesis skipped: %s", exc)
 
+    def _record_ambiguous_outcome(self, session: Session) -> None:
+        """Broadens the learning loop beyond deployed-fix outcomes. Until
+        now, NetworkIntelligenceSupplyChain only ever learned from a
+        session that reached a human Confirm/Deny click on a deployed fix
+        (core.copilot_engine._record_ts_outcome) — a session that ends
+        ESCALATE or LIKELY_CAUSE_PRESENT never reaches that click, so it
+        was invisible to recurring-failure detection even though "we
+        investigated this shape of problem and never confirmed a cause"
+        is itself operationally significant and worth surfacing if it
+        keeps recurring. Reuses record_failed_resolution (not a new
+        method) since that's what already feeds OperationalMemory.
+        recurring_failures()/build_failure_signatures() by signature —
+        best-effort, never blocks or fails a session over it."""
+        if session.status not in (ResolutionStatus.ESCALATE, ResolutionStatus.LIKELY_CAUSE_PRESENT):
+            return
+        try:
+            from core.knowledge.compiler.supply_chain import NetworkIntelligenceSupplyChain
+            top = session.top()
+            query = session.goal.query if session.goal else ""
+            protocol = self._detect_protocol(query) if query else ""
+            device_ip = session.goal.devices[0] if (session.goal and session.goal.devices) else ""
+            reason = (session.escalation_reason or (top.statement if top else "") or
+                      "no root cause reached the confirmation threshold")
+            NetworkIntelligenceSupplyChain().record_failed_resolution(
+                query, device_ip, reason=reason, protocol=protocol)
+        except Exception as exc:
+            logger.debug("Ambiguous/escalated outcome recording skipped: %s", exc)
+
     def _finish(self, session: Session, ranker: RootCauseRanker) -> TroubleshootReport:
         top = session.top()
         self._synthesize_answer(session)
@@ -1139,6 +1167,7 @@ class TroubleshootingEngine:
                     top.state = HypothesisState.CONFIRMED
             else:
                 session.status = ResolutionStatus.LIKELY_CAUSE_PRESENT
+            self._record_ambiguous_outcome(session)
             self._persist(session)
             return TroubleshootReport(session)
 
@@ -1192,6 +1221,8 @@ class TroubleshootingEngine:
         session.next_best_command = "" if session.status in (
             ResolutionStatus.RESOLVED_PENDING_APPROVAL, ResolutionStatus.HEALTHY
         ) else session.next_best_command
+
+        self._record_ambiguous_outcome(session)
 
         try:
             self.session_memory.save(session)

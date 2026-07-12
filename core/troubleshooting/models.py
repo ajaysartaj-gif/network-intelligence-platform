@@ -44,6 +44,8 @@ class ResolutionStatus(str, Enum):
     LIKELY_CAUSE_PRESENT = "likely_cause_present"             # below threshold; alternatives shown
     ESCALATE = "escalate"                                     # no safe conclusion possible
     HEALTHY = "healthy"                                       # nothing wrong found
+    RESOLVED = "resolved"       # terminal: human confirmed the deployed fix actually worked
+    UNRESOLVED = "unresolved"   # terminal: human confirmed the deployed fix did NOT work
 
 
 # ── Confidence primitives ──────────────────────────────────────────────────────
@@ -219,6 +221,13 @@ class Session:
         r = self.ranked()
         return r[0] if r else None
 
+    def close(self, resolved: bool) -> None:
+        """Writes back a human's confirmed outcome for a deployed fix —
+        the one terminal transition nothing else sets. Safe to call from
+        outside the engine (e.g. copilot_engine.py, after a Confirm/Deny
+        click on a live session object)."""
+        self.status = ResolutionStatus.RESOLVED if resolved else ResolutionStatus.UNRESOLVED
+
 
 @dataclass
 class TroubleshootReport:
@@ -345,6 +354,8 @@ class TroubleshootReport:
             ResolutionStatus.ESCALATE: f"🔴 Escalated: {s.escalation_reason or 'no safe conclusion possible from available evidence.'}",
             ResolutionStatus.HEALTHY: "🟢 No fault found — system appears healthy.",
             ResolutionStatus.IN_PROGRESS: "⏳ Investigation in progress.",
+            ResolutionStatus.RESOLVED: "✅ Resolved — confirmed fixed by the operator.",
+            ResolutionStatus.UNRESOLVED: "❌ Unresolved — operator confirmed the deployed fix did not work.",
         }.get(s.status, s.status.value)
         lines.append(f"\n### 🏁 Final Resolution Status\n{status_msg}")
         return "\n".join(lines)

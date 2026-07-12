@@ -196,6 +196,75 @@ def test_compiled_signature_converges_without_llm_impacts():
     print("[5b] compiled signature converges from observed state alone: PASS")
 
 
+def test_record_ambiguous_outcome_feeds_recurring_failure_detection_for_escalate(monkeypatch):
+    """Broadened learning gap: sessions that ESCALATE or stay at
+    LIKELY_CAUSE_PRESENT never reach a human Confirm/Deny click on a
+    deployed fix (core.copilot_engine._record_ts_outcome), so before this
+    they were invisible to NetworkIntelligenceSupplyChain's
+    recurring-failure detection even though "investigated repeatedly,
+    never confirmed" is itself worth surfacing."""
+    calls = []
+
+    class _StubSupplyChain:
+        def record_failed_resolution(self, intent, device, *, reason="", commands=None,
+                                     site="", protocol="", operator=""):
+            calls.append({"intent": intent, "device": device, "reason": reason, "protocol": protocol})
+            return []
+
+    import core.knowledge.compiler.supply_chain as sc_mod
+    monkeypatch.setattr(sc_mod, "NetworkIntelligenceSupplyChain", _StubSupplyChain)
+
+    from core.troubleshooting.models import Goal, Session
+
+    eng = TroubleshootingEngine(ai_call=lambda p: "", devices=DEVICES)
+    session = Session(goal=Goal(query="why is ospf stuck", objective="diagnose", devices=["10.0.0.1"]))
+    session.status = ResolutionStatus.ESCALATE
+    session.escalation_reason = "evidence was insufficient"
+
+    eng._record_ambiguous_outcome(session)
+
+    assert calls, "ESCALATE must record a failed-resolution event for recurrence detection"
+    assert calls[0]["device"] == "10.0.0.1"
+    assert calls[0]["reason"] == "evidence was insufficient"
+    print("[6] ambiguous/escalated outcome feeds recurring-failure detection: PASS")
+
+
+def test_record_ambiguous_outcome_is_a_noop_for_terminal_and_in_progress_states(monkeypatch):
+    calls = []
+
+    class _StubSupplyChain:
+        def record_failed_resolution(self, *a, **k):
+            calls.append((a, k))
+            return []
+
+    import core.knowledge.compiler.supply_chain as sc_mod
+    monkeypatch.setattr(sc_mod, "NetworkIntelligenceSupplyChain", _StubSupplyChain)
+
+    from core.troubleshooting.models import Goal, Session
+
+    eng = TroubleshootingEngine(ai_call=lambda p: "", devices=DEVICES)
+    for status in (ResolutionStatus.RESOLVED_PENDING_APPROVAL, ResolutionStatus.HEALTHY,
+                   ResolutionStatus.IN_PROGRESS, ResolutionStatus.RESOLVED, ResolutionStatus.UNRESOLVED):
+        session = Session(goal=Goal(query="q", objective="o", devices=["10.0.0.1"]))
+        session.status = status
+        eng._record_ambiguous_outcome(session)
+    assert not calls, "must only fire for ESCALATE/LIKELY_CAUSE_PRESENT"
+    print("[6b] ambiguous-outcome recording correctly skips non-ambiguous states: PASS")
+
+
+def test_session_close_sets_terminal_resolution_status():
+    from core.troubleshooting.models import Session
+
+    resolved = Session()
+    resolved.close(resolved=True)
+    assert resolved.status == ResolutionStatus.RESOLVED
+
+    unresolved = Session()
+    unresolved.close(resolved=False)
+    assert unresolved.status == ResolutionStatus.UNRESOLVED
+    print("[6c] Session.close() sets the terminal status: PASS")
+
+
 def test_memory_dedup_unit():
     m = ExecutedCommandsMemory()
     m.record("10.0.0.1", "show ip ospf neighbor", "out", "p")
