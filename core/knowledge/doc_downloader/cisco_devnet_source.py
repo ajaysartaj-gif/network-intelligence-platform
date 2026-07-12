@@ -35,12 +35,39 @@ logger = logging.getLogger("NetBrain.Knowledge.DocDownloader.CiscoDevNet")
 # NOT an attempt to enumerate "all Cisco docs" (that's exactly the scope
 # the 403s rule out doing via automation).
 DEFAULT_TOPICS = [
+    # Meraki dashboard API — organizations/networks/devices
     ("meraki dashboard API organizations", "meraki"),
+    ("meraki dashboard API networks", "meraki"),
+    ("meraki dashboard API devices", "meraki"),
+    ("meraki dashboard API licensing", "meraki"),
+    ("meraki dashboard API webhooks alerts", "meraki"),
+    # Meraki wireless
     ("meraki wireless troubleshooting client connectivity", "meraki"),
+    ("meraki wireless SSID configuration API", "meraki"),
+    ("meraki wireless RF profiles API", "meraki"),
+    # Meraki switch
     ("meraki switch port configuration API", "meraki"),
+    ("meraki switch stack configuration API", "meraki"),
+    ("meraki switch STP configuration API", "meraki"),
+    # Meraki security appliance / SD-WAN
+    ("meraki security appliance VPN configuration API", "meraki"),
+    ("meraki security appliance firewall rules API", "meraki"),
+    ("meraki SD-WAN uplink configuration API", "meraki"),
+    # Meraki camera / sensor
+    ("meraki camera configuration API", "meraki"),
+    ("meraki sensor telemetry API", "meraki"),
+    # Catalyst Center — device lifecycle
     ("catalyst center device provisioning API", "catalyst"),
+    ("catalyst center device onboarding API", "catalyst"),
+    ("catalyst center software image management API", "catalyst"),
+    # Catalyst Center — assurance/health
     ("catalyst center assurance troubleshooting API", "catalyst"),
+    ("catalyst center network health API", "catalyst"),
+    ("catalyst center path trace API", "catalyst"),
+    # Catalyst Center — configuration/automation
     ("catalyst center template configuration API", "catalyst"),
+    ("catalyst center SDA fabric configuration API", "catalyst"),
+    ("catalyst center event notification webhook API", "catalyst"),
 ]
 
 

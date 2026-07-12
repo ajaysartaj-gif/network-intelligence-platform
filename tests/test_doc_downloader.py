@@ -336,3 +336,71 @@ def test_rfc_source_handles_fetch_failure_gracefully(tmp_path, monkeypatch):
     summary = r.run(str(tmp_path), rfc_numbers=[999999])
     assert summary["downloaded"] == 0
     assert len(summary["errors"]) == 1
+
+
+# ── paloalto_source: mocked HTTP, no real network ───────────────────────
+def test_paloalto_source_downloads_and_classifies(tmp_path, monkeypatch):
+    from core.knowledge.doc_downloader import paloalto_source as p
+
+    url = "https://pan.dev/swfw/api/some-troubleshooting-endpoint/"
+    monkeypatch.setattr(p, "_load_robots", lambda: object())
+    monkeypatch.setattr(p, "_can_fetch", lambda rp, u: True)
+    monkeypatch.setattr(p, "fetch_sitemap_urls", lambda path_filters=None: [url])
+    monkeypatch.setattr(p.time, "sleep", lambda s: None)
+
+    class FakeResp:
+        status_code = 200
+        text = "<html><article><h1>Some Troubleshooting Endpoint</h1><p>Body text.</p></article></html>"
+    monkeypatch.setattr(p.requests, "Session", lambda: type(
+        "S", (), {"get": staticmethod(lambda *a, **k: FakeResp())})())
+
+    summary = p.run(str(tmp_path), limit=5)
+    assert summary["downloaded"] == 1
+    saved = list((tmp_path / "paloalto" / "troubleshooting").glob("*.md"))
+    assert len(saved) == 1
+    text = saved[0].read_text()
+    assert "Some Troubleshooting Endpoint" in text
+    assert "Body text." in text
+    assert url in text   # source attribution present
+
+
+def test_paloalto_source_does_not_collide_on_shared_title(tmp_path, monkeypatch):
+    from core.knowledge.doc_downloader import paloalto_source as p
+
+    urls = [
+        "https://pan.dev/access/api/adem/endpoint-a/",
+        "https://pan.dev/access/api/adem/endpoint-b/",
+    ]
+    monkeypatch.setattr(p, "_load_robots", lambda: object())
+    monkeypatch.setattr(p, "_can_fetch", lambda rp, u: True)
+    monkeypatch.setattr(p, "fetch_sitemap_urls", lambda path_filters=None: urls)
+    monkeypatch.setattr(p.time, "sleep", lambda s: None)
+
+    class FakeResp:
+        status_code = 200
+        text = "<html><article><h1>Configuration Guide</h1><p>Body.</p></article></html>"   # SAME title
+    monkeypatch.setattr(p.requests, "Session", lambda: type(
+        "S", (), {"get": staticmethod(lambda *a, **k: FakeResp())})())
+
+    summary = p.run(str(tmp_path), limit=5)
+    assert summary["downloaded"] == 2
+    saved = list((tmp_path / "paloalto" / "configuration").glob("*.md"))
+    assert len(saved) == 2, f"expected 2 distinct files, got {[f.name for f in saved]}"
+
+
+def test_paloalto_source_skips_pages_with_no_article_content(tmp_path, monkeypatch):
+    from core.knowledge.doc_downloader import paloalto_source as p
+
+    monkeypatch.setattr(p, "_load_robots", lambda: object())
+    monkeypatch.setattr(p, "_can_fetch", lambda rp, u: True)
+    monkeypatch.setattr(p, "fetch_sitemap_urls", lambda path_filters=None: ["https://pan.dev/blog/"])
+    monkeypatch.setattr(p.time, "sleep", lambda s: None)
+
+    class FakeResp:
+        status_code = 200
+        text = "<html><nav>just navigation, no article</nav></html>"
+    monkeypatch.setattr(p.requests, "Session", lambda: type(
+        "S", (), {"get": staticmethod(lambda *a, **k: FakeResp())})())
+
+    summary = p.run(str(tmp_path), limit=5)
+    assert summary["downloaded"] == 0

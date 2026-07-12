@@ -34,5 +34,6 @@ core/.env
 pdf_downloads/cisco/*/*.md
 pdf_downloads/versa/*/*.pdf
 pdf_downloads/fortinet/*/*.pdf
+pdf_downloads/paloalto/*/*.md
 pdf_downloads/rfc/*.txt
 pdf_downloads/.manifest.json

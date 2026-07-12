@@ -29,14 +29,48 @@ logger = logging.getLogger("NetBrain.Knowledge.DocDownloader.RFC")
 # adjacent) plus the foundational specs those protocols depend on — not
 # an attempt to mirror the entire RFC series.
 DEFAULT_RFC_NUMBERS = [
+    # OSPF
     2328,   # OSPF version 2
     5340,   # OSPF for IPv6 (OSPFv3)
+    # BGP
     4271,   # BGP-4
+    4360,   # BGP extended communities
+    2385,   # BGP MD5 authentication
+    5065,   # BGP confederations
+    4724,   # BGP graceful restart
+    6793,   # 4-byte AS number space
+    7911,   # BGP additional paths
+    # FHRP
     5798,   # VRRP version 3
+    3768,   # VRRP version 2
+    # EIGRP (informational, Cisco-authored but IETF-published)
+    7868,   # EIGRP
+    # IS-IS
+    1195,   # IS-IS for IP
+    # RIP
+    2453,   # RIPv2
+    # MPLS / VPN / overlay
+    3031,   # MPLS architecture
+    4364,   # BGP/MPLS IP VPNs (L3VPN)
+    7432,   # EVPN
+    7348,   # VXLAN
+    # Foundational L2/L3
     826,    # ARP
     792,    # ICMP
     2131,   # DHCP
+    3046,   # DHCP relay agent information
     4861,   # IPv6 Neighbor Discovery
+    4862,   # IPv6 SLAAC
+    8200,   # IPv6 (Internet Protocol, Version 6) Specification
+    1918,   # private address allocation
+    # Spanning tree / bridging context (informational — actual spec is
+    # IEEE 802.1D, but this RFC documents bridging concepts in IETF terms)
+    5556,   # Transparent Interconnection of Lots of Links (TRILL) problem statement
+    # QoS / signaling
+    2475,   # DiffServ architecture
+    3168,   # ECN
+    # First-hop / reachability diagnostics
+    1256,   # ICMP router discovery
 ]
 
 
