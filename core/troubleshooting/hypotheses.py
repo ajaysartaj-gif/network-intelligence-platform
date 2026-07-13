@@ -51,11 +51,27 @@ def content_tokens(s: str) -> set:
 
 
 def _similar(a: str, b: str, threshold: float = 0.6) -> bool:
-    """Conservative near-duplicate test on subject tokens (Jaccard)."""
+    """Conservative near-duplicate test on subject tokens (Jaccard), plus a
+    full-containment fallback: a terse LLM-authored hypothesis ("MTU
+    mismatch between OSPF neighbors") and its own compiled-signature
+    counterpart ("MTU mismatch between OSPF neighbors prevents DBD packet
+    exchange") describe the same root cause, but the extra detail in the
+    compiled phrasing dilutes their Jaccard score below threshold — without
+    this, HypothesisManager.add() seeds them as two separate hypotheses
+    that split the same evidence between them (the compiled one inflated
+    only by the deterministic-state-match tautology, the LLM one holding
+    the real grounded evidence), so neither individually reaches
+    convergence. Containment only fires when every content token of the
+    SHORTER statement is present in the longer one — same-length or
+    disjoint-length statements that merely share one generic word (already
+    filtered by _STOP) don't qualify."""
     ta, tb = content_tokens(a), content_tokens(b)
     if not ta or not tb:
         return False
-    return len(ta & tb) / len(ta | tb) >= threshold
+    if len(ta & tb) / len(ta | tb) >= threshold:
+        return True
+    shorter, longer = (ta, tb) if len(ta) <= len(tb) else (tb, ta)
+    return shorter <= longer
 
 
 class ConfidenceCalculator:
@@ -123,13 +139,24 @@ class HypothesisManager:
         this guard, such a hypothesis is marked CONFIRMED on the very first
         reap() call, permanently excluded from active_hypotheses(), and so
         can never be bound to (or revised by) the actual observed evidence —
-        freezing the report on an unverified textbook prior forever."""
+        freezing the report on an unverified textbook prior forever.
+
+        The CONFIRM branch additionally requires has_grounded_evidence: a
+        compiled signature's own deterministic-state-match tautology alone
+        (see Hypothesis.has_grounded_evidence) can already push confidence
+        past CONFIRM_AT before any genuine LLM-judged evidence arrives.
+        Without this, such a hypothesis gets promoted to CONFIRMED —
+        dropped from active_hypotheses() — on the very first reap() call
+        of a session, permanently shutting it out from ever receiving the
+        real evidence a later round's analyze() call would have bound to
+        it, deadlocking RootCauseRanker.converged()'s own grounded-evidence
+        requirement against a hypothesis that can now never satisfy it."""
         for h in self.session.hypotheses:
             if h.state != HypothesisState.ACTIVE:
                 continue
             if h.confidence < self.ELIMINATE_BELOW and h.evidence_ids:
                 h.state = HypothesisState.ELIMINATED
-            elif h.confidence >= self.CONFIRM_AT and h.evidence_ids:
+            elif h.confidence >= self.CONFIRM_AT and h.evidence_ids and h.has_grounded_evidence:
                 h.state = HypothesisState.CONFIRMED
 
 
@@ -145,8 +172,17 @@ class RootCauseRanker:
         r = self.rank(session)
         if not r:
             return False
-        if r[0].confidence < self.CONVERGE_THRESHOLD:
+        top = r[0]
+        if top.confidence < self.CONVERGE_THRESHOLD:
+            return False
+        # A hypothesis whose only support is the deterministic-state-match
+        # tautology (observed FSM state == this compiled signature's own
+        # stuck_state label) has never actually been tested against the
+        # specific parameter it blames — confidence alone must not be enough
+        # to call it "confirmed" and remediation-eligible. See
+        # Hypothesis.has_grounded_evidence.
+        if not top.has_grounded_evidence:
             return False
         if len(r) == 1:
             return True
-        return (r[0].confidence - r[1].confidence) >= self.MARGIN
+        return (top.confidence - r[1].confidence) >= self.MARGIN

@@ -203,20 +203,28 @@ def test_escalates_instead_of_guessing():
     print("[5] escalates rather than guessing: PASS")
 
 
-def test_compiled_signature_converges_without_llm_impacts():
-    # The compiled-signature evidence path is deterministic and independent
-    # of the LLM's own impact judgments: even with mode="neutral" (LLM
-    # reports the observed EXSTART fact but deliberately contributes zero
-    # impacts), the observed state alone should let the matching compiled
-    # signature (ExStart -> MTU mismatch) converge, since it's real,
-    # directly-observed evidence, not an invented one.
+def test_compiled_signature_reaches_likely_but_not_confirmed_without_real_evidence():
+    # The compiled-signature evidence path deterministically raises a
+    # matching signature's confidence from the observed FSM state alone
+    # (mode="neutral": the LLM reports the observed EXSTART fact but
+    # deliberately contributes zero impacts) — but that state-match is a
+    # tautology (the signature was seeded FOR this exact state; confirming
+    # "the state matches the state it was seeded for" proves nothing about
+    # the specific parameter, e.g. MTU, the signature actually blames). It
+    # must be allowed to reach high confidence and "likely" status, but
+    # must NOT be allowed to auto-confirm / become remediation-eligible
+    # without at least one piece of real evidence beyond that tautology —
+    # see Hypothesis.has_grounded_evidence and RootCauseRanker.converged().
     eng = build_engine(make_ai(mode="neutral"), cfg=TSConfig(max_steps=5, patience=2))
     s = eng.run("ospf issue").session
-    assert s.status == ResolutionStatus.RESOLVED_PENDING_APPROVAL, s.status
+    assert s.status == ResolutionStatus.LIKELY_CAUSE_PRESENT, s.status
     top = s.top()
     assert top and "MTU" in top.statement
+    assert top.confidence >= 0.8, "state-match alone should still raise confidence high"
+    assert not top.has_grounded_evidence, "no real (non-tautological) evidence was ever supplied"
+    assert s.fix is None, "must not auto-generate a fix from the tautology alone"
     assert any(src.startswith("compiled failure signature") for src in s.knowledge_sources)
-    print("[5b] compiled signature converges from observed state alone: PASS")
+    print("[5b] compiled signature reaches likely (not confirmed) from state-match alone: PASS")
 
 
 def test_record_ambiguous_outcome_feeds_recurring_failure_detection_for_escalate(monkeypatch):

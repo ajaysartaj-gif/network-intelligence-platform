@@ -28,7 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from core.vendor import VendorGateway
-from core.troubleshooting import TroubleshootingEngine, TSConfig
+from core.troubleshooting import TroubleshootingEngine, TSConfig, ResolutionStatus
 
 
 class Dev:
@@ -108,7 +108,18 @@ def test_ospf_converges_even_when_llm_never_requests_get_neighbors():
     assert top is not None and top.confidence >= 0.8, \
         f"expected high-confidence convergence, got {top.confidence if top else None}"
     assert "MTU" in top.statement
-    assert s.fix is not None and any("mtu-ignore" in c for c in s.fix.config_commands)
+    # This mock's "Interpret this device output" branch returns zero real
+    # facts/impacts — the only thing driving confidence here is engine.py's
+    # own deterministic-state-match tautology (the observed FSM state
+    # equals this compiled signature's own stuck_state label), which is
+    # definitionally true and proves nothing about MTU specifically. A real
+    # senior-engineer review of this exact transcript is what surfaced that
+    # gap: RootCauseRanker.converged() now additionally requires
+    # top.has_grounded_evidence, so a fix must NOT be auto-proposed from
+    # this tautology alone — LIKELY_CAUSE_PRESENT, not RESOLVED_PENDING_APPROVAL.
+    assert s.status == ResolutionStatus.LIKELY_CAUSE_PRESENT, s.status
+    assert not top.has_grounded_evidence
+    assert s.fix is None
 
 
 def test_state_anchor_is_idempotent_when_llm_already_supplied_it():

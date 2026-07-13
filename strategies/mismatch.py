@@ -39,6 +39,8 @@ class Finding:
     corroborated: bool         # observed symptom matches the KP's predicted symptom
     provenance: str
     remediations: list = field(default_factory=list)   # candidate fixes, both ends
+    local_device: str = ""     # inst.local.device — which physical/virtual device this end is
+    remote_device: str = ""    # inst.remote.device — same, for the far end
 
 
 def _corroborate(symptom: str, observed_state: str, healthy: tuple) -> tuple[bool, float]:
@@ -116,6 +118,7 @@ class MismatchStrategy:
                     observed_state=inst.observed_state, symptom_expected=p.symptom_if_violated,
                     confidence=round(confidence, 3), logodds_delta=round(logodds, 3),
                     corroborated=corr, provenance=p.provenance, remediations=rems,
+                    local_device=inst.local.device, remote_device=inst.remote.device,
                 )
                 findings.append(f)
                 self.trace("finding", param=p.name, local=lv.value, remote=rv.value,

@@ -5,6 +5,7 @@ adapter parsing of real "show standby brief" output, and end-to-end
 remediation via the live TroubleshootingEngine.
 """
 import json
+import re
 import sys
 import types
 from pathlib import Path
@@ -109,13 +110,44 @@ def _make_ai(query_state_word):
             return json.dumps([])
         if "normalized diagnostic OPERATION" in prompt:
             calls["n"] += 1
-            if calls["n"] == 1:
+            # Nothing on call 1 (engine.py's _observe_initial_state probes
+            # BEFORE hypotheses are seeded — active_hypotheses() is empty
+            # there, so any impact returned then has no hypothesis_id to
+            # bind to). The real operation runs on call 2, inside the main
+            # loop, once hypotheses exist — that's the analyze() call the
+            # "Interpret this device output" branch below needs.
+            if calls["n"] == 2:
                 return json.dumps([{"device": "all", "operation": "get_interface_details",
                                     "params": {"protocol": "hsrp"}, "purpose": "diag",
                                     "tests_hypotheses": [], "value": 0.9}])
             return json.dumps([])
         if "Interpret this device output" in prompt:
-            return json.dumps({"facts": [], "impacts": []})
+            # A genuine (non-tautological) reading of the collected output,
+            # matching what a real LLM interpret pass would report — the
+            # engine's own deterministic state-match tautology alone is no
+            # longer sufficient to reach RESOLVED_PENDING_APPROVAL (see
+            # Hypothesis.has_grounded_evidence / RootCauseRanker.converged()).
+            # A "fact" must accompany the impact — engine.py's _ingest_output
+            # only processes "impacts" while iterating "facts" (each impact
+            # is anchored to that round's Observation), so an empty facts
+            # list silently drops any impacts alongside it.
+            impacts = []
+            # Gated on query_state_word: all 4 compiled HSRP hypotheses (Init/
+            # Listen/Speak/Standby) are seeded regardless of scenario (see
+            # engine.py's _seed_deterministic_hypotheses), and Standby's own
+            # statement text always contains "preempt" — an ungated regex
+            # search would attach this real (non-tautological) evidence to
+            # the Standby hypothesis even while testing e.g. Listen, wrongly
+            # pushing it past the auto-fix threshold in a scenario that
+            # never actually observed it.
+            if query_state_word == "Standby":
+                m = re.search(r"\[(hyp_[0-9a-f]+)\][^\n]*preempt", prompt)
+                if m:
+                    impacts.append({"hypothesis_id": m.group(1), "effect": "support",
+                                    "weight": 0.6,
+                                    "reason": "show standby brief confirms Standby state, no preempt configured"})
+            facts = [{"subject": "hsrp.neighbor", "attribute": "state", "value": "STANDBY"}]
+            return json.dumps({"facts": facts, "impacts": impacts})
         return ""
     return ai
 

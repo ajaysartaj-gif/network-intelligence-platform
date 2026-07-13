@@ -4,6 +4,7 @@ pattern): compiled protocol model, failure signatures, adapter parsing,
 and end-to-end remediation via the live TroubleshootingEngine.
 """
 import json
+import re
 import sys
 import types
 from pathlib import Path
@@ -106,13 +107,40 @@ def _make_ai(query_state_word):
             return json.dumps([])
         if "normalized diagnostic OPERATION" in prompt:
             calls["n"] += 1
-            if calls["n"] == 1:
+            # Nothing on call 1 (engine.py's _observe_initial_state probes
+            # BEFORE hypotheses are seeded — active_hypotheses() is empty
+            # there, so any impact returned then has no hypothesis_id to
+            # bind to). The real operation runs on call 2, inside the main
+            # loop, once hypotheses exist — that's the analyze() call the
+            # "Interpret this device output" branch below needs.
+            if calls["n"] == 2:
                 return json.dumps([{"device": "all", "operation": "get_neighbors",
                                     "params": {"protocol": "bgp"}, "purpose": "diag",
                                     "tests_hypotheses": [], "value": 0.9}])
             return json.dumps([])
         if "Interpret this device output" in prompt:
-            return json.dumps({"facts": [], "impacts": []})
+            # A genuine (non-tautological) reading of the collected output —
+            # the engine's own deterministic state-match tautology alone is
+            # no longer sufficient to reach RESOLVED_PENDING_APPROVAL (see
+            # Hypothesis.has_grounded_evidence / RootCauseRanker.converged()).
+            # A "fact" must accompany the impact — engine.py's _ingest_output
+            # only processes "impacts" while iterating "facts" (each impact
+            # is anchored to that round's Observation), so an empty facts
+            # list silently drops any impacts alongside it.
+            impacts = []
+            # Gated on query_state_word — see the HSRP mock's comment: every
+            # compiled BGP hypothesis is seeded regardless of scenario, and
+            # Active's statement always contains "TCP connection failures",
+            # so an ungated search would wrongly ground it even while
+            # testing e.g. Idle.
+            if query_state_word == "Active":
+                m = re.search(r"\[(hyp_[0-9a-f]+)\][^\n]*TCP connection failures", prompt)
+                if m:
+                    impacts.append({"hypothesis_id": m.group(1), "effect": "support",
+                                    "weight": 0.6,
+                                    "reason": "show ip bgp summary shows repeated Active with 0 in/out packets"})
+            facts = [{"subject": "bgp.neighbor", "attribute": "state", "value": "ACTIVE"}]
+            return json.dumps({"facts": facts, "impacts": impacts})
         return ""
     return ai
 

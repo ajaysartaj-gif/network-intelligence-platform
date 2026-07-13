@@ -1002,6 +1002,20 @@ class TroubleshootingEngine:
                 iface = ""
                 neighbor_ip = ""
                 errdisable_reason = ""
+                # Prefer the interface EXPLICITLY named in the most recent
+                # get_interface_details call — that's the interface actually
+                # under investigation right now. The fallback below (first
+                # interface.*.mtu observation ever recorded) picks whichever
+                # interface was scanned earliest in the WHOLE session, which
+                # can be a completely unrelated interface on a multi-interface
+                # device (e.g. a generic first-pass read of FastEthernet0/0
+                # winning over the Gi1/0 that's actually part of the broken
+                # adjacency under investigation).
+                for ec in reversed(session.executed):
+                    m = re.search(r"get_interface_details\([^)]*\binterface=([^,)]+)", ec.command)
+                    if m and m.group(1):
+                        iface = m.group(1)
+                        break
                 for o in session.observations:
                     if o.subject.startswith("interface.") and o.attribute == "mtu" and not iface:
                         iface = o.subject.split(".", 1)[1]
@@ -1120,7 +1134,8 @@ class TroubleshootingEngine:
                 from core.knowledge.compiler.reasoning_artifact_compiler import ReasoningArtifactCompiler
                 risk = ReasoningArtifactCompiler().compile_risk(
                     self._detect_protocol(session.goal.query),
-                    affected_object_count=len(session.observations))
+                    affected_object_count=len(session.observations),
+                    observed_confidence=top.confidence)
                 session.risk = {
                     "severity": risk.severity, "probability": risk.probability,
                     "impact": risk.impact, "affected_object_count": risk.affected_object_count,

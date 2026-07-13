@@ -114,18 +114,31 @@ class ReasoningArtifactCompiler:
                            "convergence window" if sig else None)))
         return DecisionGraph(protocol=protocol, nodes=nodes)
 
-    def compile_risk(self, protocol: str, *, affected_object_count: int = 0) -> RiskAnnotation:
+    def compile_risk(self, protocol: str, *, affected_object_count: int = 0,
+                     observed_confidence: Optional[float] = None) -> RiskAnnotation:
         signatures = self.compile_root_causes(protocol)
         if not signatures:
             return RiskAnnotation(severity="unknown", probability=0.0,
                                   impact="no verified failure model for this protocol",
                                   affected_object_count=affected_object_count)
         avg_confidence = sum(s.confidence for s in signatures) / len(signatures)
+        # A live investigation's actual top-hypothesis confidence is a far
+        # better estimate of "how likely is this really the cause" than the
+        # static average confidence across every compiled signature for the
+        # protocol — that average never changes within a session (it depends
+        # on nothing actually observed), so surfacing it as the live "risk
+        # probability" freezes the number across rounds even while the real
+        # hypothesis confidence swings sharply (e.g. after a fix fails
+        # verification and confidence drops). Falls back to the static
+        # average when no live session confidence is supplied (e.g.
+        # compile_reasoning()'s protocol-general risk profile, which has no
+        # session to draw a confidence from).
+        probability = avg_confidence if observed_confidence is None else observed_confidence
         severity = "high" if affected_object_count > 10 else (
             "medium" if affected_object_count > 1 else "low")
         impact = (f"Potentially affects {affected_object_count} compiled object(s) if unresolved"
                  if affected_object_count else "Impact scope not supplied by caller")
-        return RiskAnnotation(severity=severity, probability=round(avg_confidence, 4),
+        return RiskAnnotation(severity=severity, probability=round(probability, 4),
                               impact=impact, affected_object_count=affected_object_count)
 
     # ── composed artifacts ────────────────────────────────────────────────

@@ -199,7 +199,7 @@ class IosLikeAdapter(VendorAdapter):
                     if not mi:
                         continue
                     attrs = {"status": mi.group(2).lower()}
-                    for key, pat in (("mtu", r"MTU[ :]+(\d+)"), ("area", r"Area (\S+)"),
+                    for key, pat in (("mtu", r"MTU[ :]+(\d+)"), ("area", r"Area ([^\s,]+)"),
                                      ("network_type", r"Network Type (\w+)"),
                                      ("ospf_state", r"State (\S+)"),
                                      ("hello", r"Hello (\d+)"), ("dead", r"Dead (\d+)"),

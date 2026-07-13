@@ -142,6 +142,22 @@ class Hypothesis:
         if evidence_id and evidence_id not in self.evidence_ids:
             self.evidence_ids.append(evidence_id)
 
+    @property
+    def has_grounded_evidence(self) -> bool:
+        """True once at least one applied delta reflects something beyond
+        engine.py's own deterministic-state-match tautology
+        (_bind_compiled_signature_evidence: "the observed FSM state equals
+        this compiled signature's own stuck_state label"). That match is
+        definitionally true the moment a signature is seeded for the
+        observed state — it never actually compares the specific parameter
+        (MTU, hello/dead timer, area id, ...) the signature blames, so on
+        its own it must never be enough to call a hypothesis confirmed or
+        remediation-eligible. Any other delta (an LLM's judged reading of
+        real command output, a Mismatch Investigation's local/remote
+        parameter comparison, a reactive ACL/NAT/VLAN evidence bind) counts."""
+        return any(not (d.reason or "").startswith("deterministic-state-match")
+                   for d in self.deltas)
+
 
 @dataclass
 class ExecutedCommand:

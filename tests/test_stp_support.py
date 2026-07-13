@@ -8,6 +8,7 @@ output at all), plus a new, well-grounded ErrDisabled/BPDU-Guard
 signature.
 """
 import json
+import re
 import sys
 import types
 from pathlib import Path
@@ -171,13 +172,54 @@ def _make_ai(query_state_word):
             return json.dumps([])
         if "normalized diagnostic OPERATION" in prompt:
             calls["n"] += 1
-            if calls["n"] == 1:
+            # Nothing on call 1 (engine.py's _observe_initial_state probes
+            # BEFORE hypotheses are seeded — active_hypotheses() is empty
+            # there, so any impact returned then has no hypothesis_id to
+            # bind to). The real operation runs on call 2, inside the main
+            # loop, once hypotheses exist — that's the analyze() call the
+            # "Interpret this device output" branch below needs. The
+            # deterministic-state-match tautology (which the BPDU Guard
+            # test still relies on) fires just as well one round later,
+            # once this op's output is ingested.
+            if calls["n"] == 2:
                 return json.dumps([{"device": "all", "operation": "get_interface_details",
                                     "params": {"protocol": "stp"}, "purpose": "diag",
                                     "tests_hypotheses": [], "value": 0.9}])
             return json.dumps([])
         if "Interpret this device output" in prompt:
-            return json.dumps({"facts": [], "impacts": []})
+            # A genuine (non-tautological) reading of the collected output —
+            # the engine's own deterministic state-match tautology alone is
+            # no longer sufficient to reach fix-eligible convergence (see
+            # Hypothesis.has_grounded_evidence / RootCauseRanker.converged()).
+            # A "fact" must accompany the impact — engine.py's _ingest_output
+            # only processes "impacts" while iterating "facts" (each impact
+            # is anchored to that round's Observation), so an empty facts
+            # list silently drops any impacts alongside it. Only
+            # ErrDisabledLinkIntegrity's (UDLD) test needs this to converge
+            # to a fix; BPDU Guard deliberately must NOT auto-fix regardless
+            # (no matching remediation template exists for it), and
+            # Blocking's test only checks the deterministic delta itself.
+            impacts = []
+            # Gated on query_state_word: all 3 compiled STP hypotheses
+            # (Blocking/ErrDisabled/ErrDisabledLinkIntegrity) are seeded
+            # regardless of scenario, and ErrDisabledLinkIntegrity's own
+            # statement always contains "UDLD" — an ungated search would
+            # wrongly ground THAT hypothesis even while testing e.g.
+            # ErrDisabled (BPDU Guard), risking it out-ranking the actually-
+            # tested top hypothesis.
+            if query_state_word == "ErrDisabledLinkIntegrity":
+                m = re.search(r"\[(hyp_[0-9a-f]+)\][^\n]*UDLD", prompt)
+                if m:
+                    impacts.append({"hypothesis_id": m.group(1), "effect": "support",
+                                    "weight": 0.6,
+                                    "reason": "show interfaces status err-disabled reports reason: udld"})
+            # subject/attribute must overlap the hypothesis's own declared
+            # discriminating_signals (engine.py's evidence gate,
+            # _obs_matches_signals) — ErrDisabledLinkIntegrity's signal is
+            # "errdisable_reason" (see protocol_registry.py's
+            # _STP_SIGNATURES), so a generic "status" fact never binds.
+            facts = [{"subject": "stp.interface", "attribute": "errdisable_reason", "value": "udld"}]
+            return json.dumps({"facts": facts, "impacts": impacts})
         return ""
     return ai
 

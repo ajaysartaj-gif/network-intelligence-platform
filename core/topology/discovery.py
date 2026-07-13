@@ -171,6 +171,18 @@ def _establish_connection(device: Any, base_type: str,
         cfg = dict(
             device_type=dtype, host=device.ip, port=port,
             password=password,
+            # conn_timeout bounds the raw TCP handshake itself — distinct
+            # from timeout/auth_timeout/banner_timeout below, which only
+            # start counting AFTER a TCP connection is established. Without
+            # it, a device that's unreachable in a way that never resets the
+            # connection (dropped SYN, a firewall silently discarding
+            # packets) hangs on the OS's own default TCP retry behavior —
+            # observed in practice to run past 5+ minutes with no
+            # resolution — instead of failing fast so this discovery pass
+            # (best-effort CDP/LLDP topology for interface pairing; see this
+            # module's docstring) can move on to the next device or fall
+            # back to the adapter's own single-interface heuristic.
+            conn_timeout=10,
             timeout=20, auth_timeout=20, banner_timeout=20,
             fast_cli=False, global_delay_factor=2,
         )
