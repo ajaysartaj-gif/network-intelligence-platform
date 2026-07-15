@@ -160,8 +160,9 @@ class AIConfigurationEngine:
         crit_conflicts = [c for c in s.conflicts if c.severity == Severity.CRITICAL]
 
         # 13. Risk Analyzer (deterministic score + LLM mitigations)
+        unresolved_optional = len([m for m in s.missing if not m.required])
         s.risk = self.risk.score(s.impact, s.conflicts, len(device_ips or s.intents),
-                                 unresolved_missing=0, confidence=self.cfg.confidence)
+                                 unresolved_missing=unresolved_optional, confidence=self.cfg.confidence)
         if s.risk.drivers:
             s.risk.mitigations = self.r.mitigations(s.risk.drivers, s.goal.objective)
         s.record("risk", f"{s.risk.level.value} ({s.risk.score})")

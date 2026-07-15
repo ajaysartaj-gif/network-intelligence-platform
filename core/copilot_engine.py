@@ -21,6 +21,39 @@ from typing import List, Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
+# Module-level singleton persistence backends for the three engines below —
+# one JSONFileBackend instance per engine, shared across every request this
+# process handles (each engine is otherwise instantiated fresh per request,
+# so without an explicitly wired shared backend its "memory"/"audit trail"
+# component would silently reset on every single message).
+_design_memory_backend = None
+_config_session_backend = None
+_ts_session_backend = None
+
+
+def _get_design_memory_backend():
+    global _design_memory_backend
+    if _design_memory_backend is None:
+        from core.design_engine.memory import JSONFileBackend
+        _design_memory_backend = JSONFileBackend()
+    return _design_memory_backend
+
+
+def _get_config_session_backend():
+    global _config_session_backend
+    if _config_session_backend is None:
+        from core.config_engine.audit import JSONFileBackend
+        _config_session_backend = JSONFileBackend()
+    return _config_session_backend
+
+
+def _get_ts_session_backend():
+    global _ts_session_backend
+    if _ts_session_backend is None:
+        from core.troubleshooting.memory import JSONFileBackend
+        _ts_session_backend = JSONFileBackend()
+    return _ts_session_backend
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # MODES — single source of truth for persona, routing behaviour, and visuals
@@ -625,7 +658,8 @@ def _continue_investigation_if_needed(call_ai_fn, pending_state) -> Dict[str, An
         from core.troubleshooting import TroubleshootingEngine, TSConfig
         gw = _make_troubleshooting_gateway(call_ai_fn, devices)
         tse = TroubleshootingEngine(ai_call=call_ai_fn, devices=devices, gateway=gw,
-                                    config=TSConfig(max_steps=6))
+                                    config=TSConfig(max_steps=6),
+                                    session_store=_get_ts_session_backend())
         report = tse.run(query)
     except Exception as exc:
         return {"messages": [{
@@ -1021,6 +1055,7 @@ def render_copilot_page(call_ai_fn):
                             tse = TroubleshootingEngine(
                                 ai_call=call_ai_fn, devices=target_devices, gateway=gw,
                                 config=TSConfig(max_steps=6),
+                                session_store=_get_ts_session_backend(),
                             )
                             report = tse.run(user_text)
                             ai_reply = report.to_markdown()
@@ -1048,7 +1083,8 @@ def render_copilot_page(call_ai_fn):
                             conv_cfg = cfg_state.get(conversation["id"], {})
                             gw = _make_troubleshooting_gateway(call_ai_fn, target_devices) if target_devices else None
                             cfg_eng = AIConfigurationEngine(
-                                ai_call=call_ai_fn, devices=target_devices, gateway=gw)
+                                ai_call=call_ai_fn, devices=target_devices, gateway=gw,
+                                session_store=_get_config_session_backend())
 
                             if conv_cfg.get("awaiting"):
                                 provided = dict(conv_cfg.get("provided", {}))
@@ -1085,7 +1121,8 @@ def render_copilot_page(call_ai_fn):
                             from core.design_engine import AIDesignEngine
 
                             dgw = _make_troubleshooting_gateway(call_ai_fn, target_devices) if target_devices else None
-                            d_eng = AIDesignEngine(ai_call=call_ai_fn, devices=target_devices, gateway=dgw)
+                            d_eng = AIDesignEngine(ai_call=call_ai_fn, devices=target_devices, gateway=dgw,
+                                                   memory_backend=_get_design_memory_backend())
                             ai_reply = d_eng.run(user_text).to_markdown()
                 except Exception as _e:
                     ai_reply = f"❌ Error: {str(_e)}"

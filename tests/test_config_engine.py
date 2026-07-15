@@ -1,5 +1,6 @@
 """Tests for the AI Configuration Engine (no network, no real LLM)."""
 import json
+import os
 import re
 import sys
 import types
@@ -10,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from core.config_engine import AIConfigurationEngine, ConfigStatus
+from core.config_engine.audit import JSONFileBackend, SessionStore
 from core.vendor import VendorGateway, RemediationIntent
 
 
@@ -108,9 +110,75 @@ def test_approval_flip_no_deploy():
     print("[4] explicit approval recorded, still no deploy: PASS")
 
 
+def make_ai_with_optional_missing():
+    """Same as make_ai(), but 'find_missing' also returns one NON-required
+    (optional) field — required missing fields always halt the pipeline
+    earlier (NEEDS_INPUT), so this is the only kind that can ever reach the
+    risk scorer's unresolved_missing parameter."""
+    base = make_ai()
+
+    def ai(p):
+        if "MANDATORY inputs" in p:
+            return json.dumps([{"field": "description", "question": "Optional: interface description?",
+                               "required": False}])
+        return base(p)
+    return ai
+
+
+def test_unresolved_optional_missing_inputs_increase_risk_score():
+    """Regression test: RiskScorer.score()'s unresolved_missing parameter has
+    real logic (+0.25, a driver) but engine.py used to hardcode 0 always, so
+    it could never fire even when s.missing genuinely had optional unresolved
+    fields on record. Must now reflect the real count and not block the
+    pipeline (only REQUIRED missing fields gate to NEEDS_INPUT)."""
+    baseline = AIConfigurationEngine(ai_call=make_ai(), devices=[Dev("10.0.0.1")], gateway=_gw())
+    base_rep = baseline.run("enable OSPF on core uplink in area 0", provided={"area": "0"})
+
+    eng = AIConfigurationEngine(ai_call=make_ai_with_optional_missing(), devices=[Dev("10.0.0.1")], gateway=_gw())
+    rep = eng.run("enable OSPF on core uplink in area 0", provided={"area": "0"})
+    s = rep.session
+
+    assert s.status == ConfigStatus.NEEDS_APPROVAL, s.status   # optional missing never blocks
+    assert any(m.field == "description" and not m.required for m in s.missing)
+    assert any("unresolved optional inputs" in d for d in s.risk.drivers)
+    assert s.risk.score > base_rep.session.risk.score
+    print("[5] unresolved optional inputs genuinely raise risk score: PASS")
+
+
+def test_session_store_persists_across_fresh_instances_via_json_file_backend(tmp_path):
+    """Regression test for the dead-audit-trail bug: a fresh SessionStore()
+    (no backend passed, mirroring copilot_engine.py's per-request
+    instantiation) must persist via the default JSON-file backend."""
+    path = str(tmp_path / "cfg_sessions.json")
+    eng = AIConfigurationEngine(ai_call=make_ai(), devices=[Dev("10.0.0.1")], gateway=_gw(),
+                                session_store=JSONFileBackend(path=path))
+    rep = eng.run("enable OSPF on core uplink in area 0", provided={"area": "0"})
+    session_id = rep.session.id
+
+    fresh_store = SessionStore(JSONFileBackend(path=path))
+    loaded = fresh_store.load(session_id)
+    assert loaded is not None
+    assert loaded["id"] == session_id
+    assert loaded["status"] == "needs_approval"
+    print("[6] session store persists across fresh instances via JSON file: PASS")
+
+
+def test_default_session_store_backend_is_safe_in_memory_not_json_file():
+    """SessionStore() with no backend argument must stay side-effect-free by
+    default — persistence is opt-in via an explicitly passed JSONFileBackend,
+    wired once in copilot_engine.py, not a silent default every test/caller
+    would otherwise trigger."""
+    store = SessionStore()
+    assert not isinstance(store._backend, JSONFileBackend)
+    assert not os.path.exists(".netbrain_config_sessions.json")
+    print("[7] default SessionStore backend stays in-memory, no file side effect: PASS")
+
+
 if __name__ == "__main__":
     test_needs_input_when_required_missing()
     test_full_pipeline_produces_vendor_artifacts_and_approval()
     test_engine_core_has_no_vendor_names()
     test_approval_flip_no_deploy()
+    test_unresolved_optional_missing_inputs_increase_risk_score()
+    test_default_session_store_backend_is_safe_in_memory_not_json_file()
     print("\nALL CONFIG-ENGINE TESTS PASSED")

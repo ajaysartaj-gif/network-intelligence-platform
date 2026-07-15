@@ -137,7 +137,7 @@ class RiskScorer:
             drivers.append(f"multi-device scope ({scope_size})")
         if unresolved_missing:
             s += 0.25
-            drivers.append("unresolved required inputs")
+            drivers.append("unresolved optional inputs (proceeding on defaults/assumptions)")
         s = max(0.0, min(1.0, s))
         level = (RiskLevel.CRITICAL if s >= 0.75 else RiskLevel.HIGH if s >= 0.5
                  else RiskLevel.MEDIUM if s >= 0.25 else RiskLevel.LOW)

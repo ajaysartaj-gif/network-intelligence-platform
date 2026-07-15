@@ -11,7 +11,9 @@ stored output instead of re-executing.
 from __future__ import annotations
 
 import json
+import os
 import re
+import threading
 from typing import Dict, List, Optional, Tuple
 
 from .models import ExecutedCommand, Session
@@ -60,11 +62,51 @@ class ExecutedCommandsMemory:
         return {k[1] for k in self._store if k[0] == (device or "")}
 
 
+class JSONFileBackend:
+    """Local JSON-file persistence, same pattern as core/device_discovery.py's
+    DeviceLogStore. An explicit, opt-in backend — wire one shared instance in
+    copilot_engine.py so investigation sessions actually persist across
+    requests/process restarts. NOT the default: a class shouldn't silently
+    write files to disk just because no store argument was passed — that
+    surprises every test/caller that never asked for persistence, and risks
+    concurrent-write corruption under parallel execution (pytest-xdist)."""
+
+    def __init__(self, path: str = ".netbrain_ts_sessions.json") -> None:
+        self._path = path
+        self._lock = threading.Lock()
+        self._data: Dict[str, str] = self._load()
+
+    def _load(self) -> Dict[str, str]:
+        try:
+            if os.path.exists(self._path):
+                with open(self._path) as f:
+                    return json.load(f)
+        except Exception:
+            pass
+        return {}
+
+    def _save(self) -> None:
+        try:
+            with open(self._path, "w") as f:
+                json.dump(self._data, f, indent=2, default=str)
+        except Exception:
+            pass
+
+    def set(self, key: str, value: str) -> None:
+        with self._lock:
+            self._data[key] = value
+            self._save()
+
+    def get(self, key: str) -> Optional[str]:
+        with self._lock:
+            return self._data.get(key)
+
+
 class SessionMemory:
     """Persist/restore a Session. Backend is pluggable; defaults to in-memory dict.
 
     A production deployment can pass a `store` object exposing get(key)->str and
-    set(key, str) — e.g. the platform MemoryStore — to survive restarts.
+    set(key, str) — e.g. JSONFileBackend above — to survive restarts.
     """
 
     def __init__(self, store: Optional[object] = None) -> None:

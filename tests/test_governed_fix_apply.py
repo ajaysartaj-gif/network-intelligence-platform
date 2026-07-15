@@ -168,7 +168,7 @@ class _FakeFollowUpEngine:
     last_query = None
     report_to_return = None
 
-    def __init__(self, ai_call, devices, gateway, config):
+    def __init__(self, ai_call, devices, gateway, config, session_store=None):
         _FakeFollowUpEngine.last_devices = devices
 
     def run(self, query):

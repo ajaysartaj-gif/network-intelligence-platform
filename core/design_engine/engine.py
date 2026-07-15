@@ -87,16 +87,23 @@ class AIDesignEngine:
                 risks=list(o.get("risks", [])),
                 scores=dict(o.get("scores", {}) or {})))
 
-        if len(s.options) < 2:
+        if len(s.options) < self.cfg.min_options:
             s.status = DesignStatus.INSUFFICIENT
-            s.record("insufficient options generated")
+            s.record(f"insufficient options generated ({len(s.options)} < {self.cfg.min_options})")
             self.memory.save(s)
             return DesignReport(s)
 
         # 6. Technology Recommendation
         s.technologies = self.r.technologies(query)
 
-        # 7. Trade-off Analyzer + recommendation (deterministic MCDA)
+        # 7. Trade-off Analyzer: independent scoring pass, then deterministic MCDA.
+        # Options were generated (and self-scored) by one LLM call; re-score them
+        # here with a second, separate call so the "auditable weighted matrix"
+        # isn't just laundering that same call's self-assessment of its own options.
+        independent = self.r.score_options(query, [o.__dict__ for o in s.options])
+        for o in s.options:
+            if o.name in independent:
+                o.scores = independent[o.name]
         s.tradeoff_matrix = self.scorer.score(s.options)
         rec = max(s.options, key=lambda x: x.weighted_total)
         s.recommended_id = rec.id

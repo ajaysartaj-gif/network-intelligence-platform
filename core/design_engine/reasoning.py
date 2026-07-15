@@ -105,6 +105,27 @@ class DesignReasoner:
              '"future_readiness": 0.0, "vendor_independence": 0.0}}]')
         return _lst(_json(self.ai(p) or ""))
 
+    def score_options(self, query: str, options: List[dict]) -> Dict[str, Dict[str, float]]:
+        """Independent scoring pass: a SEPARATE call from generate_options, so the
+        weighted matrix isn't just re-stating the same call's self-assessment of
+        its own proposed option. Given all options together so scores are
+        comparative/consistent across options, not scored one at a time in isolation."""
+        summaries = [{"name": o.get("name", ""), "architecture": o.get("architecture", ""),
+                     "technologies": o.get("technologies", []), "advantages": o.get("advantages", []),
+                     "disadvantages": o.get("disadvantages", []), "risks": o.get("risks", [])}
+                    for o in options]
+        p = (_ARCHITECT + "You are now an independent reviewer, NOT the author of these options. "
+             "Score each option 0-1 on cost (higher=cheaper), performance, scalability, "
+             "availability, security, operational_simplicity, future_readiness, vendor_independence. "
+             "Be critical and comparative — options should not all score identically; disadvantages "
+             "and risks listed for an option must pull its relevant scores down.\n\n"
+             f"REQUEST: {query}\nOPTIONS: {json.dumps(summaries)}\n\n"
+             'STRICT JSON list: [{"name": "", "scores": {"cost": 0.0, "performance": 0.0, '
+             '"scalability": 0.0, "availability": 0.0, "security": 0.0, '
+             '"operational_simplicity": 0.0, "future_readiness": 0.0, "vendor_independence": 0.0}}]')
+        rows = _lst(_json(self.ai(p) or ""))
+        return {r["name"]: dict(r.get("scores") or {}) for r in rows if r.get("name")}
+
     def technologies(self, query: str) -> List[str]:
         p = (_ARCHITECT + "Recommend suitable networking technologies for this design "
              "(protocol/architecture names only, vendor-neutral).\n\nREQUEST: " + query +
