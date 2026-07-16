@@ -81,6 +81,27 @@ class DevNetContentMCPSource(KnowledgeSource):
 
     # ── KnowledgeSource interface ─────────────────────────────────────────────
 
+    # This MCP's ENTIRE content coverage is Meraki + Catalyst Center
+    # dashboard/programmability APIs (see module docstring) — a classic
+    # CLI-managed platform (IOS, IOS-XE, NX-OS, IOS-XR, ASA) has zero real
+    # coverage here by design, so querying it for one is guaranteed
+    # irrelevant, not merely lower-priority. supports_vendor() alone can't
+    # catch this: "cisco" is true for both a Meraki dashboard switch and a
+    # classic IOS router, and _estimate_confidence()'s token-overlap
+    # downgrade only labels the result low-confidence AFTER the fact — it
+    # doesn't stop an irrelevant Meraki API doc from being fetched, cited,
+    # and quoted in a synthesized answer for an IOS troubleshooting session
+    # in the first place. A wrong/irrelevant "answer" is worse than none.
+    _CLASSIC_CLI_PLATFORM_MARKERS = ("ios", "nx-os", "nxos", "asa")
+
+    def _platform_out_of_scope(self, platform: Optional[str]) -> bool:
+        p = (platform or "").lower()
+        if not p:
+            return False   # no platform hint at all — can't confidently exclude
+        if "meraki" in p or "catalyst" in p or "dna" in p:
+            return False
+        return any(marker in p for marker in self._CLASSIC_CLI_PLATFORM_MARKERS)
+
     def supports_vendor(self, vendor: str) -> bool:
         return (vendor or "").lower() in self.SUPPORTED_VENDORS
 
@@ -93,6 +114,8 @@ class DevNetContentMCPSource(KnowledgeSource):
         if not self.supports_vendor(vendor):
             return None
         if not command:
+            return None
+        if self._platform_out_of_scope(platform):
             return None
 
         # Lazy init client

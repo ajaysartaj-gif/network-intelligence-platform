@@ -31,9 +31,9 @@ import time
 from collections import deque, defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from core.knowledge.rag.rag_engine import RAGEngine, RAGHit, get_rag_engine, _chunk_text
+from core.knowledge.rag.rag_engine import RAGEngine, RAGHit, get_rag_engine, _chunk_text, _chunk_hierarchical
 
 logger = logging.getLogger("NetBrain.Knowledge.Enterprise")
 
@@ -95,7 +95,7 @@ class KnowledgeRecord:
 @dataclass
 class EnterpriseHit:
     """A retrieved chunk enriched with confidence + provenance + version."""
-    text: str
+    text: str                   # parent-level context (full section, for generation)
     confidence: float           # fused [0,1]
     semantic_score: float
     keyword_score: float
@@ -107,6 +107,7 @@ class EnterpriseHit:
     vendor: str
     platform: str
     tags: List[str]
+    matched_snippet: str = ""   # the small child chunk that actually matched
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -122,15 +123,18 @@ class EnterpriseKnowledgeLayer:
     """Wraps RAGEngine, adding enterprise knowledge capabilities."""
 
     def __init__(self, rag: Optional[RAGEngine] = None,
-                 source_rank: Optional[Dict[str, float]] = None):
+                 source_rank: Optional[Dict[str, float]] = None,
+                 reranker: Optional[object] = None):
         self.rag = rag or get_rag_engine()
         self.source_rank = dict(SOURCE_RANK)
         if source_rank:
             self.source_rank.update(source_rank)
+        self._reranker = reranker   # None => lazily use the module singleton
         # retrieval latency ring buffer (seconds)
         self._latencies: deque = deque(maxlen=200)
         self._ingest_count = 0
         self._dedup_skipped = 0
+        self._rerank_failures = 0
 
     # internal: ensure the underlying Chroma collection is live and return it
     def _col(self):
@@ -196,12 +200,16 @@ class EnterpriseKnowledgeLayer:
             except Exception as exc:
                 logger.debug(f"version-supersede update failed: {exc}")
 
-        # Chunk + embed + upsert new version.
-        chunks = _chunk_text(record.content)
-        if not chunks:
+        # Chunk + embed + upsert new version (parent-child hierarchical: small
+        # child chunks embedded for precise matching, larger parent sections
+        # stored as the retrievable document for full generation context).
+        pairs = _chunk_hierarchical(record.content)
+        if not pairs:
             return {"doc_id": record.doc_id, "skipped": True, "reason": "empty content"}
-        ids = [f"{record.doc_id}::v{new_ver}::chunk{i}" for i in range(len(chunks))]
-        embeddings = self.rag.embedder.embed([f"{record.title}\n{c}" for c in chunks])
+        children = [c for c, _ in pairs]
+        parents = [p for _, p in pairs]
+        ids = [f"{record.doc_id}::v{new_ver}::chunk{i}" for i in range(len(pairs))]
+        embeddings = self.rag.embedder.embed([f"{record.title}\n{c}" for c in children])
         now = time.time()
         metadatas = [{
             "doc_id": record.doc_id, "title": record.title or record.doc_id,
@@ -209,13 +217,13 @@ class EnterpriseKnowledgeLayer:
             "source": src, "source_type": src,
             "chunk": i, "version": new_ver, "content_hash": chash,
             "superseded": False, "ingested_at": now,
-            "tags": ",".join(record.tags),
+            "tags": ",".join(record.tags), "matched_snippet": children[i],
             **{k: str(v) for k, v in (record.extra or {}).items()},
-        } for i in range(len(chunks))]
-        col.upsert(ids=ids, embeddings=embeddings, documents=chunks, metadatas=metadatas)
+        } for i in range(len(pairs))]
+        col.upsert(ids=ids, embeddings=embeddings, documents=parents, metadatas=metadatas)
         self._ingest_count += 1
         return {"doc_id": record.doc_id, "skipped": False, "version": new_ver,
-                "chunks": len(chunks), "source_type": src}
+                "chunks": len(pairs), "source_type": src}
 
     # ── CONFIDENCE scoring ───────────────────────────────────────────────────
     def _recency_factor(self, ingested_at: float) -> float:
@@ -236,7 +244,8 @@ class EnterpriseKnowledgeLayer:
         score = 0.60 * max(0.0, min(1.0, semantic_score)) + 0.25 * rank + 0.15 * rec
         return round(max(0.0, min(1.0, score)), 4)
 
-    # ── HYBRID search: semantic + keyword + metadata, fused with RRF ─────────
+    # ── HYBRID search: semantic + keyword + metadata, fused with RRF, ─────────
+    # then cross-encoder re-ranked
     def search(
         self,
         query: str,
@@ -248,15 +257,104 @@ class EnterpriseKnowledgeLayer:
         include_superseded: bool = False,
         mode: str = "hybrid",        # "hybrid" | "semantic" | "keyword"
         candidate_pool: int = 40,
+        rerank: bool = True,
+        rerank_pool: int = 20,
+        doc_ids: Optional[List[str]] = None,
     ) -> List[EnterpriseHit]:
         t0 = time.time()
         try:
-            return self._search_impl(query, top_k, source_types, vendor, platform,
-                                     tags, include_superseded, mode, candidate_pool)
+            hits = self._search_impl(query, top_k, source_types, vendor, platform,
+                                     tags, include_superseded, mode, candidate_pool,
+                                     rerank, rerank_pool, doc_ids)
+            return hits
         finally:
             self._latencies.append(time.time() - t0)
 
-    def _where(self, source_types, vendor, platform, include_superseded) -> Dict[str, Any]:
+    # ── Multi-hop: decompose a compound question, search each hop, merge ────
+    def multi_hop_search(self, query: str, ai_call: Optional[Callable[[str], str]] = None,
+                         top_k: int = 5, per_hop_k: int = 5, **search_kwargs) -> List[EnterpriseHit]:
+        """
+        Decompose `query` into independent sub-queries (or treat it as one
+        hop, if decomposition is unavailable or the question isn't actually
+        compound — see query_planning.decompose_query), search() each
+        separately, then merge — deduped by (doc_id, chunk), keeping each
+        hit's HIGHEST confidence across whichever hop surfaced it — and
+        re-sort by that confidence. A single embedding search treats a
+        compound question as one vector, where the two sub-questions
+        compete for the same top-k slots; this gives each its own pass.
+        """
+        from core.knowledge.rag.query_planning import decompose_query
+        subqueries = decompose_query(query, ai_call=ai_call)
+        merged: Dict[str, EnterpriseHit] = {}
+        for sq in subqueries:
+            for hit in self.search(sq, top_k=per_hop_k, **search_kwargs):
+                key = f"{hit.doc_id}::{hit.metadata.get('chunk', '')}"
+                if key not in merged or hit.confidence > merged[key].confidence:
+                    merged[key] = hit
+        ordered = sorted(merged.values(), key=lambda h: h.confidence, reverse=True)
+        return ordered[:top_k]
+
+    # ── Hierarchical: coarse document-level pass, then a focused fine pass ──
+    def coarse_to_fine_search(self, query: str, top_k: int = 5,
+                              coarse_doc_limit: int = 5, **search_kwargs) -> List[EnterpriseHit]:
+        """
+        Two-stage retrieval: a broad first pass identifies which DOCUMENTS
+        are relevant at all, then a second, focused pass searches ONLY
+        within those documents. Once a corpus spans many large documents, a
+        flat single-pass search makes a several-hundred-page vendor doc
+        compete chunk-for-chunk against every other document on every
+        query; narrowing to candidate documents first is both cheaper and
+        more precise for the final ranking.
+
+        The coarse pass keeps re-ranking on (default): re-ranking is what
+        makes document-level ordering reliable in the first place, so
+        disabling it here to save time would sacrifice exactly the accuracy
+        this stage exists to get right. The savings versus one flat search
+        come from restricting the FINE pass to fewer documents, not from
+        skipping quality in the pass that picks them.
+        """
+        coarse_hits = self.search(query, top_k=coarse_doc_limit * 3, **search_kwargs)
+        candidate_doc_ids: List[str] = []
+        seen: set = set()
+        for h in coarse_hits:
+            if h.doc_id and h.doc_id not in seen:
+                seen.add(h.doc_id)
+                candidate_doc_ids.append(h.doc_id)
+            if len(candidate_doc_ids) >= coarse_doc_limit:
+                break
+        if not candidate_doc_ids:
+            return []
+        return self.search(query, top_k=top_k, doc_ids=candidate_doc_ids, **search_kwargs)
+
+    def _rerank(self, query: str, hits: List[EnterpriseHit], rerank_pool: int) -> List[EnterpriseHit]:
+        """Re-score the top `rerank_pool` fused hits with a cross-encoder,
+        against each hit's precise matched_snippet (not the larger parent
+        text — cross-encoders have limited context, and the snippet is the
+        actual match target). Falls back to the existing RRF/confidence
+        ordering unchanged if the reranker is unavailable — everything the
+        fusion step already did still works; this only adds a stronger
+        re-ordering on top when it can."""
+        if not hits:
+            return hits
+        pool = hits[:rerank_pool]
+        rest = hits[rerank_pool:]
+        try:
+            reranker = self._reranker
+            if reranker is None:
+                from core.knowledge.rag.reranker import get_reranker
+                reranker = get_reranker()
+            texts = [h.matched_snippet or h.text for h in pool]
+            scores = reranker.score(query, texts)
+        except Exception as exc:
+            self._rerank_failures += 1
+            logger.info(f"Re-ranking unavailable ({exc}); keeping fusion order.")
+            return hits
+        for h, s in zip(pool, scores):
+            h.metadata["_rerank_score"] = round(float(s), 5)
+        pool.sort(key=lambda h: h.metadata.get("_rerank_score", 0.0), reverse=True)
+        return pool + rest
+
+    def _where(self, source_types, vendor, platform, include_superseded, doc_ids=None) -> Dict[str, Any]:
         clauses = []
         if not include_superseded:
             clauses.append({"superseded": False})
@@ -266,6 +364,8 @@ class EnterpriseKnowledgeLayer:
             clauses.append({"platform": platform.lower()})
         if source_types:
             clauses.append({"source_type": {"$in": list(source_types)}})
+        if doc_ids:
+            clauses.append({"doc_id": {"$in": list(doc_ids)}})
         if not clauses:
             return {}
         if len(clauses) == 1:
@@ -273,11 +373,12 @@ class EnterpriseKnowledgeLayer:
         return {"$and": clauses}
 
     def _search_impl(self, query, top_k, source_types, vendor, platform,
-                     tags, include_superseded, mode, candidate_pool):
+                     tags, include_superseded, mode, candidate_pool,
+                     rerank=True, rerank_pool=20, doc_ids=None):
         col = self._col()
         if col.count() == 0:
             return []
-        where = self._where(source_types, vendor, platform, include_superseded)
+        where = self._where(source_types, vendor, platform, include_superseded, doc_ids)
         q_tokens = set(_tokens(query))
 
         # ── Semantic arm (reuses the existing embedder + Chroma cosine) ──
@@ -352,12 +453,15 @@ class EnterpriseKnowledgeLayer:
                 version=int(m.get("version", 1)),
                 vendor=m.get("vendor", ""), platform=m.get("platform", ""),
                 tags=[t for t in (m.get("tags", "") or "").split(",") if t],
+                matched_snippet=m.get("matched_snippet", ""),
                 metadata={**m, "_rrf": round(f["rrf"], 5)},
             ))
 
         # Final ordering: fused RRF first, then confidence (source authority +
         # recency) as the tie-breaker so the most authoritative wins ties.
         hits.sort(key=lambda h: (h.metadata.get("_rrf", 0), h.confidence), reverse=True)
+        if rerank:
+            hits = self._rerank(query, hits, rerank_pool)
         return hits[:top_k]
 
     # ── Capability-registry surface ──────────────────────────────────────────

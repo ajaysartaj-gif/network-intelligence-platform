@@ -25,7 +25,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from core.knowledge.rag.embedder import Embedder, get_embedder
 
@@ -40,30 +40,27 @@ _DEFAULT_COLLECTION = "netbrain_knowledge"
 @dataclass
 class RAGHit:
     """One retrieved chunk with its relevance score and provenance."""
-    text: str
+    text: str                        # parent-level context (full section, for generation)
     score: float                     # cosine similarity in [0, 1]; higher = closer
     source: str = "rag"              # 'runbook' | 'incident' | 'vendor_doc' | ...
     title: str = ""
     doc_id: str = ""
     vendor: str = ""
     platform: str = ""
+    matched_snippet: str = ""        # the small child chunk that actually matched
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
-def _chunk_text(text: str, target_chars: int = 900, overlap: int = 150) -> List[str]:
+def _split_units(text: str, target_chars: int) -> List[str]:
     """
-    Split text into overlapping chunks on paragraph/sentence boundaries
-    where possible, so a retrieved chunk reads as a coherent unit rather
-    than a mid-sentence fragment. Overlap preserves context that would
-    otherwise be cut at a boundary.
+    Split text into paragraph-boundary units, falling back to sentence
+    boundaries within any paragraph longer than target_chars, so a unit
+    reads as a coherent piece rather than a mid-sentence fragment. Shared
+    building block for both _chunk_text and _chunk_hierarchical — both
+    tiers of hierarchical chunking must work from these SAME fine-grained
+    units, not from each other's already-packed (newline-joined) output,
+    or the second pass loses the paragraph boundaries the first pass saw.
     """
-    text = (text or "").strip()
-    if not text:
-        return []
-    if len(text) <= target_chars:
-        return [text]
-
-    # Prefer paragraph boundaries, then sentence boundaries.
     paras = re.split(r"\n\s*\n", text)
     units: List[str] = []
     for p in paras:
@@ -85,8 +82,12 @@ def _chunk_text(text: str, target_chars: int = 900, overlap: int = 150) -> List[
                     buf = s
             if buf:
                 units.append(buf)
+    return units
 
-    # Greedily pack units into chunks near target size, with overlap tail.
+
+def _pack_units(units: List[str], target_chars: int, overlap: int) -> List[str]:
+    """Greedily pack pre-split units into chunks near target size, carrying
+    an overlap tail from the previous chunk for continuity across the cut."""
     chunks: List[str] = []
     buf = ""
     for u in units:
@@ -95,12 +96,82 @@ def _chunk_text(text: str, target_chars: int = 900, overlap: int = 150) -> List[
         else:
             if buf:
                 chunks.append(buf)
-            # carry an overlap tail from the previous chunk for continuity
             tail = buf[-overlap:] if overlap and buf else ""
             buf = f"{tail}\n{u}".strip() if tail else u
     if buf:
         chunks.append(buf)
     return chunks
+
+
+def _chunk_text(text: str, target_chars: int = 900, overlap: int = 150) -> List[str]:
+    """
+    Split text into overlapping chunks on paragraph/sentence boundaries
+    where possible, so a retrieved chunk reads as a coherent unit rather
+    than a mid-sentence fragment. Overlap preserves context that would
+    otherwise be cut at a boundary.
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+    if len(text) <= target_chars:
+        return [text]
+    units = _split_units(text, target_chars)
+    return _pack_units(units, target_chars, overlap)
+
+
+def _chunk_hierarchical(
+    text: str,
+    child_target: int = 350,
+    child_overlap: int = 50,
+    parent_target: int = 1800,
+    parent_overlap: int = 200,
+) -> List[Tuple[str, str]]:
+    """
+    Two-tier (parent/child) chunking. PARENT chunks are large sections that
+    give the LLM enough surrounding context to actually use a fact; CHILD
+    chunks are small enough for precise embedding matches — a query about one
+    specific parameter shouldn't have to compete, in vector space, against
+    everything else in a 900-char chunk that happens to also cover it.
+
+    Only the child text is embedded/matched; the parent text is what's
+    returned as retrieval context, so precision (small child) and recall
+    (full parent) stop being a single-tier tradeoff.
+
+    Splits into child-sized units ONCE, then groups those SAME units into
+    parent-sized ranges — each parent's child chunks are re-packed directly
+    from its own slice of the original units, never by re-splitting the
+    parent's already-packed text (which would have collapsed the paragraph
+    boundaries a second splitting pass needs).
+
+    Returns a flat list of (child_text, parent_text) pairs.
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+    if len(text) <= child_target:
+        return [(text, text)]
+
+    units = _split_units(text, child_target)
+
+    # Greedily group unit indices into parent-sized ranges.
+    parent_ranges: List[Tuple[int, int]] = []
+    start = 0
+    cur_len = 0
+    for idx, u in enumerate(units):
+        if cur_len and cur_len + len(u) + 1 > parent_target:
+            parent_ranges.append((start, idx))
+            start = idx
+            cur_len = 0
+        cur_len += len(u) + 1
+    parent_ranges.append((start, len(units)))
+
+    pairs: List[Tuple[str, str]] = []
+    for s, e in parent_ranges:
+        group = units[s:e]
+        parent_text = "\n".join(group)   # fits parent_target by construction
+        for child in _pack_units(group, child_target, child_overlap):
+            pairs.append((child, parent_text))
+    return pairs
 
 
 class RAGEngine:
@@ -143,13 +214,17 @@ class RAGEngine:
         extra: Optional[Dict[str, Any]] = None,
     ) -> int:
         """
-        Chunk, embed, and upsert a document. Re-ingesting the same doc_id
-        overwrites its chunks (idempotent), so re-running ingestion refreshes
-        rather than duplicates. Returns the number of chunks stored.
+        Chunk, embed, and upsert a document using parent-child hierarchical
+        chunking: small child chunks are embedded (precise matching), the
+        larger parent section each child belongs to is stored as the
+        retrievable document (full generation context). Re-ingesting the
+        same doc_id overwrites its chunks (idempotent), so re-running
+        ingestion refreshes rather than duplicates. Returns the number of
+        child chunks stored.
         """
         self._ensure()
-        chunks = _chunk_text(content)
-        if not chunks:
+        pairs = _chunk_hierarchical(content)
+        if not pairs:
             return 0
 
         # Remove any prior chunks for this doc_id first (handles shrinking docs).
@@ -158,21 +233,26 @@ class RAGEngine:
         except Exception:
             pass
 
-        ids = [f"{doc_id}::chunk{i}" for i in range(len(chunks))]
-        # Embed title+chunk together so the heading's terms inform the vector.
-        embeddings = self.embedder.embed([f"{title}\n{c}" for c in chunks])
+        ids = [f"{doc_id}::chunk{i}" for i in range(len(pairs))]
+        children = [c for c, _ in pairs]
+        parents = [p for _, p in pairs]
+        # Embed title+CHILD together (precise match unit); the child stays
+        # small so it isn't diluted by everything else its parent covers.
+        embeddings = self.embedder.embed([f"{title}\n{c}" for c in children])
         metadatas = [
             {
                 "doc_id": doc_id, "title": title or doc_id,
                 "vendor": (vendor or "").lower(), "platform": (platform or "").lower(),
-                "source": source, "chunk": i,
+                "source": source, "chunk": i, "matched_snippet": children[i],
                 **{k: str(v) for k, v in (extra or {}).items()},
             }
-            for i in range(len(chunks))
+            for i in range(len(pairs))
         ]
-        self._col.upsert(ids=ids, embeddings=embeddings, documents=chunks, metadatas=metadatas)
-        logger.info(f"Ingested doc '{doc_id}' ({source}) — {len(chunks)} chunk(s)")
-        return len(chunks)
+        # The stored "document" is the PARENT (returned as retrieval context);
+        # the embedding vector is derived from the CHILD (the match target).
+        self._col.upsert(ids=ids, embeddings=embeddings, documents=parents, metadatas=metadatas)
+        logger.info(f"Ingested doc '{doc_id}' ({source}) — {len(pairs)} child chunk(s)")
+        return len(pairs)
 
     def ingest_incident(
         self,
@@ -246,6 +326,7 @@ class RAGEngine:
                 doc_id=meta.get("doc_id", ""),
                 vendor=meta.get("vendor", ""),
                 platform=meta.get("platform", ""),
+                matched_snippet=meta.get("matched_snippet", ""),
                 metadata=meta,
             ))
         hits.sort(key=lambda h: h.score, reverse=True)

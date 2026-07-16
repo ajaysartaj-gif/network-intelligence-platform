@@ -176,11 +176,29 @@ def run_mismatch_investigation(
                        f"corroborated={f.corroborated}",
             )
             session.evidence.append(ev)
-            # Traceability only: the prior above already encodes this evidence's
-            # deterministic confidence, so we record the link without a second
-            # log-odds update (that would double-count the same finding).
-            if ev.id not in h.evidence_ids:
-                h.evidence_ids.append(ev.id)
+            # A zero-log-odds delta: the prior above already encodes this
+            # evidence's deterministic confidence, so applying it must NOT
+            # shift confidence a second time (that would double-count the
+            # same finding) — but it MUST still land in h.deltas via
+            # h.apply(), not just h.evidence_ids. This is a real,
+            # non-tautological cross-device parameter comparison (actual
+            # local vs remote values, corroborated against the observed
+            # state) — exactly what Hypothesis.has_grounded_evidence exists
+            # to recognize. Recording it as a bare evidence_id link (the
+            # previous behavior) left h.deltas completely empty until this
+            # hypothesis merged with its compiled-signature counterpart
+            # (see HypothesisManager.add()'s discriminating-signal merge)
+            # and received THAT signature's own deterministic-state-match
+            # tautology delta — at which point has_grounded_evidence's scan
+            # over deltas found only the tautological one and (wrongly)
+            # judged a genuinely evidence-backed hypothesis ungrounded,
+            # permanently blocking RootCauseRanker.converged() and any fix
+            # from ever being proposed despite a clear, real diagnosis.
+            delta = ConfidenceDelta(
+                evidence_id=ev.id, effect=Effect.SUPPORT, weight=ev.weight,
+                log_odds_change=0.0, reason=ev.reason,
+            )
+            h.apply(delta, ev.id)
 
         # Stash the strategy's own dual-ended remediation candidates so a later
         # fix step can offer them without recomputing anything.

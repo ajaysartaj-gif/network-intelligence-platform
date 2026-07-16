@@ -141,3 +141,56 @@ def test_lookup_relevant_query_still_returns_high_confidence_entry():
     entry = src.lookup("cisco", relevant_query, platform=None)
     assert entry is not None
     assert entry.citation.confidence == ConfidenceLevel.HIGH
+
+
+# ── Platform scoping: refuse outright for classic-CLI platforms ────────────
+#
+# Regression for a second, real production report: an OSPF troubleshooting
+# session on classic IOS devices (FastEthernet/GigabitEthernet interfaces —
+# unambiguously not Meraki dashboard-managed) had its "Synthesized Answer"
+# quote "The Meraki API provides an endpoint to update network switch
+# routing OSPF settings" verbatim, sourced from this exact MCP. The prior
+# fix above (confidence downgrade) only labels this low-confidence AFTER
+# fetching it — it doesn't stop the fetch/citation/quoting from happening
+# in the first place. This MCP's entire content coverage is Meraki/
+# Catalyst Center (see module docstring); it has zero real coverage for
+# IOS/IOS-XE/NX-OS/IOS-XR/ASA, so it should refuse outright for those
+# platforms rather than return something and rely on the confidence label
+# to be respected downstream (which, per the real report, it wasn't).
+
+def test_lookup_refuses_outright_for_classic_ios_platform():
+    src = _source_with_stub(_REAL_IRRELEVANT_RESULT_TEXT)
+    entry = src.lookup("cisco", "why is the OSPF neighbor stuck in ExStart", platform="ios")
+    assert entry is None
+
+
+def test_lookup_refuses_outright_for_ios_xe_and_nxos_and_asa():
+    for platform in ("ios-xe", "cisco_ios", "nx-os", "nxos", "asa"):
+        src = _source_with_stub(_REAL_IRRELEVANT_RESULT_TEXT)
+        assert src.lookup("cisco", "ospf neighbor issue", platform=platform) is None, platform
+
+
+def test_lookup_still_fires_for_meraki_and_catalyst_platforms():
+    for platform in ("meraki", "catalyst", "catalyst center", "dna"):
+        src = _source_with_stub(_REAL_IRRELEVANT_RESULT_TEXT)
+        assert src.lookup("cisco", "vpn peer configuration", platform=platform) is not None, platform
+
+
+def test_lookup_still_fires_when_no_platform_hint_is_available():
+    """Absent any platform information, we can't confidently exclude this
+    source — the confidence-downgrade heuristic remains the fallback."""
+    src = _source_with_stub(_REAL_IRRELEVANT_RESULT_TEXT)
+    entry = src.lookup("cisco", "ospf neighbor issue", platform=None)
+    assert entry is not None
+
+
+def test_platform_out_of_scope_directly():
+    src = DevNetContentMCPSource()
+    assert src._platform_out_of_scope("ios") is True
+    assert src._platform_out_of_scope("ios-xe") is True
+    assert src._platform_out_of_scope("nx-os") is True
+    assert src._platform_out_of_scope("asa") is True
+    assert src._platform_out_of_scope("meraki") is False
+    assert src._platform_out_of_scope("catalyst center") is False
+    assert src._platform_out_of_scope("") is False
+    assert src._platform_out_of_scope(None) is False

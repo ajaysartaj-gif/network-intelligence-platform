@@ -224,6 +224,14 @@ class Session:
     # presentational: doesn't feed ConfidenceCalculator or hypothesis
     # ranking, same boundary as knowledge_sources itself.
     synthesized_answer: str = ""
+    # The deterministic diagnostic reasoning chain for the top hypothesis's
+    # protocol FSM stuck_state (core.knowledge.compiler.failure_signatures.
+    # explain_stuck_state()): confirmed_stages / stuck_meaning / likely_cause
+    # / evidence_fields / confidence, plus evidence_comparison when the top
+    # hypothesis's own statement carries concrete local/remote values. Purely
+    # presentational, same boundary as synthesized_answer — never feeds
+    # ConfidenceCalculator or hypothesis ranking.
+    reasoning_chain: Optional[Dict[str, Any]] = None
 
     def active_hypotheses(self) -> List[Hypothesis]:
         return [h for h in self.hypotheses if h.state == HypothesisState.ACTIVE]
@@ -287,6 +295,7 @@ class TroubleshootReport:
             "risk": s.risk,
             "knowledge_sources": list(s.knowledge_sources),
             "synthesized_answer": s.synthesized_answer,
+            "reasoning_chain": s.reasoning_chain,
         }
 
     def to_markdown(self) -> str:
@@ -327,6 +336,22 @@ class TroubleshootReport:
             lines.append(f"\n### ⏭️ Next Best Command\n`{s.next_best_command}`")
 
         lines.append(f"\n### 📊 Confidence Score\n**{(top.confidence if top else 0.0):.0%}**")
+
+        if s.reasoning_chain:
+            rc = s.reasoning_chain
+            lines.append("\n### 🔗 Reasoning Chain")
+            lines.append(f"**Observed:** neighbor state = `{rc['stuck_state']}`")
+            if rc.get("confirmed_stages"):
+                lines.append("\n**Meaning — already confirmed:**")
+                for stage in rc["confirmed_stages"]:
+                    lines.append(f"- {stage}")
+            lines.append(f"\n**{rc['stuck_state']} indicates:** {rc['stuck_meaning']}")
+            ec = rc.get("evidence_comparison")
+            if ec:
+                lines.append(f"\n**Evidence comparison:** local = `{ec['local']}`, remote = `{ec['remote']}`")
+            if rc.get("likely_cause"):
+                lines.append(f"\n**Conclusion:** {rc['likely_cause']} "
+                             f"_(compiled signature confidence: {rc['confidence']:.0%})_")
 
         lines.append("\n### 🎯 Likely Root Cause")
         lines.append(f"{top.statement if top else '_undetermined_'}")

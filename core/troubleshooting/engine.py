@@ -33,7 +33,7 @@ from .hypotheses import (
 )
 from .memory import ExecutedCommandsMemory, SessionMemory, normalize_command
 from .models import (
-    Effect, Evidence, Fix, Goal, HypothesisState, Observation, ResolutionStatus,
+    Effect, Evidence, Fix, Goal, Hypothesis, HypothesisState, Observation, ResolutionStatus,
     Session, TroubleshootReport, VerificationPlan,
 )
 from .reasoning import Reasoner, safe_ai_call
@@ -175,6 +175,18 @@ class TroubleshootingEngine:
         self._bind_compiled_signature_evidence(session, hmgr, conf)
         self._ensure_protocol_state_observed(session, hmgr, conf, device_ips)
         self._bind_compiled_signature_evidence(session, hmgr, conf)
+        # reap() otherwise only runs inside the main loop, after a
+        # successful evidence round. If the loop exits on its very first
+        # iteration (e.g. the deterministic anchor above already gathered
+        # everything there was to gather, so _next_evidence_via_gateway()
+        # finds nothing further non-redundant to fetch and breaks before
+        # ever reaching its own reap() call), a hypothesis already
+        # deterministically ruled out by the observed state above would
+        # never actually get eliminated for the entire session — it would
+        # sit at its demoted-but-nonzero confidence, active, for a report
+        # that never prunes it. Reaping here means that pruning happens
+        # even when the loop contributes nothing further at all.
+        hmgr.reap()
 
         # 1. seed hypotheses FROM the objective + the state just observed —
         #    the LLM EXTENDS the deterministic seed above, it never replaces it
@@ -967,17 +979,32 @@ class TroubleshootingEngine:
 
     # ── conclusion ──────────────────────────────────────────────────────────────
     def _compiled_remediation_intent(self, session: Session, root_cause_statement: str,
-                                     allowed_intents: List[str], protocol: str) -> Optional[dict]:
+                                     allowed_intents: List[str], protocol: str,
+                                     discriminating_signals: Optional[List[str]] = None) -> Optional[dict]:
         """Checks the NKC's compiled RemediationTemplate mapping
         (core.knowledge.compiler.reasoning_artifact_compiler) for a
         deterministic cause->intent mapping BEFORE asking the LLM to guess
-        one. Matches by exact statement text — the compiled
-        FailureSignature.likely_cause seeded as a hypothesis in
-        _seed_deterministic_hypotheses() is the SAME string
-        RemediationTemplate.applicable_signature carries, so a hypothesis
-        that originated from compiled knowledge gets a compiled remediation
-        too, not a fresh LLM guess. Returns None (falls through to the LLM)
-        for any cause the compiled library doesn't cover.
+        one. Returns None (falls through to the LLM) for any cause the
+        compiled library doesn't cover.
+
+        Matches primarily via discriminating_signals against the protocol's
+        FSM state names (same technique as _compile_reasoning_chain), NOT
+        by exact statement-text equality alone: after HypothesisManager.
+        add()'s discriminating-signal merge (a mismatch-investigation
+        hypothesis + its compiled-signature counterpart naming the same
+        parameter), the SURVIVING hypothesis keeps whichever statement was
+        seeded first — usually the mismatch investigation's templated text
+        ("interface_mtu must equal violated..."), NOT the compiled
+        signature's canned likely_cause ("MTU mismatch between OSPF
+        neighbors prevents DBD packet exchange") that
+        RemediationTemplate.applicable_signature was built from. Comparing
+        root_cause_statement against applicable_signature by exact equality
+        would then never match for a merged hypothesis, silently falling
+        through to an LLM guess (or nothing at all, given an ai_call that
+        contributes nothing) despite a compiled remediation genuinely
+        existing for this exact cause. Falls back to the original exact-text
+        match for hypotheses with no compiled-signature lineage at all (pure
+        LLM-authored, no discriminating_signals matching any FSM state).
 
         `protocol` is passed in by the caller (already correctly detected
         from session.goal.query) rather than re-derived from the hypothesis
@@ -991,11 +1018,22 @@ class TroubleshootingEngine:
         that's already known to be correct instead of re-guessing it."""
         try:
             from core.knowledge.compiler.reasoning_artifact_compiler import ReasoningArtifactCompiler
+            from core.knowledge.compiler.failure_signatures import compile_failure_signatures
+            from core.knowledge.compiler.protocol_models import build_protocol_model
         except Exception:
             return None
+        target_signature = root_cause_statement
+        model = build_protocol_model(protocol)
+        if model is not None and discriminating_signals:
+            stuck_state = next((s for s in model.states if s in discriminating_signals), None)
+            if stuck_state:
+                sig = next((s for s in compile_failure_signatures(protocol)
+                           if s.stuck_state == stuck_state), None)
+                if sig:
+                    target_signature = sig.likely_cause
         try:
             for template in ReasoningArtifactCompiler().compile_remediation(protocol):
-                if template.applicable_signature != root_cause_statement:
+                if template.applicable_signature != target_signature:
                     continue
                 if allowed_intents and template.intent_name not in allowed_intents:
                     continue
@@ -1125,6 +1163,44 @@ class TroubleshootingEngine:
         except Exception as exc:
             logger.debug("Ambiguous/escalated outcome recording skipped: %s", exc)
 
+    _LOCAL_REMOTE_RE = re.compile(r"\(local=([^,]+), remote=([^)]+)\)")
+
+    def _compile_reasoning_chain(self, session: Session, top: Hypothesis) -> None:
+        """Populates session.reasoning_chain: what the observed protocol state
+        already confirms succeeded, what being stuck there specifically means
+        is failing, and (when available) the concrete evidence comparison —
+        so the report shows the diagnostic reasoning chain an engineer would
+        otherwise have to reconstruct mentally, instead of jumping straight
+        from a confidence score to a bare conclusion.
+
+        Finds the stuck_state via top.discriminating_signals matched against
+        the protocol's own FSM state names, NOT by regex-parsing top.rationale
+        for "stuck in 'X'": after HypothesisManager.add()'s discriminating-
+        signal merge (mismatch-investigation + compiled-signature hypotheses
+        about the same parameter), the SURVIVING hypothesis keeps whichever
+        statement/rationale was seeded first — usually the mismatch
+        investigation's templated text, which has no such phrase at all.
+        discriminating_signals, in contrast, are unioned across every merge,
+        so the compiled signature's own stuck_state name is reliably present
+        on the merged hypothesis either way.
+        """
+        protocol = self._detect_protocol(session.goal.query if session.goal else "")
+        from core.knowledge.compiler.protocol_models import build_protocol_model
+        model = build_protocol_model(protocol)
+        if model is None:
+            return
+        stuck_state = next((s for s in model.states if s in top.discriminating_signals), None)
+        if not stuck_state:
+            return
+        from core.knowledge.compiler.failure_signatures import explain_stuck_state
+        chain = explain_stuck_state(protocol, stuck_state)
+        if not chain:
+            return
+        m = self._LOCAL_REMOTE_RE.search(top.statement or "")
+        if m:
+            chain["evidence_comparison"] = {"local": m.group(1).strip(), "remote": m.group(2).strip()}
+        session.reasoning_chain = chain
+
     def _finish(self, session: Session, ranker: RootCauseRanker) -> TroubleshootReport:
         top = session.top()
         self._synthesize_answer(session)
@@ -1144,6 +1220,12 @@ class TroubleshootingEngine:
             except Exception as exc:
                 logger.debug("Risk compilation skipped: %s", exc)
 
+        if top:
+            try:
+                self._compile_reasoning_chain(session, top)
+            except Exception as exc:
+                logger.debug("Reasoning chain compilation skipped: %s", exc)
+
         if top and ranker.converged(session) and self.gateway is not None:
             # Vendor-agnostic remediation: engine emits a NEUTRAL intent; the
             # adapter (via gateway) produces vendor fix + rollback + verification.
@@ -1158,7 +1240,8 @@ class TroubleshootingEngine:
             except Exception:
                 allowed = []
             protocol = self._detect_protocol(session.goal.query)
-            intent_raw = self._compiled_remediation_intent(session, top.statement, allowed, protocol) or \
+            intent_raw = self._compiled_remediation_intent(
+                session, top.statement, allowed, protocol, top.discriminating_signals) or \
                         self.reasoner.propose_intent(
                             top.statement, session.goal.objective, self._evidence_summary(session), allowed)
             intent = RemediationIntent(

@@ -50,6 +50,30 @@ def content_tokens(s: str) -> set:
     return set(re.findall(r"[a-z0-9]+", (s or "").lower())) - _STOP
 
 
+def _signal_tokens(signals: Optional[List[str]]) -> set:
+    """Content tokens across a hypothesis's discriminating_signals (parameter
+    names like 'interface_mtu' or 'mtu', FSM state names, etc.) — splitting
+    'interface_mtu' on the underscore boundary yields 'mtu' as its own
+    token, which is exactly what makes it comparable to a compiled
+    signature's own evidence_fields=['mtu']."""
+    out: set = set()
+    for s in signals or []:
+        out |= content_tokens(s)
+    return out
+
+
+def _state_like_signals(signals: Optional[List[str]]) -> set:
+    """The subset of discriminating_signals that look like FSM state names
+    ('ExStart', 'Active', '2-Way') rather than evidence-field parameter
+    names (snake_case/lowercase: 'mtu', 'route_to_peer', 'interface_mtu') —
+    engine.py always appends sig.stuck_state as the last discriminating
+    signal for a compiled-signature hypothesis, and state names are never
+    lowercase-only where a parameter name always is, so `s != s.lower()`
+    reliably tells them apart without needing this module to know each
+    protocol's own state list."""
+    return {s for s in (signals or []) if s and s != s.lower()}
+
+
 def _similar(a: str, b: str, threshold: float = 0.6) -> bool:
     """Conservative near-duplicate test on subject tokens (Jaccard), plus a
     full-containment fallback: a terse LLM-authored hypothesis ("MTU
@@ -113,8 +137,50 @@ class HypothesisManager:
         # what defeats the convergence margin). On a match we keep the existing
         # hypothesis and fold in any new discriminating signals.
         norm = statement.lower()
+        new_sig_tokens = _signal_tokens(discriminating_signals)
         for h in self.session.hypotheses:
-            if h.statement.lower() == norm or _similar(h.statement, statement):
+            same = h.statement.lower() == norm or _similar(h.statement, statement)
+            if not same and new_sig_tokens:
+                # Cross-source phrasing can differ completely — a templated
+                # "interface_mtu must equal violated on ospf_adjacency
+                # between X and Y (local=1500, remote=1200)" from the
+                # mismatch investigation shares almost no free-text
+                # vocabulary with a compiled signature's canned "MTU
+                # mismatch between OSPF neighbors prevents DBD packet
+                # exchange", yet both name the SAME parameter (both carry
+                # "mtu" in their discriminating_signals: evidence_fields=
+                # ["mtu"] on the compiled ExStart signature, ["interface_
+                # mtu"] on the mismatch-investigation Finding). Comparing
+                # discriminating-signal tokens catches this where pure
+                # statement-text overlap can't — without it these two
+                # hypotheses about the identical real-world cause compete
+                # for confidence instead of combining, so neither reaches
+                # the convergence margin and no fix ever gets proposed even
+                # when the platform actually has a clear, well-grounded answer.
+                #
+                # But a shared evidence-field token alone is NOT sufficient:
+                # regression found via BGP — Idle's evidence_fields=
+                # ["admin_state", "route_to_peer"] and Active's=
+                # ["neighbor_ip", "route_to_peer", "acl"] share "route_to_
+                # peer" (both descriptions mention route reachability as A
+                # contributing factor), and Connect/Active both mention
+                # "acl" — none of that means "same real-world cause"; Idle,
+                # Connect and Active are genuinely different states with
+                # genuinely different diagnoses that happen to reference an
+                # overlapping concept. Requiring state agreement when BOTH
+                # sides actually name an FSM state (state names are never
+                # lowercase-only, unlike parameter names — see
+                # _state_like_signals) restricts the merge to what it was
+                # built for: the SAME state, described by two different
+                # sources, not two DIFFERENT states sharing a footnote.
+                overlap = bool(new_sig_tokens & _signal_tokens(h.discriminating_signals))
+                if overlap:
+                    new_states = _state_like_signals(discriminating_signals)
+                    existing_states = _state_like_signals(h.discriminating_signals)
+                    if new_states and existing_states and not (new_states & existing_states):
+                        overlap = False
+                same = overlap
+            if same:
                 for sig in (discriminating_signals or []):
                     if sig not in h.discriminating_signals:
                         h.discriminating_signals.append(sig)
@@ -153,6 +219,24 @@ class HypothesisManager:
         requirement against a hypothesis that can now never satisfy it."""
         for h in self.session.hypotheses:
             if h.state != HypothesisState.ACTIVE:
+                continue
+            # A hypothesis for a DIFFERENT protocol FSM state than the one
+            # actually observed isn't "somewhat less likely" — it's flatly
+            # impossible (a neighbor can't be simultaneously stuck in Down
+            # and in ExStart on the same real observation). engine.py's
+            # _bind_compiled_signature_evidence() already tags this exact
+            # case with a "...rules out this signature" contradiction, but
+            # the resulting log-odds penalty only demotes confidence (e.g.
+            # compiled prior 0.50 -> ~28%) — nowhere near ELIMINATE_BELOW
+            # (0.05), so it lingers in active_hypotheses()/the report
+            # alongside 5-6 other now-impossible states, exactly the
+            # "too many irrelevant hypotheses" clutter a real engineer
+            # would have mentally discarded the instant the actual state
+            # was confirmed. A deterministic state-contradiction is a fact,
+            # not a probabilistic signal — eliminate outright regardless of
+            # the residual confidence number.
+            if any("rules out this signature" in (d.reason or "") for d in h.deltas):
+                h.state = HypothesisState.ELIMINATED
                 continue
             if h.confidence < self.ELIMINATE_BELOW and h.evidence_ids:
                 h.state = HypothesisState.ELIMINATED
