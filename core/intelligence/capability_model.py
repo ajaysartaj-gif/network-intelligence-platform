@@ -1,7 +1,7 @@
 """
 core/intelligence/capability_model.py
 ======================================
-The architectural backbone of NetBrain's "Network Intelligence".
+The architectural backbone of AI Net Studio's "Network Intelligence".
 
 Network Intelligence is defined here as ELEVEN capability pillars:
 
@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Dict, List, Optional
 
-logger = logging.getLogger("NetBrain.Intelligence.Capabilities")
+logger = logging.getLogger("AI Net Studio.Intelligence.Capabilities")
 
 
 class CapabilityStatus(str, Enum):

@@ -31,14 +31,15 @@ from typing import Any, Callable, Dict, List, Optional
 
 from mcp.server.fastmcp import FastMCP
 
-logger = logging.getLogger("NetBrain.MCPServer")
+logger = logging.getLogger("AI Net Studio.MCPServer")
 
 mcp = FastMCP("network-intelligence-platform")
 
 
 # ── AI call (standalone — no Streamlit dependency, unlike app.py's call_ai) ──
 _GROQ_BASE_URL = "https://api.groq.com/openai/v1"
-_MODEL_NAME = os.environ.get("NETBRAIN_MODEL", "llama-3.3-70b-versatile")
+from core.legacy_compat import env as _legacy_env
+_MODEL_NAME = _legacy_env("AI_NET_STUDIO_MODEL", "NETBRAIN_MODEL", "llama-3.3-70b-versatile")
 
 
 def _resolve_api_key() -> str:
@@ -71,7 +72,7 @@ def call_ai(prompt: str) -> str:
             model=_MODEL_NAME,
             messages=[
                 {"role": "system", "content": (
-                    "You are NetBrain AI — an expert autonomous network operations "
+                    "You are AI Net Studio — an expert autonomous network operations "
                     "system. Be concise, technical, and action-oriented.")},
                 {"role": "user", "content": prompt},
             ],

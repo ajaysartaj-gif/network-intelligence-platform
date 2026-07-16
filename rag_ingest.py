@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-rag_ingest.py — load knowledge into NetBrain's RAG store
+rag_ingest.py — load knowledge into AI Net Studio's RAG store
 ========================================================
 Real RAG only helps once knowledge is ingested. This CLI loads the two
 source types (phased rollout):
@@ -127,7 +127,7 @@ def cmd_search(args):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Load knowledge into NetBrain RAG.")
+    ap = argparse.ArgumentParser(description="Load knowledge into AI Net Studio RAG.")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("doc", help="ingest one document/runbook file")

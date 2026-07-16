@@ -1,1 +1,1 @@
-"""Database layer for NetBrain AI."""
+"""Database layer for AI Net Studio."""

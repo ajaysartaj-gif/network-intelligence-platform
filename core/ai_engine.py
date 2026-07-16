@@ -74,7 +74,7 @@ def ask_ai(query: str) -> str:
             messages=[
                 {
                     "role": "system",
-                    "content": """You are NetBrain AI, an enterprise-grade network operations assistant.
+                    "content": """You are AI Net Studio, an enterprise-grade network operations assistant.
 
 EXPERTISE AREAS:
 - BGP, OSPF, MPLS, EVPN, VXLAN routing protocols

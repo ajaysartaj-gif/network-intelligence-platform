@@ -29,7 +29,7 @@ from core.intelligence.forecasting.base import (
     ForecastRegistry, Forecast, ForecastType, HOUR, DAY, WEEK, MONTH, QUARTER,
 )
 
-logger = logging.getLogger("NetBrain.Intelligence.Prediction")
+logger = logging.getLogger("AI Net Studio.Intelligence.Prediction")
 
 # default horizon per forecaster key, used by the resolver to know when a
 # prediction has 'matured' enough to be graded.

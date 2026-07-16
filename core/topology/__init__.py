@@ -1,5 +1,5 @@
 """
-NetBrain Network Topology System
+AI Net Studio Network Topology System
 =================================
 Builds site-wise network topology diagrams from real CDP/LLDP discovery,
 with AI chat and PPTX/PDF/Visio export.

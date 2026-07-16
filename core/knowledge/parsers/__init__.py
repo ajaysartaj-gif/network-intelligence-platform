@@ -25,7 +25,7 @@ from core.knowledge.parsers import (
     structured_parser,
 )
 
-logger = logging.getLogger("NetBrain.Knowledge.Parsers")
+logger = logging.getLogger("AI Net Studio.Knowledge.Parsers")
 
 # Real bug caught ingesting core/knowledge/doc_downloader's pdf_downloads/
 # corpus: docs.fortinet.com's "Getting started" page links to Fortinet's

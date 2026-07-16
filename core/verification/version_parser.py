@@ -13,7 +13,7 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
-logger = logging.getLogger("NetBrain.Verification.VersionParser")
+logger = logging.getLogger("AI Net Studio.Verification.VersionParser")
 
 
 @dataclass

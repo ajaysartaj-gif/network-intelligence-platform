@@ -47,7 +47,7 @@ from typing import Any, Dict, List, Optional
 
 from core.topology.discovery import normalize_interface_name
 
-logger = logging.getLogger("NetBrain.Topology.L3Discovery")
+logger = logging.getLogger("AI Net Studio.Topology.L3Discovery")
 
 try:
     from netmiko import ConnectHandler

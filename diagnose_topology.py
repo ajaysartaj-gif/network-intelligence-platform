@@ -38,7 +38,7 @@ from core.topology.topology_engine import build_topology_for_site, list_availabl
 
 def main():
     print("=" * 70)
-    print("NETBRAIN TOPOLOGY DISCOVERY DIAGNOSTIC")
+    print("AI_NET_STUDIO TOPOLOGY DISCOVERY DIAGNOSTIC")
     print("=" * 70)
 
     disc = get_discovery_engine()

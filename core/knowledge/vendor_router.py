@@ -21,7 +21,7 @@ from core.knowledge.fetchers.huawei_fetcher import HuaweiFetcher
 from core.knowledge.fetchers.dell_fetcher import DellFetcher
 from core.knowledge.fetchers.extreme_fetcher import ExtremeFetcher
 
-logger = logging.getLogger("NetBrain.Knowledge.VendorRouter")
+logger = logging.getLogger("AI Net Studio.Knowledge.VendorRouter")
 
 
 # ── Single instance per vendor (fetchers are stateless, safe to share) ──────

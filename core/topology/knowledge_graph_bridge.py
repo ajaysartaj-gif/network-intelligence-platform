@@ -38,7 +38,7 @@ try:
 except Exception:  # pragma: no cover - defensive, mirrors other optional-dep guards in this repo
     discover_neighbors = None
 
-logger = logging.getLogger("NetBrain.Topology.KnowledgeGraphBridge")
+logger = logging.getLogger("AI Net Studio.Topology.KnowledgeGraphBridge")
 
 _DEFAULT_TTL_SECONDS = 15 * 60   # short: this feeds live troubleshooting, not a dashboard
 _cache: Dict[Tuple[str, ...], Tuple[float, KnowledgeGraph]] = {}

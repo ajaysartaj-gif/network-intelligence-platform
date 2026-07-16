@@ -149,7 +149,7 @@ class AutonomousAction(Base):
     ai_confidence = Column(Integer, default=0)
     status = Column(String(32), default="pending", index=True)
     result = Column(Text)
-    executed_by = Column(String(64), default="NetBrain AI")
+    executed_by = Column(String(64), default="AI Net Studio")
     created_at = Column(DateTime, default=datetime.utcnow)
     executed_at = Column(DateTime)
 

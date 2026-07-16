@@ -235,4 +235,4 @@ def test_default_design_memory_backend_is_safe_in_memory_not_json_file():
     mem = DesignMemory()
     assert not isinstance(mem._backend, JSONFileBackend)
     mem.save(DesignSession(query="q"))   # must not touch disk
-    assert not os.path.exists(".netbrain_design_memory.json")
+    assert not os.path.exists(".ai_net_studio_design_memory.json")

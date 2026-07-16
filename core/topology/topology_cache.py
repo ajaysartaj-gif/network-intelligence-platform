@@ -17,9 +17,11 @@ from typing import Dict, Optional
 
 from core.topology.topology_models import TopologyGraph
 
-logger = logging.getLogger("NetBrain.Topology.Cache")
+from core.legacy_compat import migrate_path as _migrate_path
 
-_CACHE_FILE = ".netbrain_topology_cache.json"
+logger = logging.getLogger("AI Net Studio.Topology.Cache")
+
+_CACHE_FILE = _migrate_path(".netbrain_topology_cache.json", ".ai_net_studio_topology_cache.json")
 _DEFAULT_TTL_MINUTES = 60   # consider a cached topology "fresh" for 1 hour
 # Bump whenever a change to discovery/reconciliation alters the SHAPE of the
 # stored graph (which nodes/links exist), so a graph cached on disk by older

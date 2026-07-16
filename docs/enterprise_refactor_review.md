@@ -1,8 +1,8 @@
-# NetBrain AI Enterprise Refactor Review
+# AI Net Studio Enterprise Refactor Review
 
 ## 1. Executive Summary
 
-NetBrain AI is functionally rich but concentrated in a single Streamlit entry point. The safest modernization path is incremental extraction: constants/theme/utilities first, reusable UI components second, AI orchestration third, services fourth, and workspace modules last. This preserves all workspaces and business workflows while reducing rerender cost, duplicated code, and security exposure.
+AI Net Studio is functionally rich but concentrated in a single Streamlit entry point. The safest modernization path is incremental extraction: constants/theme/utilities first, reusable UI components second, AI orchestration third, services fourth, and workspace modules last. This preserves all workspaces and business workflows while reducing rerender cost, duplicated code, and security exposure.
 
 ## 2. Critical Problems
 

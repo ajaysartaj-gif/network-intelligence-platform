@@ -15,7 +15,7 @@ from typing import Dict, List
 
 from core.knowledge.base import Citation, ConfidenceLevel, KnowledgeEntry
 
-logger = logging.getLogger("NetBrain.Knowledge.CitationTracker")
+logger = logging.getLogger("AI Net Studio.Knowledge.CitationTracker")
 
 
 @dataclass

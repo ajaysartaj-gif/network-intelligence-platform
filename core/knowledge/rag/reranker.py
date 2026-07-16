@@ -24,7 +24,7 @@ import re
 from abc import ABC, abstractmethod
 from typing import List, Optional, Tuple
 
-logger = logging.getLogger("NetBrain.Knowledge.RAG.Reranker")
+logger = logging.getLogger("AI Net Studio.Knowledge.RAG.Reranker")
 
 
 class Reranker(ABC):

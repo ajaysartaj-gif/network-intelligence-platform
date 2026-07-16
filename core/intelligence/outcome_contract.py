@@ -42,7 +42,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Dict, List, Optional
 
-logger = logging.getLogger("NetBrain.Intelligence.OutcomeContract")
+logger = logging.getLogger("AI Net Studio.Intelligence.OutcomeContract")
 
 # AI interface reused from the rest of the tool: prompt -> text.
 AiCall = Callable[[str], str]

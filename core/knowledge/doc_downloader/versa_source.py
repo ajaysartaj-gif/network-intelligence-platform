@@ -35,7 +35,7 @@ try:
 except ImportError:
     REQUESTS_OK = False
 
-logger = logging.getLogger("NetBrain.Knowledge.DocDownloader.Versa")
+logger = logging.getLogger("AI Net Studio.Knowledge.DocDownloader.Versa")
 
 BASE_URL = "https://docs.versa-networks.com"
 SITEMAP_URL = f"{BASE_URL}/sitemap.xml"

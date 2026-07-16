@@ -128,9 +128,16 @@ class Hypothesis:
     evidence_ids: List[str] = field(default_factory=list)
     deltas: List[ConfidenceDelta] = field(default_factory=list)
     at: str = field(default_factory=_now)
+    # The confidence this hypothesis started at, before any evidence delta —
+    # kept so a report can explain a large gap between a compiled signature's
+    # own baseline confidence and the final, evidence-adjusted score (e.g.
+    # "55% compiled baseline -> 97% after 4 evidence updates") instead of
+    # just showing the final number with no visible calculation.
+    prior_confidence: float = 0.0
 
     def set_prior(self, prior_confidence: float) -> None:
         self._log_odds = logit(prior_confidence)
+        self.prior_confidence = round(prior_confidence, 4)
 
     @property
     def confidence(self) -> float:
@@ -232,6 +239,15 @@ class Session:
     # presentational, same boundary as synthesized_answer — never feeds
     # ConfidenceCalculator or hypothesis ranking.
     reasoning_chain: Optional[Dict[str, Any]] = None
+    # Set when the user's own question names a specific FSM state (e.g. "why
+    # is OSPF stuck in ExStart") that the actually-observed state contradicts
+    # (e.g. the neighbor is really in Down) — {"asked_state", "observed_state",
+    # "devices"}. Without this, the engine silently investigated a DIFFERENT
+    # problem than the one asked about while the Goal text kept repeating the
+    # user's original (factually wrong) premise, with no indication anywhere
+    # that the two didn't match. Purely presentational; never feeds
+    # ConfidenceCalculator or hypothesis ranking.
+    goal_mismatch: Optional[Dict[str, Any]] = None
 
     def active_hypotheses(self) -> List[Hypothesis]:
         return [h for h in self.hypotheses if h.state == HypothesisState.ACTIVE]
@@ -296,6 +312,13 @@ class TroubleshootReport:
             "knowledge_sources": list(s.knowledge_sources),
             "synthesized_answer": s.synthesized_answer,
             "reasoning_chain": s.reasoning_chain,
+            "goal_mismatch": s.goal_mismatch,
+            "confidence_trace": (
+                {"prior": top.prior_confidence, "final": top.confidence,
+                 "evidence_updates": len(top.deltas)}
+                if top and top.deltas and abs(top.confidence - top.prior_confidence) >= 0.005
+                else None
+            ),
         }
 
     def to_markdown(self) -> str:
@@ -304,6 +327,21 @@ class TroubleshootReport:
         lines: List[str] = []
         lines.append(f"### 🎯 Goal\n{s.goal.objective or s.goal.query if s.goal else ''}")
         lines.append(f"\n**Current state:** `{s.status.value}`  ·  **Steps:** {s.steps_taken}")
+
+        if s.goal_mismatch:
+            gm = s.goal_mismatch
+            devices = ", ".join(gm.get("devices") or []) or "the observed device(s)"
+            lines.append("\n### ⚠️ Question vs. Evidence Mismatch")
+            lines.append(
+                f"You asked about a neighbor stuck in **{gm['asked_state']}**, but the evidence "
+                f"collected does not show any neighbor in that state.\n\n"
+                f"**Current observation:** {devices} — neighbor state = `{gm['observed_state']}`\n\n"
+                f"Since no adjacency has progressed beyond **{gm['observed_state']}**, the reported "
+                f"problem (\"stuck in {gm['asked_state']}\") cannot be confirmed. The analysis below "
+                f"addresses the actual observed condition (**{gm['observed_state']}**) instead — if "
+                f"you have a different device that IS stuck in {gm['asked_state']}, point the "
+                f"investigation at that device."
+            )
 
         if s.synthesized_answer:
             lines.append("\n### 🔎 Synthesized Answer")
@@ -336,6 +374,12 @@ class TroubleshootReport:
             lines.append(f"\n### ⏭️ Next Best Command\n`{s.next_best_command}`")
 
         lines.append(f"\n### 📊 Confidence Score\n**{(top.confidence if top else 0.0):.0%}**")
+        if top and top.deltas and abs(top.confidence - top.prior_confidence) >= 0.005:
+            lines.append(
+                f"_Compiled baseline {top.prior_confidence:.0%} → {top.confidence:.0%} "
+                f"after {len(top.deltas)} evidence update(s) — see Reasoning Chain / "
+                f"Active Hypotheses rationale for what each update was._"
+            )
 
         if s.reasoning_chain:
             rc = s.reasoning_chain

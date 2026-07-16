@@ -25,7 +25,7 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
-logger = logging.getLogger("NetBrain.Intelligence.Memory.Store")
+logger = logging.getLogger("AI Net Studio.Intelligence.Memory.Store")
 
 # Reuse the episodic memory's backend + cosine so derived memories live in the
 # very same store (same DSN / same SQLite file) and share its dialect handling.
@@ -33,7 +33,7 @@ try:
     from core.intelligence.operational_memory import _Backend, _DB_PATH, _cosine
 except Exception:  # pragma: no cover - extremely defensive
     _Backend = None       # type: ignore
-    _DB_PATH = ".netbrain_memory.sqlite"
+    _DB_PATH = ".ai_net_studio_memory.sqlite"
 
     def _cosine(a, b):     # type: ignore
         if not a or not b or len(a) != len(b):
@@ -54,8 +54,8 @@ def _backend():
     if _SHARED_BE is None:
         if _Backend is None:
             raise RuntimeError("memory backend unavailable")
-        import os
-        dsn = os.environ.get("NETBRAIN_MEMORY_DSN", "")
+        from core.legacy_compat import env as _legacy_env
+        dsn = _legacy_env("AI_NET_STUDIO_MEMORY_DSN", "NETBRAIN_MEMORY_DSN", "")
         try:
             _SHARED_BE = _Backend(dsn=dsn, sqlite_path=_DB_PATH)
         except Exception as exc:

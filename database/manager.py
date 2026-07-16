@@ -66,8 +66,10 @@ def get_engine():
         )
         logger.info("Connected to PostgreSQL")
     else:
+        from core.legacy_compat import migrate_path
+        migrate_path("netbrain.db", "ai_net_studio.db")
         engine = create_engine(
-            "sqlite:///netbrain.db",
+            "sqlite:///ai_net_studio.db",
             connect_args={"check_same_thread": False},
             poolclass=StaticPool,
         )

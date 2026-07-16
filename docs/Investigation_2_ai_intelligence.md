@@ -1,5 +1,5 @@
 # Investigation 2 — AI Intelligence Architecture
-### NetBrain AI (`network-intelligence-platform`) — every AI component, reverse-engineered from source
+### AI Net Studio (`network-intelligence-platform`) — every AI component, reverse-engineered from source
 
 > Rules honored: only repository evidence; no speculation; no assumed prompts or reasoning.
 > Every component cites file / class / function / line from the working tree. Anything not
@@ -16,7 +16,7 @@
 | 3 | Prompt Builder | `core/ai_config.py` | `build_prompt` :355 |
 | 4 | Groq Integration | `core/ai_engine.py` / `app.py` | `get_client` :53 / `call_ai` :354 |
 | 5 | LLM Invocation | `app.py` / `core/ai_engine.py` | `call_ai` :354 / `ask_ai` :67 |
-| 6 | System Prompts | `core/ai_config.py` + 3 more | `NETBRAIN_ENGINE_PREAMBLE` :187 |
+| 6 | System Prompts | `core/ai_config.py` + 3 more | `AI_NET_STUDIO_ENGINE_PREAMBLE` :187 |
 | 7 | Conversation Memory | `core/orchestration_engine.py` / `app.py` | `query_history` :73 / `nlp_messages` :4363 |
 | 8 | RAG | `core/rag_engine.py` | `RAGEngine.search` :35 |
 | 9 | Knowledge Graph | `core/knowledge_graph.py` | `KnowledgeGraph` :23 |
@@ -68,10 +68,10 @@
 
 - **Purpose:** Assemble the config-generation prompt. Proven: `build_prompt(...)`
   (`core/ai_config.py:355`).
-- **Entry/Exit:** `build_prompt` returns a single string composed of `NETBRAIN_ENGINE_PREAMBLE`
+- **Entry/Exit:** `build_prompt` returns a single string composed of `AI_NET_STUDIO_ENGINE_PREAMBLE`
   (`:187`) + `TARGET DEVICE` + inventory block + `DEVICE DATA` + fleet block + `USER INTENT` +
   a literal `SAFETY (hard deny …)` section (`:374–381`).
-- **Dependencies:** `NETBRAIN_ENGINE_PREAMBLE` (`:187`); helpers `build_inventory_summary` (`:298`),
+- **Dependencies:** `AI_NET_STUDIO_ENGINE_PREAMBLE` (`:187`); helpers `build_inventory_summary` (`:298`),
   `collect_device_context` (`:308`), `build_fleet_topology_context` (`:342`).
 - **Input:** `request, device, device_facts, fleet_context, inventory_summary` (`:356–360`).
 - **Output:** prompt string consumed by `generate_config` at `ai_call(build_prompt(...))` (`:453`).
@@ -109,11 +109,11 @@
 ## 6. System Prompts (verbatim, proven)
 
 Four distinct system prompts exist in source:
-1. **Config engine** — `NETBRAIN_ENGINE_PREAMBLE` (`core/ai_config.py:187`): *“You are NetBrain, a
+1. **Config engine** — `AI_NET_STUDIO_ENGINE_PREAMBLE` (`core/ai_config.py:187`): *“You are AI Net Studio, a
    CCIE-level Network Intelligence Engine…”* (requests internal analysis + JSON sections).
-2. **ask_ai** — `core/ai_engine.py:74` system content: *“You are NetBrain, a CCIE-level Network
+2. **ask_ai** — `core/ai_engine.py:74` system content: *“You are AI Net Studio, a CCIE-level Network
    Intelligence Engine. Analyze topology and device context before recommending changes…”*
-3. **call_ai** — `app.py:367` system content: *“You are NetBrain AI — an expert autonomous network
+3. **call_ai** — `app.py:367` system content: *“You are AI Net Studio — an expert autonomous network
    operations system. Be concise, technical, and action-oriented…”*
 4. **Outcome contract** — `core/intelligence/outcome_contract.py:174+` (interpret) and `:116+`
    (derive) prompts: *“You are a CCIE-level engineer judging whether a post-condition is met…”*

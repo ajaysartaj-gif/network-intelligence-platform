@@ -224,6 +224,17 @@ class RemediationRecipe:
     command_template: str                  # e.g. "standby {fhrp_group} preempt"
     context_param: str = "iface"           # which rendered ctx key gates the optional context line
     defaults: Dict[str, str] = field(default_factory=dict)
+    # Whether context_param is SAFETY-CRITICAL: True (default) means the
+    # command is meaningless/ambiguous without it (e.g. "ip ospf 1 area 0"
+    # with no preceding "interface X" applies to whichever config context
+    # happens to be active) and render_remediation_fix() must refuse the
+    # whole fix rather than silently drop the context line. False is for
+    # the rare case where the command_line ITSELF already carries a
+    # unique identity (e.g. BGP's "no neighbor {neighbor_ip} shutdown" is
+    # unambiguous by neighbor IP alone) — there, an unresolved local_as for
+    # the optional "router bgp {local_as}" context line is a cosmetic gap,
+    # not a safety issue, so the fix may still render without it.
+    context_required: bool = True
 
 
 def render_remediation_fix(spec: RemediationRecipe, protocol: str, params: Dict[str, str]) -> List[str]:
@@ -246,6 +257,38 @@ def render_remediation_fix(spec: RemediationRecipe, protocol: str, params: Dict[
     ctx.update(proto=protocol, iface=iface, neighbor_ip=neighbor_ip,
               fhrp_iface=fhrp_iface, fhrp_group=fhrp_group,
               local_as=params.get("local_as", ""))
+    # A recipe's context_param names whichever piece of scoping evidence
+    # (interface / neighbor_ip / local_as / errdisable_reason / fhrp_iface)
+    # its command references. Two cases require it regardless of
+    # context_required:
+    #   1. It's substituted DIRECTLY into command_template (Junos has no
+    #      separate context-mode step) — an unresolved value there produces
+    #      literally broken/blank syntax, never optional.
+    #   2. It's referenced only in context_template, but the recipe marks
+    #      it context_required=True (the default) — meaning command_line
+    #      alone doesn't already carry an equivalent unique identity. E.g.
+    #      OSPF's "ip ospf 1 area 0" says nothing about WHICH interface;
+    #      omitting "interface {iface}" makes it apply to whichever config
+    #      context happens to be active, not necessarily the interface
+    #      actually under investigation — genuinely unsafe, must refuse.
+    # context_required=False is for recipes whose command_line is ALREADY
+    # unambiguous without this value — e.g. BGP's "no neighbor {neighbor_ip}
+    # shutdown" is uniquely scoped by neighbor_ip alone, so an unresolved
+    # local_as for the optional "router bgp {local_as}" context line is a
+    # cosmetic gap the recipe already documents as safe to skip.
+    #
+    # Before this existed, EVERY interface-scoped recipe silently dropped
+    # its context line the moment {iface} was empty but still emitted the
+    # bare command_line regardless of context_required — refusing here
+    # instead makes the caller (engine._finish()) fall back to a lower-
+    # confidence resolution status rather than a confidently-wrong
+    # RESOLVED_PENDING_APPROVAL with an unsafe, unscoped command.
+    placeholder = "{" + spec.context_param + "}"
+    if placeholder in spec.command_template and not ctx.get(spec.context_param):
+        return []
+    if (spec.context_template and spec.context_required
+            and placeholder in spec.context_template and not ctx.get(spec.context_param)):
+        return []
     context_line = None
     if spec.context_template and ctx.get(spec.context_param):
         context_line = spec.context_template.format(**ctx)
@@ -444,7 +487,17 @@ _OSPF_SIGNATURES = [
 
 _OSPF_NEIGHBOR_PARSER = TableRowParserSpec(
     protocol="ospf", command_key="ospf neighbor",
-    row_pattern=r"(?P<id>\d+\.\d+\.\d+\.\d+)\s+\d+\s+(?P<state>FULL|2WAY|EXSTART|EXCHANGE|LOADING|INIT|ATTEMPT|DOWN)",
+    # The trailing "Dead Time / Address / Interface" columns are OPTIONAL in
+    # the pattern itself (real IOS always prints them, but the state/id
+    # extraction that already worked before this must never start failing
+    # just because a real device's exact column spacing/DR-BDR indicator
+    # doesn't match this tail exactly) — captures the neighbor's actual
+    # interface, previously discarded entirely, so a remediation fix can be
+    # safely scoped to it instead of guessing or applying globally.
+    row_pattern=(r"(?P<id>\d+\.\d+\.\d+\.\d+)\s+\d+\s+"
+                r"(?P<state>FULL|2WAY|EXSTART|EXCHANGE|LOADING|INIT|ATTEMPT|DOWN)"
+                r"(?:/\s*\S+\s+\S+\s+\d+\.\d+\.\d+\.\d+\s+(?P<iface>\S+))?"),
+    extra_attrs={"interface": lambda m: m.group("iface")},
     success_state="FULL",
 )
 
@@ -668,13 +721,18 @@ _BGP_CISCO_RECIPES = [
     # BGP fixes operate under "router bgp <asn>" config mode, not an
     # interface context — local_as is optional (falls through if unknown,
     # same "context line is optional" pattern as OSPF's interface context).
+    # context_required=False: unlike OSPF's "ip ospf 1 area 0" (which says
+    # nothing about WHICH interface without its context line), these
+    # command lines are already uniquely scoped by neighbor_ip alone, so an
+    # unresolved local_as is a cosmetic gap, not an ambiguous/unsafe fix.
     RemediationRecipe(intent_name="remove_bgp_neighbor_shutdown",
                       context_template="router bgp {local_as}", context_param="local_as",
-                      command_template="no neighbor {neighbor_ip} shutdown"),
+                      command_template="no neighbor {neighbor_ip} shutdown",
+                      context_required=False),
     RemediationRecipe(intent_name="add_bgp_ebgp_multihop",
                       context_template="router bgp {local_as}", context_param="local_as",
                       command_template="neighbor {neighbor_ip} ebgp-multihop {hops}",
-                      defaults={"hops": "2"}),
+                      defaults={"hops": "2"}, context_required=False),
 ]
 
 _BGP_VERIFICATION = VerificationTemplate(

@@ -25,7 +25,7 @@ from core.knowledge.base import (
     KnowledgeEntry,
 )
 
-logger = logging.getLogger("NetBrain.Knowledge.Cache")
+logger = logging.getLogger("AI Net Studio.Knowledge.Cache")
 
 # ── Default cache location (gitignored) ──────────────────────────────────────
 DEFAULT_CACHE_DIR = os.path.join(

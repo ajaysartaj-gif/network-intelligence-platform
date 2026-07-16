@@ -36,7 +36,7 @@ from core.knowledge.parsers import extract_text as parser_extract_text, supporte
 from core.knowledge_graph import GraphRelationship, KnowledgeGraph
 from core.vendor.models import NormalizedObject
 
-logger = logging.getLogger("NetBrain.Knowledge.Compiler")
+logger = logging.getLogger("AI Net Studio.Knowledge.Compiler")
 
 _TEXT_EXTS = {".md", ".txt", ".rst", ".text", ".markdown", ".cfg", ".conf", ".log"}
 _STRUCTURED_EXTS = {".json", ".yaml", ".yml", ".xml"}

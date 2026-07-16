@@ -36,7 +36,7 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
-logger = logging.getLogger("NetBrain.Intelligence.Memory.Consolidation")
+logger = logging.getLogger("AI Net Studio.Intelligence.Memory.Consolidation")
 
 _PROTOS = ("ospf", "bgp", "eigrp", "rip", "isis", "mpls", "vlan",
            "interface", "acl", "nat", "hsrp", "vrrp", "stp", "dhcp", "ntp")

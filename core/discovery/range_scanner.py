@@ -48,7 +48,7 @@ from typing import Callable, Dict, List, Optional
 
 from core.discovery.network_ranges import iter_hosts, host_count
 
-logger = logging.getLogger("NetBrain.Discovery.Scanner")
+logger = logging.getLogger("AI Net Studio.Discovery.Scanner")
 
 DEFAULT_PORTS = (22, 23, 80, 443)
 DEFAULT_CONCURRENCY = 300

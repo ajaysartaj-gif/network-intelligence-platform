@@ -188,6 +188,16 @@ class TroubleshootingEngine:
         # even when the loop contributes nothing further at all.
         hmgr.reap()
 
+        # Now that the actual protocol state (if any) has been observed,
+        # check it against what the user's own question claimed — before
+        # any further LLM hypothesis generation, so the report can flag a
+        # contradicted premise from the very start rather than as an
+        # afterthought bolted onto a conclusion about a different state.
+        try:
+            self._check_goal_evidence_match(session, query)
+        except Exception as exc:
+            logger.debug("Goal-evidence match check skipped: %s", exc)
+
         # 1. seed hypotheses FROM the objective + the state just observed —
         #    the LLM EXTENDS the deterministic seed above, it never replaces it
         #    (existing statements are passed so it doesn't duplicate them).
@@ -493,6 +503,16 @@ class TroubleshootingEngine:
                 if kv.get("errdisable_reason"):
                     facts.append({"subject": f"neighbor.{oid or '?'}",
                                  "attribute": "errdisable_reason", "value": kv["errdisable_reason"]})
+                # The specific interface this neighbor relationship is ON
+                # (e.g. OSPF's neighbor table's own trailing "Interface"
+                # column) — lets a remediation fix be safely scoped to the
+                # actual interface under investigation instead of falling
+                # back to whatever interface.*.mtu observation happened to
+                # be recorded first, or refusing the fix outright for lack
+                # of any interface context at all.
+                if kv.get("interface"):
+                    facts.append({"subject": f"neighbor.{oid or '?'}",
+                                 "attribute": "interface", "value": kv["interface"]})
             elif otype == "protocol":
                 if kv.get("adjacency"):
                     facts.append({"subject": f"protocol.{oid or '?'}",
@@ -643,6 +663,53 @@ class TroubleshootingEngine:
             if o.attribute == "state" and "protocol" in o.subject.lower() and o.value:
                 return o
         return None
+
+    # Matches how people actually phrase this kind of question ("stuck in
+    # ExStart", "stuck at Down", "stuck into the Exstart") — deliberately
+    # anchored on "stuck" so a query that merely mentions a state word in
+    # passing ("the link went down") isn't misread as a deliberate claim
+    # about the FSM state.
+    _ASKED_STATE_RE = re.compile(r"stuck\s+(?:in|at|into)\s+(?:the\s+)?([A-Za-z0-9\-]+)", re.IGNORECASE)
+
+    def _check_goal_evidence_match(self, session: Session, query: str) -> None:
+        """Detects when the user's own question names a specific FSM state
+        (e.g. "why is OSPF stuck in ExStart") that the actually-observed
+        state contradicts (e.g. the neighbor is really in Down).
+
+        Before this, the engine would silently investigate and correctly
+        diagnose the REAL observed state while the report's Goal text kept
+        repeating the user's original, factually-contradicted premise
+        verbatim — nothing anywhere told the user their own question's
+        premise didn't match reality. A human engineer's first move here is
+        to say so explicitly, not silently answer a different question.
+        Sets session.goal_mismatch so the report can surface an explicit
+        correction; never blocks the rest of the investigation, since the
+        actually-observed state is still a real, worth-investigating
+        problem."""
+        m = self._ASKED_STATE_RE.search(query or "")
+        if not m:
+            return
+        protocol = self._detect_protocol(query)
+        from core.knowledge.compiler.protocol_models import build_protocol_model
+        model = build_protocol_model(protocol)
+        if model is None:
+            return
+        asked_norm = self._norm_state(m.group(1))
+        asked_state = next((s for s in model.states if self._norm_state(s) == asked_norm), None)
+        if not asked_state:
+            return
+        obs = self._observed_protocol_state_obs(session)
+        if obs is None:
+            return
+        observed_norm = self._norm_state(obs.value)
+        if not observed_norm or observed_norm == asked_norm:
+            return
+        observed_state = next((s for s in model.states if self._norm_state(s) == observed_norm), obs.value)
+        devices = sorted({o.device for o in session.observations
+                          if o.attribute == "state" and self._norm_state(o.value) == observed_norm and o.device})
+        session.goal_mismatch = {
+            "asked_state": asked_state, "observed_state": observed_state, "devices": devices,
+        }
 
     def _bind_compiled_signature_evidence(self, session: Session, hmgr: HypothesisManager,
                                           conf: ConfidenceCalculator) -> None:
@@ -1054,6 +1121,17 @@ class TroubleshootingEngine:
                     if m and m.group(1):
                         iface = m.group(1)
                         break
+                # Second priority: the specific interface named in the
+                # neighbor table row for the adjacency actually under
+                # investigation (e.g. OSPF's "show ip ospf neighbor" own
+                # trailing Interface column) — more reliable than the
+                # generic mtu-observation fallback below, which can pick an
+                # unrelated interface on a multi-interface device.
+                if not iface:
+                    for o in reversed(session.observations):
+                        if o.subject.startswith("neighbor.") and o.attribute == "interface" and o.value:
+                            iface = o.value
+                            break
                 for o in session.observations:
                     if o.subject.startswith("interface.") and o.attribute == "mtu" and not iface:
                         iface = o.subject.split(".", 1)[1]

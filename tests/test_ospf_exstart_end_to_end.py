@@ -127,6 +127,11 @@ def test_ospf_exstart_mtu_mismatch_converges_to_a_real_proposed_fix(monkeypatch)
     assert top is not None and top.confidence >= 0.80, (top.statement if top else None, top.confidence if top else None)
     assert s.fix is not None, "no fix generated despite a converged, grounded MTU diagnosis"
     assert s.fix.config_commands
+    # The fix must be scoped to the actual interface under investigation —
+    # a bare "ip ospf mtu-ignore" with no preceding "interface X" line
+    # would apply to whichever config context happens to be active, not
+    # necessarily the interface the whole diagnosis was about.
+    assert s.fix.config_commands[0] == "interface GigabitEthernet0/0", s.fix.config_commands
 
     # The reasoning-chain feedback this session also closes: the report
     # explains WHY ExStart implicates MTU, not just the bare conclusion.

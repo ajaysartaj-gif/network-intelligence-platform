@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-NetBrain AI Orchestration Test Suite - Validates core autonomous capabilities.
+AI Net Studio Orchestration Test Suite - Validates core autonomous capabilities.
 """
 
 from core.orchestration_engine import OperationsOrchestrator
@@ -195,7 +195,7 @@ def test_orchestration_queries(orch):
 def main():
     """Run all tests"""
     print("\n" + "=" * 70)
-    print("NetBrain AI Orchestration Test Suite")
+    print("AI Net Studio Orchestration Test Suite")
     print("=" * 70)
     
     try:

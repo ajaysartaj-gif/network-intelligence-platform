@@ -15,7 +15,7 @@ Isolation notes:
     retrospect()/learn_from() reach through Corpus/learners to GLOBAL
     module-level singletons (core.intelligence.operational_memory.
     get_operational_memory(), core.intelligence.memory.get_memory_system())
-    that hardcode ".netbrain_memory.sqlite" with no dependency injection
+    that hardcode ".ai_net_studio_memory.sqlite" with no dependency injection
     — a pre-existing constraint, not introduced by this phase (see
     docs/nkc_supply_chain.md's gap report). Rather than touch the real
     platform memory file from a test run, those facade methods are tested
@@ -73,7 +73,7 @@ def _supply_chain(tmp_path, name="supply-chain-test"):
         layer=_layer(tmp_path, name=name),
         graph=KnowledgeGraph(),
         # dsn="" (not the default None/"auto") forces local SQLite regardless
-        # of NETBRAIN_MEMORY_DSN in os.environ — these tests must never reach
+        # of AI_NET_STUDIO_MEMORY_DSN in os.environ — these tests must never reach
         # the real shared Postgres backend, even if something else in this
         # pytest process (e.g. importing app.py) has bridged that env var in.
         memory=OperationalMemory(db_path=str(tmp_path / "memory.sqlite"), dsn=""),

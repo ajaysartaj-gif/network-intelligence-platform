@@ -18,7 +18,10 @@ class JSONFileBackend:
     — that surprises every test/caller that never asked for persistence, and
     risks concurrent-write corruption under parallel execution (pytest-xdist)."""
 
-    def __init__(self, path: str = ".netbrain_design_memory.json") -> None:
+    def __init__(self, path: Optional[str] = None) -> None:
+        if path is None:
+            from core.legacy_compat import migrate_path
+            path = migrate_path(".netbrain_design_memory.json", ".ai_net_studio_design_memory.json")
         self._path = path
         self._lock = threading.Lock()
         self._data: Dict[str, str] = self._load()

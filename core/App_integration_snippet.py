@@ -75,7 +75,7 @@ elif workspace == "Local Router Access":          # adjust to your tab label
 
 def preload_devices_from_db(db_session):
     """
-    If your NetBrainDB already has a devices/topology table,
+    If your AI Net Studio DB already has a devices/topology table,
     load them into the LocalRouterAccessManager at startup.
     Replace the query below with your actual ORM model.
     """

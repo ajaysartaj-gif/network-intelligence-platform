@@ -30,7 +30,7 @@ from core.knowledge.base import (
 from core.knowledge.cache.ttl_policy import get_ttl
 from core.knowledge.mcp.mcp_client import MCPHttpClient
 
-logger = logging.getLogger("NetBrain.Knowledge.MCP.DevNet")
+logger = logging.getLogger("AI Net Studio.Knowledge.MCP.DevNet")
 
 # Generic words that appear in almost any troubleshooting question or almost
 # any API-doc blurb; excluded from the relevance-overlap check below so a

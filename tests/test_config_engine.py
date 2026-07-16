@@ -170,7 +170,7 @@ def test_default_session_store_backend_is_safe_in_memory_not_json_file():
     would otherwise trigger."""
     store = SessionStore()
     assert not isinstance(store._backend, JSONFileBackend)
-    assert not os.path.exists(".netbrain_config_sessions.json")
+    assert not os.path.exists(".ai_net_studio_config_sessions.json")
     print("[7] default SessionStore backend stays in-memory, no file side effect: PASS")
 
 

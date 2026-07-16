@@ -1,6 +1,6 @@
 """
-NetBrain · Command Resolver
-===========================
+AI Net Studio · Command Resolver
+=================================
 THE single place any code asks "what command does X on a <vendor> device?".
 No caller ever holds a command literal. The resolver follows a strict chain:
 
@@ -28,11 +28,14 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
+from core.legacy_compat import env as _legacy_env
+
 logger = logging.getLogger("command_resolver")
 
-_CACHE_PATH = os.environ.get(
-    "NETBRAIN_CMD_CACHE", os.path.join(os.path.dirname(__file__), ".command_cache.json"))
-_CACHE_TTL = int(os.environ.get("NETBRAIN_CMD_CACHE_TTL", str(30 * 24 * 3600)))  # 30d
+_CACHE_PATH = _legacy_env(
+    "AI_NET_STUDIO_CMD_CACHE", "NETBRAIN_CMD_CACHE",
+    os.path.join(os.path.dirname(__file__), ".command_cache.json"))
+_CACHE_TTL = int(_legacy_env("AI_NET_STUDIO_CMD_CACHE_TTL", "NETBRAIN_CMD_CACHE_TTL", str(30 * 24 * 3600)))  # 30d
 
 # command-shaped line detector (vendor-neutral): starts with a verb-ish token and
 # contains no prose punctuation. Used to extract commands from RAG/MCP/AI text.

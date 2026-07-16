@@ -57,7 +57,7 @@ flowchart TB
   templates and short-circuits the LLM (`ai_config.py:423–448`) — a real source-of-truth seam.
 - **Honest verification primitive.** `OutcomeContractEngine.enforce` (`outcome_contract.py:224`)
   checks real device output and separates applied/persisted/operational.
-- **Pluggable memory backend.** `_Backend` supports SQLite **and** Postgres via `NETBRAIN_MEMORY_DSN`
+- **Pluggable memory backend.** `_Backend` supports SQLite **and** Postgres via `AI_NET_STUDIO_MEMORY_DSN`
   (`operational_memory.py:87–106,163`).
 - **Concurrency in discovery.** `ThreadPoolExecutor` for neighbor discovery
   (`topology/topology_engine.py:67`, 120 s timeout).
@@ -126,7 +126,7 @@ flowchart TB
   `_engine` singletons (`get_config_intelligence`, `get_operational_memory`, etc.) — process-local
   state that does not survive horizontal scaling.
 - **SQLite default for the shared brain** (`operational_memory.py:106`) — fine single-node, a
-  contention point under concurrency unless `NETBRAIN_MEMORY_DSN` points at Postgres.
+  contention point under concurrency unless `AI_NET_STUDIO_MEMORY_DSN` points at Postgres.
 
 ---
 

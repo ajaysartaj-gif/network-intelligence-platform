@@ -23,7 +23,7 @@ import socket
 from dataclasses import dataclass
 from typing import Iterator, List, Optional, Tuple
 
-logger = logging.getLogger("NetBrain.Discovery.Ranges")
+logger = logging.getLogger("AI Net Studio.Discovery.Ranges")
 
 try:
     import psutil

@@ -27,7 +27,7 @@ from core.topology.role_classifier import classify_role
 from core.topology.layout import compute_layout
 from core.topology.topology_cache import get_topology_cache
 
-logger = logging.getLogger("NetBrain.Topology.Engine")
+logger = logging.getLogger("AI Net Studio.Topology.Engine")
 
 
 def build_topology_for_site(

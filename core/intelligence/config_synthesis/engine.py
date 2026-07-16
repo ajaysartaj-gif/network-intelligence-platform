@@ -25,19 +25,20 @@ from core.intelligence.config_synthesis.verification import (
     verify_plan, VerificationReport, save_repair_directive,
 )
 
-logger = logging.getLogger("NetBrain.Intelligence.ConfigSynthesis")
+logger = logging.getLogger("AI Net Studio.Intelligence.ConfigSynthesis")
 
 
 def _default_environment() -> Dict[str, Any]:
     """Isolated GNS3 labs cannot reach public DNS/NTP; default to isolated unless
     told otherwise, so we never fail a correct config on unreachable externals.
-    A reachable in-lab NTP server can be supplied via NETBRAIN_LAB_NTP."""
-    isolated = os.environ.get("NETBRAIN_ENV_ISOLATED", "1") not in ("0", "false", "no")
+    A reachable in-lab NTP server can be supplied via AI_NET_STUDIO_LAB_NTP."""
+    from core.legacy_compat import env as _legacy_env
+    isolated = _legacy_env("AI_NET_STUDIO_ENV_ISOLATED", "NETBRAIN_ENV_ISOLATED", "1") not in ("0", "false", "no")
     env: Dict[str, Any] = {"isolated": isolated}
-    lab_ntp = os.environ.get("NETBRAIN_LAB_NTP", "")
+    lab_ntp = _legacy_env("AI_NET_STUDIO_LAB_NTP", "NETBRAIN_LAB_NTP", "")
     if lab_ntp:
         env["ntp_server"] = lab_ntp
-    lab_dns = os.environ.get("NETBRAIN_LAB_DNS", "")
+    lab_dns = _legacy_env("AI_NET_STUDIO_LAB_DNS", "NETBRAIN_LAB_DNS", "")
     if lab_dns:
         env["dns_servers"] = [s.strip() for s in lab_dns.split(",") if s.strip()]
     return env

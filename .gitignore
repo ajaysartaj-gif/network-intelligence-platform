@@ -20,8 +20,13 @@ core/.env
 .knowledge_cache/
 *.knowledge.db
 
-# ── NetBrain local data stores ──────────────────────────
-# Local accumulated data, not code — must not be committed.
+# ── AI Net Studio local data stores ──────────────────────
+# Local accumulated data, not code — must not be committed. Legacy
+# (pre-rename) names kept too so an unmigrated existing checkout doesn't
+# suddenly start tracking its own local data.
+.ai_net_studio_memory.sqlite
+.ai_net_studio_rag_chroma/
+.ai_net_studio_topology_cache.json
 .netbrain_memory.sqlite
 .netbrain_rag_chroma/
 .netbrain_topology_cache.json

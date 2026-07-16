@@ -1,7 +1,7 @@
 """
 core/knowledge/base.py
 ======================
-Foundation for the NetBrain Knowledge System.
+Foundation for the AI Net Studio Knowledge System.
 
 Defines the data contracts every layer uses:
   - Citation        : provenance metadata (source, URL, confidence)
@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-logger = logging.getLogger("NetBrain.Knowledge")
+logger = logging.getLogger("AI Net Studio.Knowledge")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

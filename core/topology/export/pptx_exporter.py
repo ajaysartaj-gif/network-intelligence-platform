@@ -24,7 +24,7 @@ from core.topology.layout import (
 )
 from core.topology.interface_naming import abbreviate_interface
 
-logger = logging.getLogger("NetBrain.Topology.Export.PPTX")
+logger = logging.getLogger("AI Net Studio.Topology.Export.PPTX")
 
 try:
     from pptx import Presentation

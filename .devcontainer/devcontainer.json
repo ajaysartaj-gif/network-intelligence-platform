@@ -1,5 +1,5 @@
 {
-  "name": "NetBrain AI",
+  "name": "AI Net Studio",
   "image": "mcr.microsoft.com/devcontainers/python:1-3.11-bookworm",
 
   "customizations": {
@@ -25,7 +25,7 @@
 
   "portsAttributes": {
     "8501": {
-      "label": "NetBrain AI App",
+      "label": "AI Net Studio App",
       "onAutoForward": "openPreview",
       "visibility": "public"
     }

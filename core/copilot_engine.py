@@ -67,7 +67,7 @@ MODES: Dict[str, Dict[str, Any]] = {
         "color": "#2563eb",
         "device_facing": False,   # advisory/generative, does not execute on its own
         "persona": (
-            "You are NetBrain Copilot operating in CONFIGURATION mode. "
+            "You are AI Net Studio Copilot operating in CONFIGURATION mode. "
             "Think and respond strictly as a senior network configuration engineer whose job "
             "is to CONFIGURE networks and services correctly and safely. For every request: "
             "(1) restate the configuration goal in one line; "
@@ -89,7 +89,7 @@ MODES: Dict[str, Dict[str, Any]] = {
         "color": "#f59e0b",
         "device_facing": True,    # runs the diagnostic/fix loop against selected devices
         "persona": (
-            "You are NetBrain Copilot operating in TROUBLESHOOT & FIX mode. "
+            "You are AI Net Studio Copilot operating in TROUBLESHOOT & FIX mode. "
             "Think and respond strictly as a diagnostic network SRE performing root-cause analysis. "
             "Work the problem methodically: "
             "(1) list the most likely hypotheses ranked by probability; "
@@ -109,7 +109,7 @@ MODES: Dict[str, Dict[str, Any]] = {
         "color": "#8b5cf6",
         "device_facing": False,   # advisory, never touches live devices
         "persona": (
-            "You are NetBrain Copilot operating in DESIGN mode. "
+            "You are AI Net Studio Copilot operating in DESIGN mode. "
             "Think and respond strictly as a network architect. Do NOT lead with device CLI. "
             "For every request: "
             "(1) clarify the requirements and constraints (scale, sites, redundancy, security, growth); "

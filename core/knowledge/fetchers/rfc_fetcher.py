@@ -18,7 +18,7 @@ try:
 except ImportError:
     REQUESTS_OK = False
 
-logger = logging.getLogger("NetBrain.Knowledge.RFCFetcher")
+logger = logging.getLogger("AI Net Studio.Knowledge.RFCFetcher")
 
 TRUSTED_DOMAIN = "rfc-editor.org"
 HTTP_TIMEOUT = 10
@@ -30,7 +30,7 @@ HTTP_TIMEOUT = 10
 # directly: OSPFv3/BGP-4/IPv6-ND are all under 250KB; 2328 is the outlier)
 # while still guarding against something pathological.
 MAX_PAGE_SIZE = 2_000_000
-USER_AGENT = "NetBrain-AI/1.0 (network-intelligence-platform)"
+USER_AGENT = "AI Net Studio-AI/1.0 (network-intelligence-platform)"
 
 
 def fetch_rfc_text(number: int) -> Optional[Dict[str, str]]:

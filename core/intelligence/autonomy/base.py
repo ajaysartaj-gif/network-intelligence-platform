@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from enum import Enum, IntEnum
 from typing import Any, Dict, List, Optional
 
-logger = logging.getLogger("NetBrain.Intelligence.Autonomy")
+logger = logging.getLogger("AI Net Studio.Intelligence.Autonomy")
 
 
 # ── the autonomy ladder ──────────────────────────────────────────────────────
@@ -62,7 +62,8 @@ class AutonomyLevel(IntEnum):
 # The configured CEILING — autonomy can never exceed this regardless of how much
 # competence is earned. Defaults to APPROVE_GATED: safe out of the box.
 def autonomy_ceiling() -> AutonomyLevel:
-    return AutonomyLevel.parse(os.environ.get("NETBRAIN_AUTONOMY_MAX", "approve_gated"))
+    from core.legacy_compat import env as _legacy_env
+    return AutonomyLevel.parse(_legacy_env("AI_NET_STUDIO_AUTONOMY_MAX", "NETBRAIN_AUTONOMY_MAX", "approve_gated"))
 
 
 class Verdict(str, Enum):

@@ -1,1 +1,1 @@
-"""NetBrain AI Core Engines."""
+"""AI Net Studio Core Engines."""

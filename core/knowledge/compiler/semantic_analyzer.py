@@ -23,7 +23,7 @@ from typing import Any, Callable, Dict, List, Optional
 from core.knowledge.compiler.ast_builder import ASTNode
 from core.knowledge.compiler.tokens import TokenType
 
-logger_name = "NetBrain.Knowledge.Compiler.SemanticAnalyzer"
+logger_name = "AI Net Studio.Knowledge.Compiler.SemanticAnalyzer"
 
 
 @dataclass

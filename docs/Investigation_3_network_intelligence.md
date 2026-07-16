@@ -1,5 +1,5 @@
 # Investigation 3 — Network Intelligence Architecture
-### How NetBrain AI models, discovers, and reasons about networks — reverse-engineered from source
+### How AI Net Studio models, discovers, and reasons about networks — reverse-engineered from source
 
 > Rules honored: repository evidence only; no inferred networking behavior; **no assumed vendors or
 > protocols**; no invented topology. Every statement cites file / class / function / line.
@@ -85,7 +85,7 @@
   `get_range_scanner()` singleton (`:252`), `ScanProgress` (`:64`).
 - **Dependencies:** `DiscoveredDevice` (`:42`), `TroubleshootSession` (`:69`),
   `DeviceLogStore` (`:957`), `_save_device_state` (`:1060`).
-- **Output:** discovered devices + persisted device log state (`.netbrain_device_logs.json`,
+- **Output:** discovered devices + persisted device log state (`.ai_net_studio_device_logs.json`,
   `DeviceLogStore.__init__` default path `:963`).
 
 ## 5. Inventory
@@ -129,7 +129,7 @@
   collects BGP peer state (1 literal `BGP` reference found).
 > **OSPF, EIGRP, IS-IS, HSRP, VRRP, STP discovery logic: Not found in repository** (0 occurrences
 > in `discovery.py`, `l3_discovery.py`, `observability_engine.py`, `role_classifier.py`). Those
-> tokens appear only inside LLM **prompt text** (e.g. `NETBRAIN_ENGINE_PREAMBLE`), not as discovery
+> tokens appear only inside LLM **prompt text** (e.g. `AI_NET_STUDIO_ENGINE_PREAMBLE`), not as discovery
 > code.
 
 ## 9. Vendor Detection

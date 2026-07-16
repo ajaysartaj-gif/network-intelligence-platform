@@ -18,7 +18,14 @@ from database.models import (
     Telemetry,
 )
 
-DATABASE_URL = os.environ.get("NETBRAIN_DATABASE_URL", "sqlite:///netbrain_ai.db")
+from core.legacy_compat import env as _legacy_env, migrate_path as _migrate_path
+
+_explicit_db_url = _legacy_env("AI_NET_STUDIO_DATABASE_URL", "NETBRAIN_DATABASE_URL", "")
+if _explicit_db_url:
+    DATABASE_URL = _explicit_db_url
+else:
+    _migrate_path("netbrain_ai.db", "ai_net_studio_ai.db")
+    DATABASE_URL = "sqlite:///ai_net_studio_ai.db"
 
 engine: Engine = create_engine(
     DATABASE_URL,

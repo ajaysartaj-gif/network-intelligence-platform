@@ -41,7 +41,7 @@ try:
 except ImportError:
     BS4_OK = False
 
-logger = logging.getLogger("NetBrain.Knowledge.DocDownloader.PaloAlto")
+logger = logging.getLogger("AI Net Studio.Knowledge.DocDownloader.PaloAlto")
 
 BASE_URL = "https://pan.dev"
 SITEMAP_URL = f"{BASE_URL}/sitemap.xml"

@@ -43,7 +43,7 @@ The next lines should look like this:
 
 ```python
 """
-NetBrain AI — Autonomous Network Operating System
+AI Net Studio — Autonomous Network Operating System
 app.py — Main entry point (Streamlit)
 ```
 

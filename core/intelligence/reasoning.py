@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 
-logger = logging.getLogger("NetBrain.Intelligence.Reasoning")
+logger = logging.getLogger("AI Net Studio.Intelligence.Reasoning")
 
 
 class EpistemicType(str, Enum):

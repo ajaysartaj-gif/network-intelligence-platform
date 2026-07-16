@@ -265,7 +265,7 @@ def _real_supply_chain(tmp_path):
     return NetworkIntelligenceSupplyChain(
         layer=EnterpriseKnowledgeLayer(rag=rag),
         graph=KnowledgeGraph(),
-        # dsn="" forces local SQLite regardless of NETBRAIN_MEMORY_DSN in
+        # dsn="" forces local SQLite regardless of AI_NET_STUDIO_MEMORY_DSN in
         # os.environ — see the matching comment in tests/test_supply_chain.py.
         # This suite exercises GovernanceEngine, whose autonomy/policy stack
         # can trigger a lazy `import app` that bridges the real Supabase DSN
@@ -326,6 +326,7 @@ def test_record_ts_outcome_success_writes_real_resolution(tmp_path, monkeypatch)
     # Force local SQLite regardless of ambient NETBRAIN_MEMORY_DSN (bridged from
     # secrets in some environments) — this test's isolation depends on a fresh
     # temp-file backend, same assumption tests/test_supply_chain.py makes.
+    monkeypatch.delenv("AI_NET_STUDIO_MEMORY_DSN", raising=False)
     monkeypatch.delenv("NETBRAIN_MEMORY_DSN", raising=False)
     import core.knowledge.compiler.supply_chain as sc_mod
     sc = _real_supply_chain(tmp_path)
@@ -341,6 +342,7 @@ def test_record_ts_outcome_success_writes_real_resolution(tmp_path, monkeypatch)
 
 
 def test_record_ts_outcome_failure_feeds_recurring_failure_detection(tmp_path, monkeypatch):
+    monkeypatch.delenv("AI_NET_STUDIO_MEMORY_DSN", raising=False)
     monkeypatch.delenv("NETBRAIN_MEMORY_DSN", raising=False)
     import core.knowledge.compiler.supply_chain as sc_mod
     sc = _real_supply_chain(tmp_path)
@@ -362,6 +364,7 @@ def test_record_ts_outcome_closes_the_live_session_as_resolved(tmp_path, monkeyp
     with no write-back once a human actually confirmed the fix worked.
     _record_ts_outcome must mutate the SAME Session object it was given
     (pending_state["session"]) via Session.close(), not just record learning."""
+    monkeypatch.delenv("AI_NET_STUDIO_MEMORY_DSN", raising=False)
     monkeypatch.delenv("NETBRAIN_MEMORY_DSN", raising=False)
     import core.knowledge.compiler.supply_chain as sc_mod
     from core.troubleshooting.models import ResolutionStatus, Session
@@ -378,6 +381,7 @@ def test_record_ts_outcome_closes_the_live_session_as_resolved(tmp_path, monkeyp
 
 
 def test_record_ts_outcome_closes_the_live_session_as_unresolved(tmp_path, monkeypatch):
+    monkeypatch.delenv("AI_NET_STUDIO_MEMORY_DSN", raising=False)
     monkeypatch.delenv("NETBRAIN_MEMORY_DSN", raising=False)
     import core.knowledge.compiler.supply_chain as sc_mod
     from core.troubleshooting.models import ResolutionStatus, Session
@@ -396,6 +400,7 @@ def test_record_ts_outcome_closes_the_live_session_as_unresolved(tmp_path, monke
 def test_record_ts_outcome_tolerates_pending_state_with_no_session(tmp_path, monkeypatch):
     """Older/other pending_state dicts (e.g. built before this change, or in
     a code path that never attached a session) must not raise."""
+    monkeypatch.delenv("AI_NET_STUDIO_MEMORY_DSN", raising=False)
     monkeypatch.delenv("NETBRAIN_MEMORY_DSN", raising=False)
     import core.knowledge.compiler.supply_chain as sc_mod
     sc = _real_supply_chain(tmp_path)

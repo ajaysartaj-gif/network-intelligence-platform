@@ -1,7 +1,7 @@
 """
 core/knowledge/rag
 ==================
-Real semantic RAG for NetBrain: local embeddings (sentence-transformers)
+Real semantic RAG for AI Net Studio: local embeddings (sentence-transformers)
 + persistent ChromaDB + symptom/resolution incident memory.
 
 Public surface:

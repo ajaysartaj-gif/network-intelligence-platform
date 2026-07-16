@@ -23,7 +23,7 @@ from core.knowledge.enterprise.knowledge_layer import (
 )
 from core.knowledge.parsers import extract_text, supported_extensions
 
-logger = logging.getLogger("NetBrain.Knowledge.Pipelines")
+logger = logging.getLogger("AI Net Studio.Knowledge.Pipelines")
 
 _TEXT_EXTS = {".md", ".txt", ".rst", ".text", ".markdown", ".cfg", ".conf"}
 

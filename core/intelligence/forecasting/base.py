@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-logger = logging.getLogger("NetBrain.Intelligence.Forecasting")
+logger = logging.getLogger("AI Net Studio.Intelligence.Forecasting")
 
 # Convenience horizons (seconds).
 HOUR = 3600.0

@@ -22,7 +22,7 @@ from core.topology.layout import (
 )
 from core.topology.l3_topology import compute_l3_status
 
-logger = logging.getLogger("NetBrain.Topology.PlotlyView")
+logger = logging.getLogger("AI Net Studio.Topology.PlotlyView")
 
 try:
     import plotly.graph_objects as go

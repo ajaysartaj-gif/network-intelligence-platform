@@ -28,7 +28,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-logger = logging.getLogger("NetBrain.Topology.Discovery")
+logger = logging.getLogger("AI Net Studio.Topology.Discovery")
 
 try:
     from netmiko import ConnectHandler

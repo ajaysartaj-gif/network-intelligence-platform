@@ -1,8 +1,9 @@
 """
 Repo-wide pytest isolation guard.
 
-NETBRAIN_MEMORY_DSN must never leak a real Postgres/Supabase connection
-string (with password) into a test process. Some code paths under test
+AI_NET_STUDIO_MEMORY_DSN (or its pre-rename name, NETBRAIN_MEMORY_DSN) must
+never leak a real Postgres/Supabase connection string (with password) into
+a test process. Some code paths under test
 (the autonomy/governance faculty stack, via core/copilot_engine.py's
 GovernanceEngine.govern()) can trigger a lazy `import app`; importing
 app.py runs its module-level _load_secrets_into_env(), which bridges
@@ -30,6 +31,8 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _no_real_memory_dsn_leak():
+    os.environ.pop("AI_NET_STUDIO_MEMORY_DSN", None)
     os.environ.pop("NETBRAIN_MEMORY_DSN", None)
     yield
+    os.environ.pop("AI_NET_STUDIO_MEMORY_DSN", None)
     os.environ.pop("NETBRAIN_MEMORY_DSN", None)

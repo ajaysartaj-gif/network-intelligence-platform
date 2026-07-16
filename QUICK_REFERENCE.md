@@ -1,4 +1,4 @@
-# NetBrain AI Orchestration - Quick Reference Guide
+# AI Net Studio Orchestration - Quick Reference Guide
 
 ## Initialization
 

@@ -1,7 +1,7 @@
 """
 local_router_access.py
 ======================
-NetBrain AI — Local Router Access Manager
+AI Net Studio — Local Router Access Manager
 ------------------------------------------
 Primary local access layer for routers/switches/firewalls in the network topology.
 Pinggy (cloud tunnel) is used only as fallback when local access fails.
@@ -60,7 +60,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
-logger = logging.getLogger("NetBrain.LocalAccess")
+logger = logging.getLogger("AI Net Studio.LocalAccess")
 
 # ── Constants ──────────────────────────────────────────────────────────────
 DEFAULT_SSH_PORT     = 22
@@ -123,7 +123,7 @@ class CredentialVault:
     """
     Stores default + per-device credentials.
     In production, back this with the Fernet-encrypted SQLite store
-    already in app.py (NetBrainDB).
+    already in app.py (AI Net Studio DB).
     """
 
     def __init__(self):
@@ -533,7 +533,7 @@ class LocalLinkGenerator:
     def print_links(cls, port: int = LOCAL_APP_PORT):
         links = cls.generate_links(port)
         print("\n" + "═" * 55)
-        print("  NetBrain AI — Access Links")
+        print("  AI Net Studio — Access Links")
         print("═" * 55)
         for name, url in links.items():
             label = {
@@ -799,7 +799,7 @@ if __name__ == "__main__":
     import argparse, json
 
     parser = argparse.ArgumentParser(
-        description="NetBrain AI — Local Router Access CLI"
+        description="AI Net Studio — Local Router Access CLI"
     )
     parser.add_argument("--links",   action="store_true",
                         help="Print local access links")

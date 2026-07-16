@@ -23,7 +23,7 @@ import math
 from abc import ABC, abstractmethod
 from typing import List, Optional
 
-logger = logging.getLogger("NetBrain.Knowledge.RAG.Embedder")
+logger = logging.getLogger("AI Net Studio.Knowledge.RAG.Embedder")
 
 
 class Embedder(ABC):
@@ -60,9 +60,10 @@ class LocalEmbedder(Embedder):
     DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
 
     def __init__(self, model_name: Optional[str] = None):
+        from core.legacy_compat import env as _legacy_env
         self._model_name = (
             model_name
-            or os.environ.get("NETBRAIN_RAG_EMBED_MODEL")
+            or _legacy_env("AI_NET_STUDIO_RAG_EMBED_MODEL", "NETBRAIN_RAG_EMBED_MODEL", "")
             or self.DEFAULT_MODEL
         )
         self._model = None

@@ -1,10 +1,10 @@
-"""AI provider configuration and system prompts for NetBrain AI."""
+"""AI provider configuration and system prompts for AI Net Studio."""
 
 OPENROUTER_BASE = 'https://openrouter.ai/api/v1'
 OPENROUTER_MODEL = 'anthropic/claude-sonnet-4-5'
-OPENROUTER_HEADERS = {'HTTP-Referer': 'https://netbrain-ai.streamlit.app', 'X-Title': 'NetBrain AI'}
+OPENROUTER_HEADERS = {'HTTP-Referer': 'https://ai_net_studio-ai.streamlit.app', 'X-Title': 'AI Net Studio'}
 
-NETWORK_SYSTEM = """You are NetBrain AI — an AI-Native Autonomous Network Operating System.
+NETWORK_SYSTEM = """You are AI Net Studio — an AI-Native Autonomous Network Operating System.
 
 You are NOT a chatbot. You are an operational intelligence engine embedded in every workflow.
 

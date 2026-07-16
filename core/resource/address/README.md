@@ -45,7 +45,7 @@ tests/           domain + knowledge + service round-trip (9 tests, all passing)
 | Knowledge Graph | `core.knowledge_graph` (referenced by `knowledge/reasoning.py`; resolution in later PRs) |
 | Reasoning Engine | `core.reasoning_layer` (reasoning surface declared, not reimplemented) |
 | Navigation / UI | existing Streamlit workspace registry (`config/workspaces.py`) |
-| Logging/telemetry | standard `logging` (`NetBrain.*` loggers) |
+| Logging/telemetry | standard `logging` (`AI Net Studio.*` loggers) |
 
 ## Integration
 

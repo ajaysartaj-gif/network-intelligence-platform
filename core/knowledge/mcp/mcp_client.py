@@ -9,7 +9,7 @@ Only what we need for knowledge lookup:
   - tools/call
 
 No heavy SDK dependency — pure JSON-RPC over HTTP using `requests`.
-This keeps NetBrain portable to Streamlit Cloud (no npx/node required).
+This keeps AI Net Studio portable to Streamlit Cloud (no npx/node required).
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ try:
 except ImportError:
     REQUESTS_OK = False
 
-logger = logging.getLogger("NetBrain.Knowledge.MCP.Client")
+logger = logging.getLogger("AI Net Studio.Knowledge.MCP.Client")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -105,7 +105,7 @@ class MCPHttpClient:
         h = {
             "Content-Type": "application/json",
             "Accept":       "application/json, text/event-stream",
-            "User-Agent":   "NetBrain-AI/1.0",
+            "User-Agent":   "AI Net Studio-AI/1.0",
         }
         h.update(self.headers)
 
@@ -160,7 +160,7 @@ class MCPHttpClient:
         params = {
             "protocolVersion": self.PROTOCOL_VERSION,
             "clientInfo": {
-                "name":    "NetBrain-AI",
+                "name":    "AI Net Studio-AI",
                 "version": "1.0",
             },
             "capabilities": {},

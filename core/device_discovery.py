@@ -960,7 +960,10 @@ class DeviceLogStore:
     local JSON file so AI always has context even across restarts.
     """
 
-    def __init__(self, path: str = ".netbrain_device_logs.json"):
+    def __init__(self, path: str = None):
+        if path is None:
+            from core.legacy_compat import migrate_path
+            path = migrate_path(".netbrain_device_logs.json", ".ai_net_studio_device_logs.json")
         self._path = path
         self._lock = threading.Lock()
         self._data: Dict[str, Any] = self._load()
@@ -1054,7 +1057,8 @@ class DeviceLogStore:
 
 import json
 
-_STATE_FILE = ".netbrain_devices.json"
+from core.legacy_compat import migrate_path as _migrate_path
+_STATE_FILE = _migrate_path(".netbrain_devices.json", ".ai_net_studio_devices.json")
 
 
 def _save_device_state(engine: "DeviceDiscoveryEngine"):

@@ -1,5 +1,5 @@
 """
-NetBrain MCP Integration
+AI Net Studio MCP Integration
 ========================
 Knowledge sources backed by Model Context Protocol servers.
 

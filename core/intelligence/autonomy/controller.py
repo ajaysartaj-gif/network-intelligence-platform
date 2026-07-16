@@ -36,7 +36,7 @@ from core.intelligence.autonomy.base import (
 )
 from core.intelligence.autonomy.faculties import build_faculties
 
-logger = logging.getLogger("NetBrain.Intelligence.Autonomy.Controller")
+logger = logging.getLogger("AI Net Studio.Intelligence.Autonomy.Controller")
 
 
 def _sys():

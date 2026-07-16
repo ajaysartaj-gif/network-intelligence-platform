@@ -36,7 +36,7 @@ from core.knowledge.base import (
 )
 from core.knowledge.cache.ttl_policy import get_ttl
 
-logger = logging.getLogger("NetBrain.Knowledge.Fetcher")
+logger = logging.getLogger("AI Net Studio.Knowledge.Fetcher")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -57,7 +57,7 @@ class VendorFetcher(ABC):
     # Network defaults
     HTTP_TIMEOUT  = 10
     MAX_PAGE_SIZE = 200_000        # don't fetch >200KB; abort large pages
-    USER_AGENT    = "NetBrain-AI/1.0 (network-intelligence-platform)"
+    USER_AGENT    = "AI Net Studio-AI/1.0 (network-intelligence-platform)"
 
     def __init__(self):
         if not REQUESTS_OK:

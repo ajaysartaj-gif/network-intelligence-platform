@@ -1,12 +1,15 @@
-"""NetBrain AI Configuration."""
+"""AI Net Studio Configuration."""
 
 import os
 from typing import Dict
 
+from core.legacy_compat import migrate_path as _migrate_path
+
 # API Configuration — see config/ai.py for the canonical AI provider settings
 
 # Database
-DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///netbrain.db")
+_migrate_path("netbrain.db", "ai_net_studio.db")
+DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///ai_net_studio.db")
 
 # Security
 SECRET_KEY = os.environ.get("SECRET_KEY", None)

@@ -1,6 +1,6 @@
 """
-NetBrain AI — Enterprise Autonomous Network Operations Platform
-===============================================================
+AI Net Studio — Enterprise Autonomous Network Operations Platform
+===================================================================
 Every network issue is detected, analyzed, fixed, and verified automatically.
 The full remediation pipeline is visible step-by-step in real time.
 """
@@ -17,7 +17,7 @@ except ImportError:
     pass  # python-dotenv not installed; rely on os.environ / Streamlit Secrets
 
 st.set_page_config(
-    page_title="NetBrain AI — Autonomous NOC",
+    page_title="AI Net Studio — Autonomous NOC",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -170,9 +170,13 @@ def _load_secrets_into_env() -> None:
         "GROQ_API_KEY",
         # Operational Memory shared brain (Postgres/Supabase). When present,
         # all instances read/write ONE cloud brain in real time; absent, the
-        # service falls back to a local SQLite file automatically.
+        # service falls back to a local SQLite file automatically. Both the
+        # current name and the pre-rename ("NetBrain") name are bridged, so
+        # existing secrets.toml entries keep working unchanged.
+        "AI_NET_STUDIO_MEMORY_DSN", "AI_NET_STUDIO_MEMORY_DB",
         "NETBRAIN_MEMORY_DSN", "NETBRAIN_MEMORY_DB",
         # RAG / embedding store config (so knowledge config travels too).
+        "AI_NET_STUDIO_RAG_DIR", "AI_NET_STUDIO_RAG_EMBED_MODEL", "AI_NET_STUDIO_RAG_MIN_SCORE",
         "NETBRAIN_RAG_DIR", "NETBRAIN_RAG_EMBED_MODEL", "NETBRAIN_RAG_MIN_SCORE",
     ]
     for k in keys:
@@ -373,7 +377,7 @@ def call_ai(prompt: str) -> str:
             model=MODEL_NAME,
             messages=[
                 {"role": "system", "content": (
-                    "You are NetBrain AI — an expert autonomous network operations system. "
+                    "You are AI Net Studio — an expert autonomous network operations system. "
                     "Be concise, technical, and action-oriented. Focus on root cause and fix steps."
                 )},
                 {"role": "user", "content": prompt},
@@ -789,7 +793,7 @@ with st.sidebar:
     st.markdown(
         """<div style="padding:16px 10px 12px;text-align:center;">
              <div style="font-size:11px;letter-spacing:.25em;font-weight:700;color:#4d8fff;
-                         font-family:'JetBrains Mono',monospace;margin-bottom:4px;">◈ NETBRAIN</div>
+                         font-family:'JetBrains Mono',monospace;margin-bottom:4px;">◈ AI NET STUDIO</div>
              <div style="font-size:22px;font-weight:900;letter-spacing:-.03em;
                          background:linear-gradient(135deg,#00d4ff,#4d8fff);
                          -webkit-background-clip:text;-webkit-text-fill-color:transparent;
@@ -1335,7 +1339,7 @@ elif workspace == "Workflows":
                                         st.success(f"Remediation executed: {res.get('executed')}")
                                         st.text_area("Execution Output", value='\n\n'.join(res.get('output', []))[:20000], height=300)
                         else:
-                            st.info("No device catalog configured. Set NETBRAIN_DEVICE_* env vars or NETBRAIN_DEVICE_CATALOG.")
+                            st.info("No device catalog configured. Set AI_NET_STUDIO_DEVICE_* env vars or AI_NET_STUDIO_DEVICE_CATALOG.")
 
     st.divider()
     st.markdown("### Incident & Recovery Timeline")
@@ -1968,7 +1972,7 @@ GROQ_API_KEY = "your-key-here"
         st.markdown("### About")
         g = getattr(orchestrator, "gns3", None)
         info = {
-            "Platform": "NetBrain AI — Autonomous NOC",
+            "Platform": "AI Net Studio — Autonomous NOC",
             "GNS3 Connected": str(g.available if g else False),
             "GNS3 Version": g.version if (g and g.available) else "N/A",
             "GNS3 Nodes": str(len(g.nodes)) if (g and g.available) else "0",
@@ -2407,7 +2411,7 @@ GROQ_API_KEY = "your-key-here"
                                 "scope_label": _scope_label, "query": _ai_q,
                             }
                         else:
-                            with st.spinner(f"🧠 NetBrain AI thinking about {_scope_label}…"):
+                            with st.spinner(f"🧠 AI Net Studio thinking about {_scope_label}…"):
                                 _ie_res = _ie_scope.propose_plan(
                                     query=_ai_q,
                                     devices=_targets,
@@ -2493,7 +2497,7 @@ GROQ_API_KEY = "your-key-here"
                                     }
                                     st.session_state["devices_ai_last_ans"] += (
                                         f"\n\n🔁 **Round {_ie_res2.round_index} was inconclusive — "
-                                        f"NetBrain AI has prepared the next diagnostic step "
+                                        f"AI Net Studio has prepared the next diagnostic step "
                                         f"(round {getattr(_ie_res2.next_plan, 'round_index', 2)}). "
                                         "Review and approve it below to continue.**"
                                     )
@@ -3415,7 +3419,7 @@ GROQ_API_KEY = "your-key-here"
                                     ai_call=call_ai,
                                     approved_devices=disc.get_approved(),
                                 )
-                                with st.spinner(f"🧠 NetBrain AI working on {dev.ip}…"):
+                                with st.spinner(f"🧠 AI Net Studio working on {dev.ip}…"):
                                     _ie_result: IntentResult = _ie.handle(
                                         query=_ai_nlp_q,
                                         primary_device=dev,
@@ -4056,7 +4060,7 @@ GROQ_API_KEY = "your-key-here"
                    ```
                    ping 192.168.0.1
                    ```
-                2. NetBrain AI detects the ICMP reply within ~10 seconds
+                2. AI Net Studio detects the ICMP reply within ~10 seconds
                 3. The device appears in the **Pending Approval** section above
                 4. Click **Approve** — it joins your network inventory
                 5. Click **🤖 AI Network Troubleshooting** to SSH in, run diagnostics, and get an AI-generated fix plan
@@ -4074,7 +4078,7 @@ GROQ_API_KEY = "your-key-here"
         st.markdown("### 🗺️ Network Topology")
         st.caption(
             "Site-wise automatic topology discovery via CDP/LLDP. Pick a site, "
-            "click Build, and NetBrain AI maps every router, switch, AP, and "
+            "click Build, and AI Net Studio maps every router, switch, AP, and "
             "firewall with their live uplink ports."
         )
 
@@ -4443,7 +4447,7 @@ elif workspace == "nlp":
                     for m in msgs[-10:-1]
                 )
                 _sys_prompt = (
-                    "You are NetBrain AI Assistant — an expert network engineer and Cisco IOS specialist. "
+                    "You are AI Net Studio Assistant — an expert network engineer and Cisco IOS specialist. "
                     "You help with network troubleshooting, configuration, diagnostics, and best practices. "
                     "Be concise, technical, and actionable. Use bullet points for lists. "
                     "When generating IOS configs, use proper formatting with indentation.\n\n"
@@ -4489,7 +4493,7 @@ elif workspace == "nlp":
 
 
 
-    st.header("🧠 NetBrain AI — Autonomous Network Operations")
+    st.header("🧠 AI Net Studio — Autonomous Network Operations")
     st.info("Select a workspace from the sidebar.")
     c1, c2, c3 = st.columns(3)
     c1.markdown("**🖥 Dashboard**\nLive NOC with device health cards and event feed")

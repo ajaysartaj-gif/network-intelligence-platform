@@ -16,7 +16,7 @@ from typing import Callable, Optional
 
 from core.topology.topology_models import TopologyGraph
 
-logger = logging.getLogger("NetBrain.Topology.Chat")
+logger = logging.getLogger("AI Net Studio.Topology.Chat")
 
 
 class TopologyChatEngine:
@@ -44,7 +44,7 @@ class TopologyChatEngine:
         context = graph.to_ai_context()
 
         prompt = (
-            "You are NetBrain AI — a network engineer analyzing a site's "
+            "You are AI Net Studio — a network engineer analyzing a site's "
             "physical topology, discovered via real CDP/LLDP data from the "
             "devices below.\n\n"
             f"{context}\n\n"

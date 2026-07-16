@@ -1,5 +1,5 @@
 # Investigation 1 — System Architecture & Execution Flow
-### NetBrain AI (`network-intelligence-platform`) — reverse-engineered from source
+### AI Net Studio (`network-intelligence-platform`) — reverse-engineered from source
 
 > Every statement below is backed by a file, class, and/or function actually present in the
 > repository. Line numbers are from the working tree at investigation time. Where something
@@ -229,7 +229,7 @@ flowchart TB
     S1-->S2-->S3-->S4-->S5-->S6-->S7-->S8
 ```
 
-`LIVE_ONLY` is a module constant: `LIVE_ONLY = os.environ.get("NETBRAIN_LIVE_ONLY","1") not in
+`LIVE_ONLY` is a module constant: `LIVE_ONLY = os.environ.get("AI_NET_STUDIO_LIVE_ONLY","1") not in
 ("0","false","no")` (`core/orchestration_engine.py:9`) — default **live**.
 
 ---
@@ -503,11 +503,11 @@ Eight guarded bindings, each in its own `try/except` (proven verbatim):
 
 - SQLite usage proven only in: `core/ai_config.py`, `core/ai_engine.py`,
   `core/intelligence/operational_memory.py` (grep result).
-- Root-level DB files exist: `netbrain_ai.db`, `test_ai_history.db`, `test_netbrain_ai.db`.
+- Root-level DB files exist: `ai_net_studio_ai.db`, `test_ai_history.db`, `test_ai_net_studio_ai.db`.
   Their read/write call sites beyond the three modules above were **Not found in repository**
   in this investigation.
-- `operational_memory.py` uses a dual SQLite/Postgres backend via env `NETBRAIN_MEMORY_DSN`
-  (default SQLite file `.netbrain_memory.sqlite`) — proven in prior inspection of that module.
+- `operational_memory.py` uses a dual SQLite/Postgres backend via env `AI_NET_STUDIO_MEMORY_DSN`
+  (default SQLite file `.ai_net_studio_memory.sqlite`) — proven in prior inspection of that module.
 
 ---
 

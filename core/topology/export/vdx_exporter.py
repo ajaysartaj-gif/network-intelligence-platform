@@ -38,7 +38,7 @@ from core.topology.layout import (
 )
 from core.topology.interface_naming import abbreviate_interface
 
-logger = logging.getLogger("NetBrain.Topology.Export.VDX")
+logger = logging.getLogger("AI Net Studio.Topology.Export.VDX")
 
 NODE_W_IN = 1.7
 NODE_H_IN = 0.65

@@ -33,7 +33,7 @@ from core.intelligence.learning.base import (
 )
 from core.intelligence.learning.learners import build_learners
 
-logger = logging.getLogger("NetBrain.Intelligence.Learning")
+logger = logging.getLogger("AI Net Studio.Intelligence.Learning")
 
 
 class LearningEngine:

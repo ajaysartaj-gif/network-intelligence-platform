@@ -36,7 +36,7 @@ from core.intelligence.decision.base import (
 )
 from core.intelligence.decision.faculties import build_appraisers, build_holistic
 
-logger = logging.getLogger("NetBrain.Intelligence.Decision")
+logger = logging.getLogger("AI Net Studio.Intelligence.Decision")
 
 
 def _stdev(xs: List[float]) -> float:

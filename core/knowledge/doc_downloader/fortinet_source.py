@@ -34,7 +34,7 @@ try:
 except ImportError:
     REQUESTS_OK = False
 
-logger = logging.getLogger("NetBrain.Knowledge.DocDownloader.Fortinet")
+logger = logging.getLogger("AI Net Studio.Knowledge.DocDownloader.Fortinet")
 
 BASE_URL = "https://docs.fortinet.com"
 USER_AGENT = "Mozilla/5.0 (compatible; NetworkIntelligencePlatform-DocBot/1.0; +respectful, low-volume, robots.txt-compliant)"

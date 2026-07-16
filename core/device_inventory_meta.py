@@ -21,7 +21,7 @@ import logging
 import re
 from typing import Dict, List, Optional, Tuple
 
-logger = logging.getLogger("NetBrain.InventoryMeta")
+logger = logging.getLogger("AI Net Studio.InventoryMeta")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

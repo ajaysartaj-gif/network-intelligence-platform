@@ -28,13 +28,16 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from core.knowledge.rag.embedder import Embedder, get_embedder
+from core.legacy_compat import env_path as _legacy_env_path
 
-logger = logging.getLogger("NetBrain.Knowledge.RAG.Engine")
+logger = logging.getLogger("AI Net Studio.Knowledge.RAG.Engine")
 
-_DEFAULT_PERSIST_DIR = os.environ.get(
-    "NETBRAIN_RAG_DIR", ".netbrain_rag_chroma"
+_DEFAULT_PERSIST_DIR = _legacy_env_path(
+    "AI_NET_STUDIO_RAG_DIR", "NETBRAIN_RAG_DIR",
+    ".netbrain_rag_chroma", ".ai_net_studio_rag_chroma",
 )
-_DEFAULT_COLLECTION = "netbrain_knowledge"
+_DEFAULT_COLLECTION = "ai_net_studio_knowledge"
+_LEGACY_COLLECTION = "netbrain_knowledge"
 
 
 @dataclass
@@ -195,12 +198,27 @@ class RAGEngine:
             return
         import chromadb
         self._client = chromadb.PersistentClient(path=self.persist_dir)
+        self._migrate_legacy_collection()
         # cosine space + tag the collection with the embedder name so a store
         # built with one model isn't silently queried with a different one.
         self._col = self._client.get_or_create_collection(
             name=self.collection_name,
             metadata={"hnsw:space": "cosine", "embedder": self.embedder.name},
         )
+
+    def _migrate_legacy_collection(self) -> None:
+        """One-time rename of the pre-rename "netbrain_knowledge" collection
+        to the current name, so vectors ingested before the brand rename
+        keep being found instead of the app silently starting a fresh,
+        empty collection under the new name."""
+        if self.collection_name == _LEGACY_COLLECTION:
+            return
+        try:
+            existing = {c.name for c in self._client.list_collections()}
+            if self.collection_name not in existing and _LEGACY_COLLECTION in existing:
+                self._client.get_collection(_LEGACY_COLLECTION).modify(name=self.collection_name)
+        except Exception as exc:
+            logger.info("Legacy RAG collection migration skipped: %s", exc)
 
     # ── ingestion ────────────────────────────────────────────────────────────
     def ingest_document(

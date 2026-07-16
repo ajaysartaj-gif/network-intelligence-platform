@@ -2,7 +2,7 @@
 ui/app_theme.py
 ===============
 
-Polished, high-contrast visual theme for the NetBrain AI platform.
+Polished, high-contrast visual theme for the AI Net Studio platform.
 
 PRESENTATION ONLY — no application logic. app.py activates it with one call:
 

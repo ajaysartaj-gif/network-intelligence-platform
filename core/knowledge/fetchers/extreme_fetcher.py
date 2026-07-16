@@ -13,7 +13,7 @@ from urllib.parse import quote_plus
 
 from core.knowledge.fetchers.base_fetcher import VendorFetcher, BS4_OK, REQUESTS_OK
 
-logger = logging.getLogger("NetBrain.Knowledge.ExtremeFetcher")
+logger = logging.getLogger("AI Net Studio.Knowledge.ExtremeFetcher")
 
 
 class ExtremeFetcher(VendorFetcher):

@@ -23,7 +23,7 @@ from typing import List
 from core.knowledge.doc_downloader.manifest import DownloadManifest, ManifestEntry
 from core.knowledge.fetchers.rfc_fetcher import fetch_rfc_text
 
-logger = logging.getLogger("NetBrain.Knowledge.DocDownloader.RFC")
+logger = logging.getLogger("AI Net Studio.Knowledge.DocDownloader.RFC")
 
 # Curated for THIS tool's actual protocol coverage (OSPF/BGP/VRRP/LACP-
 # adjacent) plus the foundational specs those protocols depend on — not

@@ -1,5 +1,5 @@
 # Investigation 4 — Configuration Decision Pipeline
-### Exactly how NetBrain AI makes configuration decisions — reverse-engineered from source
+### Exactly how AI Net Studio makes configuration decisions — reverse-engineered from source
 
 > Rules honored: no speculation; no recommendations; repository evidence only. Every statement
 > cites file / class / function / line. Anything absent is marked **“Not found in repository.”**
@@ -217,7 +217,7 @@ All proven from source:
 
 1. **`build_prompt` with empty `device_facts`** (`ai_config.py:363`): substitutes
    `"(No live CLI data …)"` yet generation proceeds — config can be produced with **no device facts**.
-2. **`NETBRAIN_ENGINE_PREAMBLE` instruction** (`ai_config.py:205`): the system prompt explicitly
+2. **`AI_NET_STUDIO_ENGINE_PREAMBLE` instruction** (`ai_config.py:205`): the system prompt explicitly
    directs *“Infer reasonable assumptions from topology — never ask for data already supplied.”*
 3. **LLM generation branch** (`ai_config.py:453`): `ai_call(build_prompt(...))` has **no
    precondition** that `device_facts` be non-empty or verified.
@@ -228,7 +228,7 @@ All proven from source:
 6. **Vendor assumption** (`synthesizer.py:87`, `engine.py:54`): deterministic synthesis defaults to
    `Vendor.CISCO_IOS` when no vendor is supplied; `generate_config` never passes a verified vendor.
 7. **Environment assumption** (`config_synthesis/engine.py:31` `_default_environment`): defaults to
-   `isolated=True` unless `NETBRAIN_ENV_ISOLATED` says otherwise — an assumed environment.
+   `isolated=True` unless `AI_NET_STUDIO_ENV_ISOLATED` says otherwise — an assumed environment.
 8. **Default server values** (`config_synthesis/base.py` `CANONICAL_PUBLIC_DNS`,
    `CANONICAL_PUBLIC_NTP`): used when none provided — assumed (deterministic) values.
 9. **LLM-authored verification** (`outcome_contract.py:116` `derive_post_conditions`): the checks

@@ -21,7 +21,7 @@ from urllib.parse import quote_plus, urljoin
 
 from core.knowledge.fetchers.base_fetcher import VendorFetcher, BS4_OK, REQUESTS_OK
 
-logger = logging.getLogger("NetBrain.Knowledge.CiscoFetcher")
+logger = logging.getLogger("AI Net Studio.Knowledge.CiscoFetcher")
 
 
 class CiscoFetcher(VendorFetcher):

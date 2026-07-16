@@ -35,7 +35,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from core.knowledge.rag.rag_engine import RAGEngine, RAGHit, get_rag_engine, _chunk_text, _chunk_hierarchical
 
-logger = logging.getLogger("NetBrain.Knowledge.Enterprise")
+logger = logging.getLogger("AI Net Studio.Knowledge.Enterprise")
 
 
 # ── Source taxonomy + authority ranking ─────────────────────────────────────

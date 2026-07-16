@@ -1,5 +1,5 @@
 """
-NetBrain Knowledge System
+AI Net Studio Knowledge System
 =========================
 Vendor-neutral knowledge layer for the network intelligence platform.
 

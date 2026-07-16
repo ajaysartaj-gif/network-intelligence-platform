@@ -46,7 +46,7 @@ from typing import Dict, List, Set, Tuple
 
 from core.topology.topology_models import TopologyGraph, DeviceRole
 
-logger = logging.getLogger("NetBrain.Topology.Layout")
+logger = logging.getLogger("AI Net Studio.Topology.Layout")
 
 
 LAYER_HEIGHT = 200       # vertical spacing between tiers

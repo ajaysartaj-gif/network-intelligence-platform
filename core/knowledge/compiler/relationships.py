@@ -127,7 +127,7 @@ def derive_relationships(objects: List[NormalizedObject]) -> List[GraphRelations
     """Run every registered rule. A failing rule is skipped, not fatal —
     same resilience convention as the extractor registry."""
     import logging
-    logger = logging.getLogger("NetBrain.Knowledge.Compiler.Relationships")
+    logger = logging.getLogger("AI Net Studio.Knowledge.Compiler.Relationships")
     out: List[GraphRelationship] = []
     for rule in RULES:
         try:

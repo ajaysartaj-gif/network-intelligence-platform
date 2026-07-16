@@ -29,7 +29,7 @@ from core.intelligence.reasoning import (
     Reasoner, ReasonerSpec, Conclusion, Evidence, EpistemicType,
 )
 
-logger = logging.getLogger("NetBrain.Intelligence.Memory.Faculties")
+logger = logging.getLogger("AI Net Studio.Intelligence.Memory.Faculties")
 
 
 def _sys():

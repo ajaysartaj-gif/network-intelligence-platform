@@ -22,7 +22,7 @@ from core.knowledge.base import KnowledgeEntry, ConfidenceLevel
 from core.knowledge.orchestrator import get_orchestrator
 from core.verification.version_parser import DeviceVersion, compare_versions
 
-logger = logging.getLogger("NetBrain.Verification.CommandValidator")
+logger = logging.getLogger("AI Net Studio.Verification.CommandValidator")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

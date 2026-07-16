@@ -38,7 +38,7 @@ from core.intelligence.reasoning import (
     Reasoner, ReasonerSpec, Conclusion, Evidence, EpistemicType,
 )
 
-logger = logging.getLogger("NetBrain.Intelligence.Faculties")
+logger = logging.getLogger("AI Net Studio.Intelligence.Faculties")
 
 
 def _ai():

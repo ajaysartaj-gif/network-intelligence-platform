@@ -74,7 +74,7 @@ for topology grounding is to call `build_knowledge_graph()`, not
 | Remediation Templates | `reasoning_artifact_compiler._REMEDIATION_INTENTS` | Module constant | `compile_remediation()` | **No** — points at real `IosLikeAdapter` intents, unused |
 | Decision Graphs | `compile_decision_graph()` | In-memory per call | — | **No** |
 | Risk Annotations | `compile_risk()` | In-memory per call | — | **No** — `TroubleshootReport` has no risk field at all (confirmed: zero "risk" hits anywhere in `core/troubleshooting/*.py`) |
-| Operational Intelligence | `OperationalMemory` + `LearningEngine` (pre-existing) | `.netbrain_memory.sqlite` + shared derived-memory store | `NetworkIntelligenceSupplyChain` (Phase 5) | **No**, from the troubleshooting engine's side — Phase 5 built the write/bridge path but nothing reads it back into a live session |
+| Operational Intelligence | `OperationalMemory` + `LearningEngine` (pre-existing) | `.ai_net_studio_memory.sqlite` + shared derived-memory store | `NetworkIntelligenceSupplyChain` (Phase 5) | **No**, from the troubleshooting engine's side — Phase 5 built the write/bridge path but nothing reads it back into a live session |
 
 ---
 

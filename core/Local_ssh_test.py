@@ -2,7 +2,7 @@
 """
 local_ssh_test.py
 =================
-NetBrain AI — Standalone SSH connectivity test
+AI Net Studio — Standalone SSH connectivity test
 -----------------------------------------------
 Run this directly from your Mac terminal to verify SSH works
 BEFORE using the web app. This is the fastest way to debug
@@ -32,7 +32,7 @@ except ImportError:
     print("⚠️  python-dotenv not installed — using env vars only")
 
 # ── CLI args ─────────────────────────────────────────────────────────────────
-parser = argparse.ArgumentParser(description="NetBrain AI — SSH Test")
+parser = argparse.ArgumentParser(description="AI Net Studio — SSH Test")
 parser.add_argument("--ip",     default=os.environ.get("GNS3_ROUTER_IP", "192.168.96.128"))
 parser.add_argument("--user",   default=os.environ.get("GNS3_SSH_USER",  "admin"))
 parser.add_argument("--pass",   dest="password",
@@ -46,7 +46,7 @@ args = parser.parse_args()
 
 print()
 print("=" * 60)
-print("  NetBrain AI — SSH Connectivity Test")
+print("  AI Net Studio — SSH Connectivity Test")
 print("=" * 60)
 print(f"  Target  : {args.user}@{args.ip}:{args.port}")
 print(f"  Type    : {args.type}")

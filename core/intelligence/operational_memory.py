@@ -11,7 +11,7 @@ of relearning every time.
 
 Design decisions (as architect):
   • STANDALONE service with its OWN persistent store (SQLite at
-    .netbrain_memory.sqlite) — independent of RAG/Chroma, so memory is a
+    .ai_net_studio_memory.sqlite) — independent of RAG/Chroma, so memory is a
     first-class subsystem, not a tenant of the knowledge store.
   • REUSES the existing Embedder (no new embedding infra) for similarity
     search. Vectors are stored alongside structured columns.
@@ -38,9 +38,12 @@ from dataclasses import dataclass, field, asdict
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
-logger = logging.getLogger("NetBrain.Intelligence.Memory")
+from core.legacy_compat import env as _legacy_env, env_path as _legacy_env_path
 
-_DB_PATH = os.environ.get("NETBRAIN_MEMORY_DB", ".netbrain_memory.sqlite")
+logger = logging.getLogger("AI Net Studio.Intelligence.Memory")
+
+_DB_PATH = _legacy_env_path("AI_NET_STUDIO_MEMORY_DB", "NETBRAIN_MEMORY_DB",
+                            ".netbrain_memory.sqlite", ".ai_net_studio_memory.sqlite")
 
 
 class EventType(str, Enum):
@@ -150,8 +153,9 @@ class OperationalMemory:
     """Persistent, searchable operational memory service.
 
     Backend is chosen automatically: if a Postgres connection string is
-    configured (NETBRAIN_MEMORY_DSN env, or memory_dsn in secrets bridged to
-    that env), ALL instances share ONE cloud brain in real time — true
+    configured (AI_NET_STUDIO_MEMORY_DSN env — or legacy NETBRAIN_MEMORY_DSN
+    — or memory_dsn in secrets bridged to that env), ALL instances share ONE
+    cloud brain in real time — true
     Continuous Learning across machines. Otherwise it uses a local SQLite
     file. Identical method surface either way.
     """
@@ -160,19 +164,20 @@ class OperationalMemory:
                  dsn: Optional[str] = None):
         self.db_path = db_path
         self._embedder = embedder            # lazy; reuse RAG embedder
-        # None (the default) = "auto", read NETBRAIN_MEMORY_DSN from the
-        # environment. Any explicit str, INCLUDING "", is authoritative and
-        # is never overridden by the environment — callers that need a
-        # guaranteed-local store (tests, anything that must never reach the
-        # shared cloud backend) pass dsn="" and get exactly that, regardless
-        # of what else in the process has touched os.environ. Before this,
-        # `dsn or os.environ.get(...)` silently ignored an explicit dsn=""
-        # the moment anything else in the process (e.g. importing app.py,
-        # which bridges .streamlit/secrets.toml into os.environ) had set
-        # NETBRAIN_MEMORY_DSN — real production Postgres writes from what
-        # should have been fully isolated tests.
+        # None (the default) = "auto", read AI_NET_STUDIO_MEMORY_DSN (or the
+        # legacy NETBRAIN_MEMORY_DSN name) from the environment. Any explicit
+        # str, INCLUDING "", is authoritative and is never overridden by the
+        # environment — callers that need a guaranteed-local store (tests,
+        # anything that must never reach the shared cloud backend) pass
+        # dsn="" and get exactly that, regardless of what else in the
+        # process has touched os.environ. Before this, `dsn or
+        # os.environ.get(...)` silently ignored an explicit dsn="" the
+        # moment anything else in the process (e.g. importing app.py, which
+        # bridges .streamlit/secrets.toml into os.environ) had set the DSN
+        # var — real production Postgres writes from what should have been
+        # fully isolated tests.
         if dsn is None:
-            dsn = os.environ.get("NETBRAIN_MEMORY_DSN", "")
+            dsn = _legacy_env("AI_NET_STUDIO_MEMORY_DSN", "NETBRAIN_MEMORY_DSN", "")
         try:
             self._be = _Backend(dsn=dsn, sqlite_path=db_path)
         except Exception as exc:

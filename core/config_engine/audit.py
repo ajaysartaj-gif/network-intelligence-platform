@@ -18,7 +18,10 @@ class JSONFileBackend:
     persist. NOT the default: a class shouldn't silently write files to disk
     just because no backend argument was passed."""
 
-    def __init__(self, path: str = ".netbrain_config_sessions.json") -> None:
+    def __init__(self, path: Optional[str] = None) -> None:
+        if path is None:
+            from core.legacy_compat import migrate_path
+            path = migrate_path(".netbrain_config_sessions.json", ".ai_net_studio_config_sessions.json")
         self._path = path
         self._lock = threading.Lock()
         self._data: Dict[str, str] = self._load()

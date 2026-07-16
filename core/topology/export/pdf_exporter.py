@@ -27,7 +27,7 @@ from core.topology.layout import (
 )
 from core.topology.interface_naming import abbreviate_interface
 
-logger = logging.getLogger("NetBrain.Topology.Export.PDF")
+logger = logging.getLogger("AI Net Studio.Topology.Export.PDF")
 
 try:
     from reportlab.pdfgen import canvas as rl_canvas

@@ -28,7 +28,7 @@ from core.knowledge.doc_downloader.classify import classify_doc_type, safe_filen
 from core.knowledge.doc_downloader.manifest import DownloadManifest, ManifestEntry
 from core.knowledge.mcp.devnet_content_source import DevNetContentMCPSource
 
-logger = logging.getLogger("NetBrain.Knowledge.DocDownloader.CiscoDevNet")
+logger = logging.getLogger("AI Net Studio.Knowledge.DocDownloader.CiscoDevNet")
 
 # A curated topic list spanning the MCP's real coverage (Meraki + Catalyst
 # Center) and every doc_type category that coverage can plausibly satisfy —

@@ -1,7 +1,7 @@
 """
 core/intelligence
 =================
-The architectural backbone for NetBrain's Network Intelligence model.
+The architectural backbone for AI Net Studio's Network Intelligence model.
 
 Network Intelligence = Knowledge + Context + Memory + Reasoning
                      + Topology Understanding + Dependency Awareness

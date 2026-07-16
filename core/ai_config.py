@@ -184,7 +184,7 @@ def _parse_json(text: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-NETBRAIN_ENGINE_PREAMBLE = """You are NetBrain, a CCIE-level Network Intelligence Engine.
+AI_NET_STUDIO_ENGINE_PREAMBLE = """You are AI Net Studio, a CCIE-level Network Intelligence Engine.
 
 Your job is NOT to generate generic Cisco configurations. Your job is to understand
 the network before making decisions.
@@ -231,8 +231,8 @@ Rollback may use "no …" forms; only undo what commands[] adds — never unrela
 """
 
 
-def format_netbrain_response(res: Dict[str, Any], device_name: str, device_ip: str) -> str:
-    """Render NetBrain output (analysis, config, rollback, verify, risk) for the UI."""
+def format_ai_net_studio_response(res: Dict[str, Any], device_name: str, device_ip: str) -> str:
+    """Render AI Net Studio output (analysis, config, rollback, verify, risk) for the UI."""
     header = f"## {device_name} ({device_ip})\n"
 
     if res.get("plain_answer"):
@@ -296,7 +296,7 @@ def format_netbrain_response(res: Dict[str, Any], device_name: str, device_ip: s
 
 
 def build_inventory_summary(devs) -> str:
-    """Compact fleet inventory for NetBrain prompt context."""
+    """Compact fleet inventory for AI Net Studio prompt context."""
     lines = []
     for d in devs:
         lines.append(
@@ -360,13 +360,13 @@ def build_prompt(
     inventory_summary: str = "",
 ) -> str:
     ctx_block = device_facts.strip() or (
-        "(No live CLI data — use Login on this device first so NetBrain can analyze "
+        "(No live CLI data — use Login on this device first so AI Net Studio can analyze "
         "interfaces, routes, and CDP/LLDP before generating config.)"
     )
     fleet_block = f"\n{fleet_context}\n" if fleet_context.strip() else ""
     inv_block = f"\n--- USER DEVICE INVENTORY ---\n{inventory_summary}\n" if inventory_summary else ""
     return (
-        f"{NETBRAIN_ENGINE_PREAMBLE}\n\n"
+        f"{AI_NET_STUDIO_ENGINE_PREAMBLE}\n\n"
         f"TARGET DEVICE: {device}\n"
         f"{inv_block}\n"
         f"DEVICE DATA:\n{ctx_block}\n"

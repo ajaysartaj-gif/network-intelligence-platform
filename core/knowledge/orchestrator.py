@@ -34,7 +34,7 @@ from core.knowledge.cache.cache_db import get_cache
 from core.knowledge.cache.ttl_policy import get_ttl
 from core.knowledge.vendor_router import get_fetcher, supported_vendors
 
-logger = logging.getLogger("NetBrain.Knowledge.Orchestrator")
+logger = logging.getLogger("AI Net Studio.Knowledge.Orchestrator")
 
 # ── MCP layer (optional — falls back if package missing) ─────────────────────
 try:
@@ -56,7 +56,8 @@ except ImportError as _ri:
 # this, the local match is too weak and we fall through to live sources.
 # Tunable via env because the cutoff depends on the embedding model.
 import os
-_RAG_MIN_SCORE = float(os.environ.get("NETBRAIN_RAG_MIN_SCORE", "0.45"))
+from core.legacy_compat import env as _legacy_env
+_RAG_MIN_SCORE = float(_legacy_env("AI_NET_STUDIO_RAG_MIN_SCORE", "NETBRAIN_RAG_MIN_SCORE", "0.45"))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

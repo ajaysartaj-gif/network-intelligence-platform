@@ -1,7 +1,7 @@
 """
 core/intent_engine.py
 =====================
-NetBrain AI — Enterprise Network Intent Engine
+AI Net Studio — Enterprise Network Intent Engine
 -----------------------------------------------
 Converts plain-English operator requests into autonomous network actions.
 
@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-logger = logging.getLogger("NetBrain.IntentEngine")
+logger = logging.getLogger("AI Net Studio.IntentEngine")
 
 # ── Optional Netmiko ──────────────────────────────────────────────────────────
 try:
@@ -508,7 +508,7 @@ class IntentEngine:
         latest = "\n\n".join(sections) if sections else "(no output)"
 
         prompt = (
-            "You are NetBrain AI — a CCIE-level network engineer. Diagnostics have run for "
+            "You are AI Net Studio — a CCIE-level network engineer. Diagnostics have run for "
             "several rounds and you MUST now CONVERGE. Another diagnostic round is NOT allowed.\n\n"
             f"OPERATOR QUESTION: {plan.query}\n\n"
             f"CONFIRMED FINDINGS ACROSS ALL ROUNDS (build on these, do not re-derive):\n{prior}\n\n"
@@ -597,7 +597,7 @@ class IntentEngine:
             prior_ctx += "\n\n" + grounding
 
         plan_prompt = (
-            "You are NetBrain AI — a CCIE-level network engineer (R&S, SP, Security, Data Center).\n"
+            "You are AI Net Studio — a CCIE-level network engineer (R&S, SP, Security, Data Center).\n"
             "You have deep knowledge of every Cisco IOS / IOS-XE / NX-OS / IOS-XR show command, "
             "including OSPF, BGP, EIGRP, IS-IS, MPLS, LDP, RSVP, VPLS, EVPN, VXLAN, GRE, IPSec, "
             "DMVPN, NAT, PAT, NAT-PT, QoS, STP, VTP, HSRP, VRRP, GLBP, AAA, ACLs, NetFlow, SNMP, "
@@ -771,7 +771,7 @@ class IntentEngine:
         )
 
         retry_prompt = (
-            "You are NetBrain AI — a CCIE-level network engineer.\n"
+            "You are AI Net Studio — a CCIE-level network engineer.\n"
             "Your previous diagnostic plan was incomplete. You proposed commands "
             "for some devices but missed others that the operator selected.\n\n"
             f"OPERATOR QUESTION: {plan.query}\n\n"
@@ -877,7 +877,7 @@ class IntentEngine:
         ) if seen else ""
 
         prompt = (
-            "You are NetBrain AI — a CCIE-level network engineer.\n"
+            "You are AI Net Studio — a CCIE-level network engineer.\n"
             "You proposed a hypothesis and ran diagnostic commands. Now ANALYZE the results.\n\n"
             f"OPERATOR QUESTION: {plan.query}\n\n"
             f"YOUR INITIAL HYPOTHESIS: {plan.hypothesis}\n"
@@ -1529,7 +1529,7 @@ class IntentEngine:
             )
 
             prompt = (
-                "You are NetBrain AI — a CCIE-level network engineer configuring ONE router.\n\n"
+                "You are AI Net Studio — a CCIE-level network engineer configuring ONE router.\n\n"
                 f"{facts_block}\n\n"
                 + (f"{rag_ctx}\n\n" if rag_ctx else "")
                 + f"OPERATOR REQUEST (applies to this router): {query}\n\n"
@@ -1585,7 +1585,7 @@ class IntentEngine:
     def _answer_concept(self, query: str) -> str:
         """Answer a pure conceptual question directly."""
         prompt = (
-            "You are NetBrain AI — a CCIE-level network engineer.\n"
+            "You are AI Net Studio — a CCIE-level network engineer.\n"
             f"Question: {query}\n\n"
             "Answer clearly and concisely. Use bullet points for lists. "
             "Include relevant Cisco IOS commands where applicable."
