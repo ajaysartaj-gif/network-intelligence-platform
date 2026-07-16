@@ -158,3 +158,26 @@ def test_asked_about_exstart_but_real_devices_are_down_surfaces_explicit_mismatc
     top = s.top()
     assert top is not None
     assert "ExStart" not in (top.rationale or "") or "Down" in (top.rationale or "")
+
+
+# ── same check on a SECOND, differently-shaped protocol (BGP) — proves the
+# mismatch detector generalizes across protocols instead of only having
+# been verified for the one protocol a user happened to report ──────────
+def test_asked_about_bgp_active_but_real_neighbor_is_idle_surfaces_mismatch():
+    devices = [FakeDevice("10.0.0.1", "R1")]
+    idle_text = (
+        "BGP router identifier 1.1.1.1, local AS number 65001\n\n"
+        "Neighbor        V           AS MsgRcvd MsgSent   TblVer  InQ OutQ  Up/Down  State/PfxRcd\n"
+        "10.0.0.3        4        65003        0        0        0    0    0 never    Idle\n"
+    )
+    gw = VendorGateway(send=lambda d, cmds: {c: idle_text for c in cmds},
+                       hint_provider=lambda d: {"device_type": "cisco_ios"})
+    eng = TroubleshootingEngine(ai_call=lambda p: "", devices=devices, gateway=gw,
+                                config=TSConfig(max_steps=6))
+    report = eng.run("why is the BGP neighbor stuck in Active state")
+    s = report.session
+
+    assert s.goal_mismatch is not None, "BGP goal/evidence mismatch was never detected"
+    assert s.goal_mismatch["asked_state"] == "Active"
+    assert s.goal_mismatch["observed_state"] == "Idle"
+    assert "Question vs. Evidence Mismatch" in report.to_markdown()
