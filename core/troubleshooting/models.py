@@ -330,17 +330,29 @@ class TroubleshootReport:
 
         if s.goal_mismatch:
             gm = s.goal_mismatch
-            devices = ", ".join(gm.get("devices") or []) or "the observed device(s)"
             lines.append("\n### ⚠️ Question vs. Evidence Mismatch")
             lines.append(
                 f"You asked about a neighbor stuck in **{gm['asked_state']}**, but the evidence "
-                f"collected does not show any neighbor in that state.\n\n"
-                f"**Current observation:** {devices} — neighbor state = `{gm['observed_state']}`\n\n"
-                f"Since no adjacency has progressed beyond **{gm['observed_state']}**, the reported "
-                f"problem (\"stuck in {gm['asked_state']}\") cannot be confirmed. The analysis below "
-                f"addresses the actual observed condition (**{gm['observed_state']}**) instead — if "
-                f"you have a different device that IS stuck in {gm['asked_state']}, point the "
-                f"investigation at that device."
+                f"collected does not show any neighbor in that state."
+            )
+            if gm.get("neighbor_states"):
+                lines.append("\n**Observed neighbor states:**")
+                for ns in gm["neighbor_states"]:
+                    lines.append(f"- `{ns['device']}` ({ns['subject']}) → **{ns['value']}**")
+                lines.append(f"\nNo neighbor is currently in **{gm['asked_state']}**.")
+            elif gm.get("protocol_status"):
+                device = gm["devices"][0] if gm.get("devices") else "the device"
+                lines.append(
+                    f"\nNo specific per-neighbor state was collected this round — the overall "
+                    f"OSPF protocol status on `{device}` is **{gm['protocol_status']}** (a coarse "
+                    f"summary across all neighbors, not a specific neighbor's own state)."
+                )
+            lines.append(
+                f"\nSince the reported problem (\"stuck in {gm['asked_state']}\") cannot be "
+                f"confirmed, this investigation stops reasoning about that state rather than "
+                f"building a conclusion around something that wasn't observed. If you have a "
+                f"different device that IS stuck in {gm['asked_state']}, point the investigation "
+                f"at that device."
             )
 
         if s.synthesized_answer:

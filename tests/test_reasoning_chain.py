@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT))
 
 from core.knowledge.compiler.failure_signatures import explain_stuck_state
 from core.troubleshooting import TroubleshootingEngine
-from core.troubleshooting.models import Goal, Hypothesis, Session
+from core.troubleshooting.models import Goal, Hypothesis, Observation, Session
 
 
 def test_ospf_exstart_confirms_prior_stages_and_names_dbd_as_whats_missing():
@@ -94,6 +94,12 @@ def test_compile_reasoning_chain_finds_stuck_state_via_discriminating_signals_no
     """
     eng = _engine()
     session = Session(goal=Goal(query="why is the OSPF neighbor stuck"))
+    # The reasoning chain must be grounded in a REAL, currently-observed
+    # state, not just top's own static tag — see
+    # test_compile_reasoning_chain_suppressed_when_top_disagrees_with_the_
+    # actually_observed_state below for why this check exists at all.
+    session.observations.append(Observation(device="192.168.96.136", subject="neighbor.192.168.20.2",
+                                            attribute="state", value="ExStart"))
     top = Hypothesis(
         statement="interface_mtu must equal violated on ospf_adjacency between "
                  "192.168.96.136 and 192.168.20.2 (local=1500, remote=1200)",
@@ -115,7 +121,49 @@ def test_compile_reasoning_chain_finds_stuck_state_via_discriminating_signals_no
 def test_compile_reasoning_chain_no_op_when_no_state_signal_present():
     eng = _engine()
     session = Session(goal=Goal(query="why is the OSPF neighbor stuck"))
+    session.observations.append(Observation(device="10.0.0.1", subject="neighbor.10.0.0.2",
+                                            attribute="state", value="ExStart"))
     top = Hypothesis(statement="Something generic", discriminating_signals=["unrelated_signal"])
+    session.hypotheses.append(top)
+
+    eng._compile_reasoning_chain(session, top)
+    assert session.reasoning_chain is None
+
+
+def test_compile_reasoning_chain_no_op_with_no_observation_at_all():
+    """Nothing to ground the chain in — must not fabricate one from top's
+    static tag alone."""
+    eng = _engine()
+    session = Session(goal=Goal(query="why is the OSPF neighbor stuck"))
+    top = Hypothesis(statement="MTU mismatch", discriminating_signals=["mtu", "ExStart"])
+    session.hypotheses.append(top)
+
+    eng._compile_reasoning_chain(session, top)
+    assert session.reasoning_chain is None
+
+
+def test_compile_reasoning_chain_suppressed_when_top_disagrees_with_the_actually_observed_state():
+    """Regression for a real production report: the winning hypothesis was
+    a compiled ExStart signature merged with a Mismatch Investigation
+    Finding, so it permanently carries "ExStart" in discriminating_signals
+    — but THIS session's real, current evidence showed a healthy neighbor
+    (Full), not ExStart at all. The old lookup built a full "Observed:
+    ExStart -> MTU mismatch, 85% confidence" narrative anyway, directly
+    contradicting the report's own Question vs. Evidence Mismatch banner
+    two sections above. The chain must be suppressed entirely instead of
+    narrating a state that wasn't observed."""
+    eng = _engine()
+    session = Session(goal=Goal(query="why OSPF stuck in ExStart"))
+    session.observations.append(Observation(device="192.168.96.136", subject="neighbor.192.168.21.2",
+                                            attribute="state", value="Full"))
+    top = Hypothesis(
+        statement="interface_mtu must equal violated on ospf_adjacency between "
+                 "192.168.96.136 and 192.168.20.2 (local=1500, remote=1200)",
+        rationale="adjacency hangs in EXSTART/EXCHANGE because the database-description "
+                 "exchange fails [source: net-knowledge-note §ospf-adjacency]",
+        discriminating_signals=["interface_mtu", "mtu", "ExStart"],
+    )
+    top.set_prior(0.92)
     session.hypotheses.append(top)
 
     eng._compile_reasoning_chain(session, top)
@@ -125,6 +173,8 @@ def test_compile_reasoning_chain_no_op_when_no_state_signal_present():
 def test_report_markdown_renders_reasoning_chain_section():
     from core.troubleshooting.models import TroubleshootReport
     session = Session(goal=Goal(query="why is the OSPF neighbor stuck"))
+    session.observations.append(Observation(device="10.0.0.1", subject="neighbor.10.0.0.2",
+                                            attribute="state", value="ExStart"))
     top = Hypothesis(
         statement="interface_mtu must equal violated (local=1500, remote=1200)",
         discriminating_signals=["mtu", "ExStart"],

@@ -737,7 +737,17 @@ class TroubleshootingEngine:
         Sets session.goal_mismatch so the report can surface an explicit
         correction; never blocks the rest of the investigation, since the
         actually-observed state is still a real, worth-investigating
-        problem."""
+        problem.
+
+        Prefers real PER-NEIGHBOR state facts (neighbor_states) over the
+        coarse protocol-level up/down summary flag — a real report showed
+        the banner falling back to that flag and displaying "neighbor state
+        = up", which is both wrong (there is no per-neighbor state named
+        "up" in any FSM this platform models — the flag means "at least one
+        neighbor reached Full", not a specific neighbor's own state) and too
+        generic to act on. When no per-neighbor fact exists at all, the
+        coarse flag is still reported, but honestly labeled as a protocol-
+        level status rather than disguised as a neighbor's FSM state."""
         m = self._ASKED_STATE_RE.search(query or "")
         if not m:
             return
@@ -750,18 +760,67 @@ class TroubleshootingEngine:
         asked_state = next((s for s in model.states if self._norm_state(s) == asked_norm), None)
         if not asked_state:
             return
-        obs = self._observed_protocol_state_obs(session)
-        if obs is None:
+
+        neighbor_obs = [o for o in session.observations
+                       if o.attribute == "state" and "neighbor" in o.subject.lower() and o.value]
+        if neighbor_obs:
+            if any(self._norm_state(o.value) == asked_norm for o in neighbor_obs):
+                return   # a neighbor genuinely IS in the asked state -> no mismatch
+            rep = neighbor_obs[0]
+            observed_norm = self._norm_state(rep.value)
+            observed_state = next((s for s in model.states if self._norm_state(s) == observed_norm), rep.value)
+            devices = sorted({o.device for o in neighbor_obs
+                             if self._norm_state(o.value) == observed_norm and o.device})
+            session.goal_mismatch = {
+                "asked_state": asked_state, "observed_state": observed_state, "devices": devices,
+                "neighbor_states": [{"device": o.device, "subject": o.subject, "value": o.value}
+                                   for o in neighbor_obs],
+            }
             return
-        observed_norm = self._norm_state(obs.value)
-        if not observed_norm or observed_norm == asked_norm:
+
+        # No per-neighbor fact was ever collected this round — only the
+        # coarse protocol-level up/down summary exists. Report it honestly
+        # as a protocol status, never disguised as a specific neighbor's
+        # FSM state.
+        obs = next((o for o in reversed(session.observations)
+                   if o.attribute == "state" and "protocol" in o.subject.lower() and o.value), None)
+        if obs is None or self._norm_state(obs.value) == asked_norm:
             return
-        observed_state = next((s for s in model.states if self._norm_state(s) == observed_norm), obs.value)
-        devices = sorted({o.device for o in session.observations
-                          if o.attribute == "state" and self._norm_state(o.value) == observed_norm and o.device})
         session.goal_mismatch = {
-            "asked_state": asked_state, "observed_state": observed_state, "devices": devices,
+            "asked_state": asked_state, "observed_state": None,
+            "devices": [obs.device] if obs.device else [],
+            "neighbor_states": [], "protocol_status": obs.value,
         }
+
+    def _hypothesis_stuck_state(self, hyp: Hypothesis, model) -> Optional[str]:
+        """Which FSM state (if any) this hypothesis's own compiled lineage
+        claims to explain. Checks discriminating_signals FIRST — unioned
+        across every HypothesisManager.add() merge, so a hypothesis that
+        started as a compiled signature and later merged with a Mismatch
+        Investigation Finding (a real production case: the OSPF ExStart
+        signature merging with a cross-device interface_mtu comparison)
+        reliably keeps its own state name even though the SURVIVING
+        statement/rationale text came from the OTHER source — e.g. "the
+        adjacency hangs in EXSTART/EXCHANGE because the database-
+        description exchange fails", which never literally contains
+        "stuck in 'ExStart'". Relying on the old rationale-regex-only
+        lookup silently skipped exactly these merged hypotheses: they never
+        got deterministically confirmed OR contradicted by
+        _bind_compiled_signature_evidence, so a merged hypothesis kept its
+        full compiled-prior confidence even once the CURRENTLY observed
+        state stopped matching what it claims to explain — the direct cause
+        of a report that stayed at 92% "MTU mismatch (ExStart)" while, two
+        sections above in the SAME report, the goal-evidence-mismatch check
+        (which reads observations directly, not this lookup) correctly said
+        no neighbor was in ExStart at all.
+        Falls back to parsing rationale text only when no protocol model is
+        available (a caller that couldn't detect the protocol at all)."""
+        if model is not None:
+            s = next((s for s in model.states if s in (hyp.discriminating_signals or [])), None)
+            if s:
+                return s
+        m = self._STUCK_STATE_RE.search(hyp.rationale or "")
+        return m.group(1) if m else None
 
     def _bind_compiled_signature_evidence(self, session: Session, hmgr: HypothesisManager,
                                           conf: ConfidenceCalculator) -> None:
@@ -774,9 +833,11 @@ class TroubleshootingEngine:
         confirms one and rules out the rest, leaving a cluttered, unconverged
         hypothesis list. This binds exactly that one fully-deterministic
         comparison — observed stuck-state vs. each compiled signature's own
-        stuck_state (recovered from the rationale string stamped at seed
-        time) — nothing else. Every other hypothesis (LLM-authored,
-        mismatch-investigation-seeded) is untouched. Runs at most once per
+        stuck_state (via _hypothesis_stuck_state — see its own docstring for
+        why discriminating_signals, not rationale text, is the reliable
+        source once hypotheses have merged) — nothing else. Every other
+        hypothesis (LLM-authored, mismatch-investigation-seeded with no
+        compiled lineage at all) is untouched. Runs at most once per
         hypothesis (idempotent via the delta reason tag) so it never
         double-counts across rounds."""
         obs = self._observed_protocol_state_obs(session)
@@ -785,13 +846,16 @@ class TroubleshootingEngine:
         observed_norm = self._norm_state(obs.value)
         if not observed_norm:
             return
+        protocol = self._detect_protocol(session.goal.query if session.goal else "")
+        from core.knowledge.compiler.protocol_models import build_protocol_model
+        model = build_protocol_model(protocol)
         for hyp in session.active_hypotheses():
-            m = self._STUCK_STATE_RE.search(hyp.rationale or "")
-            if not m:
+            stuck_state = self._hypothesis_stuck_state(hyp, model)
+            if not stuck_state:
                 continue
             if any((d.reason or "").startswith("deterministic-state-match") for d in hyp.deltas):
                 continue
-            stuck_norm = self._norm_state(m.group(1))
+            stuck_norm = self._norm_state(stuck_state)
             if not stuck_norm:
                 continue
             if stuck_norm == observed_norm:
@@ -1303,24 +1367,42 @@ class TroubleshootingEngine:
         otherwise have to reconstruct mentally, instead of jumping straight
         from a confidence score to a bare conclusion.
 
-        Finds the stuck_state via top.discriminating_signals matched against
-        the protocol's own FSM state names, NOT by regex-parsing top.rationale
-        for "stuck in 'X'": after HypothesisManager.add()'s discriminating-
-        signal merge (mismatch-investigation + compiled-signature hypotheses
-        about the same parameter), the SURVIVING hypothesis keeps whichever
-        statement/rationale was seeded first — usually the mismatch
-        investigation's templated text, which has no such phrase at all.
-        discriminating_signals, in contrast, are unioned across every merge,
-        so the compiled signature's own stuck_state name is reliably present
-        on the merged hypothesis either way.
+        Narrates the ACTUALLY, CURRENTLY observed state
+        (_observed_protocol_state_obs) — never top's own static
+        discriminating_signals tag in isolation. A real production report
+        showed why that distinction matters: the winning hypothesis was a
+        compiled ExStart signature merged with a Mismatch Investigation
+        Finding, so it permanently carries "ExStart" as a signal from
+        seed time — but THIS run's real evidence never showed any neighbor
+        in ExStart at all (a different, healthier condition was observed).
+        The old lookup didn't care; it built a full "Observed: ExStart ->
+        MTU mismatch, 85% confidence" narrative anyway, directly
+        contradicting the Question vs. Evidence Mismatch banner two
+        sections above in the SAME report. Two independent code paths were
+        each deciding "what state is this" from a different source of
+        truth and could disagree.
+        Also requires top's OWN claimed state (_hypothesis_stuck_state —
+        same merge-safe discriminating_signals lookup
+        _bind_compiled_signature_evidence uses) to AGREE with that real
+        observation before rendering anything: if the winning hypothesis
+        doesn't actually explain the state that was just observed, there is
+        nothing honest to narrate, and the chain is skipped entirely rather
+        than explaining a state nobody saw.
         """
         protocol = self._detect_protocol(session.goal.query if session.goal else "")
         from core.knowledge.compiler.protocol_models import build_protocol_model
         model = build_protocol_model(protocol)
         if model is None:
             return
-        stuck_state = next((s for s in model.states if s in top.discriminating_signals), None)
+        obs = self._observed_protocol_state_obs(session)
+        if obs is None:
+            return
+        observed_norm = self._norm_state(obs.value)
+        stuck_state = next((s for s in model.states if self._norm_state(s) == observed_norm), None)
         if not stuck_state:
+            return
+        top_stuck_state = self._hypothesis_stuck_state(top, model)
+        if top_stuck_state is None or self._norm_state(top_stuck_state) != observed_norm:
             return
         from core.knowledge.compiler.failure_signatures import explain_stuck_state
         chain = explain_stuck_state(protocol, stuck_state)
