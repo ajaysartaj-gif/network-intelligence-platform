@@ -13,7 +13,9 @@ Every assistant reply is tagged with the mode it was produced under and rendered
 with a distinct badge + accent colour so the end user can see the difference.
 """
 
+import json
 import logging
+import os
 import re
 import streamlit as st
 from uuid import uuid4
@@ -146,14 +148,65 @@ def get_mode(value: Any) -> Dict[str, Any]:
     return MODES[normalize_mode(value)]
 
 
+# ── cross-refresh persistence ────────────────────────────────────────────
+# Streamlit's st.session_state lives only as long as the browser tab's
+# WebSocket connection. A hard page refresh (F5, navigating away and back)
+# doesn't resume that connection — it opens a brand-new one, so Streamlit
+# hands the script a completely empty session_state, same as a first-ever
+# visit. Nothing about that is a bug in st.session_state; it just means
+# anything the user should still see after a refresh (chat history, which
+# devices were selected, which mode was active) has to live somewhere
+# OTHER than session_state. Before this, it lived nowhere, so it reset to
+# blank on every refresh. This mirrors the same opt-in JSONFileBackend
+# pattern core/troubleshooting/memory.py and core/design_engine/memory.py
+# already use for their own state.
+_COPILOT_STATE_PATH = ".ai_net_studio_copilot_state.json"
+
+
+def _load_persisted_copilot_state() -> Dict[str, Any]:
+    try:
+        if os.path.exists(_COPILOT_STATE_PATH):
+            with open(_COPILOT_STATE_PATH) as f:
+                return json.load(f)
+    except Exception as exc:
+        logger.debug("Copilot state restore skipped: %s", exc)
+    return {}
+
+
+def _persist_copilot_state() -> None:
+    try:
+        data = {
+            "conversations": st.session_state.get("copilot_conversations", []),
+            "active_conversation_id": st.session_state.get("copilot_active_conversation_id"),
+            "selected_devices": st.session_state.get("copilot_selected_devices", []),
+            "ai_mode": st.session_state.get("copilot_ai_mode"),
+            "autonomous_mode": st.session_state.get("copilot_autonomous_mode", False),
+        }
+        with open(_COPILOT_STATE_PATH, "w") as f:
+            json.dump(data, f, default=str)
+    except Exception as exc:
+        logger.debug("Copilot state persist skipped: %s", exc)
+
+
+def _rerun() -> None:
+    """st.rerun() immediately halts this script run — any state mutated
+    just before it must be persisted BEFORE calling it, not after."""
+    _persist_copilot_state()
+    st.rerun()
+
+
 def initialize_session_state():
-    """Initialize all copilot-related session state."""
+    """Initialize all copilot-related session state. On a brand-new session
+    (nothing set yet — the hard-refresh case described above) restores
+    conversations/selected devices/mode/autonomous-mode from disk instead
+    of resetting everything to blank."""
     if "copilot_conversations" not in st.session_state:
-        st.session_state["copilot_conversations"] = []
-    if "copilot_active_conversation_id" not in st.session_state:
-        st.session_state["copilot_active_conversation_id"] = None
-    if "copilot_selected_devices" not in st.session_state:
-        st.session_state["copilot_selected_devices"] = []
+        restored = _load_persisted_copilot_state()
+        st.session_state["copilot_conversations"] = restored.get("conversations") or []
+        st.session_state["copilot_active_conversation_id"] = restored.get("active_conversation_id")
+        st.session_state["copilot_selected_devices"] = restored.get("selected_devices") or []
+        st.session_state["copilot_ai_mode"] = restored.get("ai_mode") or ""
+        st.session_state["copilot_autonomous_mode"] = bool(restored.get("autonomous_mode"))
     if "copilot_uploaded_image" not in st.session_state:
         st.session_state["copilot_uploaded_image"] = None
     # Default to a real mode (never "None") and migrate any legacy value.
@@ -644,6 +697,17 @@ def _continue_investigation_if_needed(call_ai_fn, pending_state) -> Dict[str, An
     exactly like every other fix in this UI — only the "notice and
     investigate" step is automatic, never "apply".
 
+    Carries `excluded_causes` forward from pending_state and appends the
+    root cause that was just tried — a real production report showed the
+    fix that JUST failed verification (e.g. an MTU-mismatch fix, still
+    stuck afterward) getting re-proposed identically on every subsequent
+    "still not FULL" cycle, since each cycle built a completely fresh
+    TroubleshootingEngine.run() with no memory that this exact cause had
+    already been deployed and confirmed not to work for this exact target.
+    Passing it through TroubleshootingEngine.run()'s own excluded_causes
+    parameter eliminates that hypothesis outright on re-seed instead of
+    letting it win again on its unchanged compiled prior.
+
     Returns {"messages": [chat message dicts to append],
     "next_pending_state": {} or a fresh "ts_fix" pending_state}."""
     verification_targets = pending_state.get("verification_targets") or {}
@@ -654,13 +718,17 @@ def _continue_investigation_if_needed(call_ai_fn, pending_state) -> Dict[str, An
     devices = pending_state.get("devices", [])
     query = (f"why is the OSPF neighbor {target['ip']} on interface "
             f"{target['interface']} stuck in {target['state']}")
+    prior_root_cause = pending_state.get("root_cause", "")
+    excluded_causes = list(pending_state.get("excluded_causes", []))
+    if prior_root_cause and prior_root_cause not in excluded_causes:
+        excluded_causes.append(prior_root_cause)
     try:
         from core.troubleshooting import TroubleshootingEngine, TSConfig
         gw = _make_troubleshooting_gateway(call_ai_fn, devices)
         tse = TroubleshootingEngine(ai_call=call_ai_fn, devices=devices, gateway=gw,
                                     config=TSConfig(max_steps=6),
                                     session_store=_get_ts_session_backend())
-        report = tse.run(query)
+        report = tse.run(query, excluded_causes=excluded_causes)
     except Exception as exc:
         return {"messages": [{
             "role": "assistant",
@@ -686,6 +754,7 @@ def _continue_investigation_if_needed(call_ai_fn, pending_state) -> Dict[str, An
             "target_ip": target_ip,
             "devices": devices,
             "session": s,
+            "excluded_causes": excluded_causes,
         }
     return {"messages": messages, "next_pending_state": next_state}
 
@@ -737,13 +806,13 @@ def render_copilot_page(call_ai_fn):
                 st.session_state["copilot_conversations"] = conversations
                 st.session_state["copilot_active_conversation_id"] = new_conversation["id"]
                 action_states[new_conversation["id"]] = {}
-                st.rerun()
+                _rerun()
         with col_clear:
             if st.button("🗑 Clear all", use_container_width=True, key="cp_sidebar_clear"):
                 st.session_state["copilot_conversations"] = []
                 st.session_state["copilot_active_conversation_id"] = None
                 st.session_state["copilot_action_state"] = {}
-                st.rerun()
+                _rerun()
 
         st.markdown("---")
         if not conversations:
@@ -756,7 +825,7 @@ def render_copilot_page(call_ai_fn):
                 button_label = f"{'● ' if is_active else ''}{title}"
                 if st.button(button_label, key=f"conv_{conversation['id']}", use_container_width=True):
                     st.session_state["copilot_active_conversation_id"] = conversation["id"]
-                    st.rerun()
+                    _rerun()
                 st.markdown(f"<div style='margin:0 0 10px 12px; color:#94a3b8; font-size:12px;'>{snippet}</div>", unsafe_allow_html=True)
 
         st.markdown("---")
@@ -903,7 +972,7 @@ def render_copilot_page(call_ai_fn):
                 if st.button("🗑 Clear", key="cp_clear_chat", use_container_width=True):
                     active_conversation["messages"] = []
                     active_conversation["title"] = "New chat"
-                    st.rerun()
+                    _rerun()
 
             # Composer button bar
             _bar_col1, _bar_col2, _bar_col3, _bar_col4, _bar_col5 = st.columns([0.55, 1.5, 1.35, 4.5, 0.8])
@@ -964,7 +1033,7 @@ def render_copilot_page(call_ai_fn):
                     ):
                         st.session_state["copilot_ai_mode"] = mode_key
                         st.session_state["cp_show_mode"] = False
-                        st.rerun()
+                        _rerun()
                     st.markdown(
                         f"<div style='font-size:11px;color:#94a3b8;margin:2px 4px 8px 4px'>"
                         + (
@@ -1137,7 +1206,7 @@ def render_copilot_page(call_ai_fn):
 
             conversation["messages"].append({"role": "assistant", "content": ai_reply, "mode": mode_key})
             clear_copilot_main_input()
-            st.rerun()
+            _rerun()
 
         # ── Conversation ──────────────────────────────────────────────────────────
         messages = active_conversation.get("messages", [])
@@ -1187,11 +1256,11 @@ def render_copilot_page(call_ai_fn):
                             }
                         else:
                             action_states[active_conversation["id"]] = {}
-                        st.rerun()
+                        _rerun()
                 with _plan_col2:
                     if st.button("❌ Cancel", key=f"cp_cancel_plan_{active_conversation['id']}", use_container_width=True):
                         action_states[active_conversation["id"]] = {}
-                        st.rerun()
+                        _rerun()
             elif pending_state.get("kind") == "fix":
                 st.markdown("### ⚙️ Review fix")
                 from core.intent_engine import IntentEngine
@@ -1221,11 +1290,11 @@ def render_copilot_page(call_ai_fn):
                             summary_lines.append("ℹ️ No config commands were available to apply.")
                         active_conversation["messages"].append({"role": "assistant", "content": "\n".join(summary_lines), "mode": "troubleshoot"})
                         action_states[active_conversation["id"]] = {}
-                        st.rerun()
+                        _rerun()
                 with _fix_col2:
                     if st.button("❌ Discard", key=f"cp_discard_fix_{active_conversation['id']}", use_container_width=True):
                         action_states[active_conversation["id"]] = {}
-                        st.rerun()
+                        _rerun()
             elif pending_state.get("kind") == "followup":
                 st.markdown("### 🔁 Continue with next step")
                 from core.intent_engine import IntentEngine
@@ -1255,11 +1324,11 @@ def render_copilot_page(call_ai_fn):
                             }
                         else:
                             action_states[active_conversation["id"]] = {}
-                        st.rerun()
+                        _rerun()
                 with _follow_col2:
                     if st.button("❌ Stop", key=f"cp_stop_followup_{active_conversation['id']}", use_container_width=True):
                         action_states[active_conversation["id"]] = {}
-                        st.rerun()
+                        _rerun()
             elif pending_state.get("kind") == "ts_fix":
                 st.markdown("### ⚙️ Review recommended fix")
                 if pending_state.get("root_cause"):
@@ -1303,11 +1372,11 @@ def render_copilot_page(call_ai_fn):
                             }
                         else:
                             action_states[active_conversation["id"]] = {}
-                        st.rerun()
+                        _rerun()
                 with _ts_col2:
                     if st.button("❌ Discard", key=f"cp_ts_discard_{active_conversation['id']}", use_container_width=True):
                         action_states[active_conversation["id"]] = {}
-                        st.rerun()
+                        _rerun()
             elif pending_state.get("kind") == "ts_verify":
                 st.markdown("### 🔍 Confirm the fix")
                 if pending_state.get("root_cause"):
@@ -1329,7 +1398,7 @@ def render_copilot_page(call_ai_fn):
                         cont = _continue_investigation_if_needed(call_ai_fn, pending_state)
                         active_conversation["messages"].extend(cont["messages"])
                         action_states[active_conversation["id"]] = cont["next_pending_state"]
-                        st.rerun()
+                        _rerun()
                 with _tv_col2:
                     if st.button("❌ Still Broken", key=f"cp_ts_deny_{active_conversation['id']}", use_container_width=True):
                         msg = _record_ts_outcome(pending_state, success=False)
@@ -1338,7 +1407,7 @@ def render_copilot_page(call_ai_fn):
                         cont = _continue_investigation_if_needed(call_ai_fn, pending_state)
                         active_conversation["messages"].extend(cont["messages"])
                         action_states[active_conversation["id"]] = cont["next_pending_state"]
-                        st.rerun()
+                        _rerun()
             elif pending_state.get("kind") == "cfg_approval":
                 st.markdown("### 📦 Approve configuration deployment")
                 st.markdown("The engine has prepared and validated this change. "
@@ -1357,13 +1426,13 @@ def render_copilot_page(call_ai_fn):
                         active_conversation["messages"].append(
                             {"role": "assistant", "content": "\n".join(summary), "mode": "configure"})
                         action_states[active_conversation["id"]] = {}
-                        st.rerun()
+                        _rerun()
                 with _cfg_col2:
                     if st.button("❌ Reject", key=f"cp_cfg_reject_{active_conversation['id']}", use_container_width=True):
                         active_conversation["messages"].append(
                             {"role": "assistant", "content": "❌ Configuration rejected — nothing was applied.", "mode": "configure"})
                         action_states[active_conversation["id"]] = {}
-                        st.rerun()
+                        _rerun()
 
             st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
             _clear_col1, _clear_col2, _clear_col3 = st.columns([2, 1, 2])
@@ -1372,4 +1441,13 @@ def render_copilot_page(call_ai_fn):
                     active_conversation["messages"] = []
                     active_conversation["title"] = "New chat"
                     action_states[active_conversation["id"]] = {}
-                    st.rerun()
+                    _rerun()
+
+    # Catch-all for state that changes via a widget's OWN key binding
+    # (device-selection checkboxes, the autonomous-mode checkbox) rather
+    # than through one of the explicit mutate-then-_rerun() branches above
+    # — those paths update session_state and let Streamlit's own automatic
+    # rerun-on-interaction carry the script to this natural end without
+    # ever calling _rerun() itself, so persistence still needs to happen
+    # here too.
+    _persist_copilot_state()

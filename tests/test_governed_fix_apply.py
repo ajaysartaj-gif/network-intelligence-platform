@@ -163,16 +163,19 @@ class _FakeReport:
 
 class _FakeFollowUpEngine:
     """Stands in for core.troubleshooting.TroubleshootingEngine — records the
-    query/devices it was invoked with and returns a pre-built report."""
+    query/devices/excluded_causes it was invoked with and returns a
+    pre-built report."""
     last_devices = None
     last_query = None
+    last_excluded_causes = None
     report_to_return = None
 
     def __init__(self, ai_call, devices, gateway, config, session_store=None):
         _FakeFollowUpEngine.last_devices = devices
 
-    def run(self, query):
+    def run(self, query, excluded_causes=None):
         _FakeFollowUpEngine.last_query = query
+        _FakeFollowUpEngine.last_excluded_causes = excluded_causes
         return _FakeFollowUpEngine.report_to_return
 
 
@@ -208,11 +211,18 @@ def test_continue_investigation_scopes_a_fresh_run_and_surfaces_a_new_fix(monkey
     assert "192.168.20.2" in _FakeFollowUpEngine.last_query
     assert "GigabitEthernet1/0" in _FakeFollowUpEngine.last_query
     assert "EXSTART" in _FakeFollowUpEngine.last_query
+    # The root cause the JUST-tried (and still-broken) fix addressed must be
+    # excluded from the follow-up run — otherwise it can win again on its
+    # own unchanged compiled prior, the exact repeating-fix loop a real
+    # production report showed.
+    assert _FakeFollowUpEngine.last_excluded_causes == [pending["root_cause"]]
     assert len(cont["messages"]) == 1
     assert "follow-up report" in cont["messages"][0]["content"]
     assert cont["next_pending_state"]["kind"] == "ts_fix"
     assert cont["next_pending_state"]["fix_commands"] == ["ip ospf dead-interval 40"]
     assert cont["next_pending_state"]["devices"] == [dev]
+    # accumulates for a THIRD cycle, should this one also fail verification
+    assert cont["next_pending_state"]["excluded_causes"] == [pending["root_cause"]]
 
 
 def test_continue_investigation_clears_state_when_followup_has_no_fix(monkeypatch):

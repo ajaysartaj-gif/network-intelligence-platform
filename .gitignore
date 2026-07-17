@@ -27,6 +27,7 @@ core/.env
 .ai_net_studio_memory.sqlite
 .ai_net_studio_rag_chroma/
 .ai_net_studio_topology_cache.json
+.ai_net_studio_copilot_state.json
 .netbrain_memory.sqlite
 .netbrain_rag_chroma/
 .netbrain_topology_cache.json

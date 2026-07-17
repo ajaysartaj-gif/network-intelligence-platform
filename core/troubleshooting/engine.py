@@ -142,8 +142,24 @@ class TroubleshootingEngine:
             return ""
 
     # ── main entry ──────────────────────────────────────────────────────────────
-    def run(self, query: str) -> TroubleshootReport:
+    def run(self, query: str, excluded_causes: Optional[List[str]] = None) -> TroubleshootReport:
+        """`excluded_causes`: root-cause statements already deployed and
+        confirmed (by a human) NOT to have resolved the issue for this exact
+        target — e.g. a caller re-investigating the same neighbor/interface
+        right after its just-applied fix's own verification came back still
+        broken. Without this, a fresh run() re-seeds the identical compiled
+        signature from its identical prior every time, so the SAME hypothesis
+        (and therefore the SAME fix) keeps winning again — a real production
+        report showed this exact cycle: MTU-mismatch fix applied, verification
+        still broken, re-investigate, MTU-mismatch wins again, same fix
+        proposed again, repeating indefinitely with confidence never moving
+        and no record that this was already tried. Matching hypotheses are
+        eliminated immediately after seeding instead of merely left to
+        compete — a human-confirmed failure is a fact, not a probabilistic
+        signal, the same treatment _bind_compiled_signature_evidence already
+        gives a deterministic state contradiction."""
         session = Session()
+        self._excluded_causes = set(excluded_causes or [])
         # Accumulates real {source, title, text} retrieved across BOTH
         # _grounder(...) calls this run() makes (here, and again before fix
         # generation) — used once at the end (_finish()) to synthesize one
@@ -175,6 +191,7 @@ class TroubleshootingEngine:
         self._bind_compiled_signature_evidence(session, hmgr, conf)
         self._ensure_protocol_state_observed(session, hmgr, conf, device_ips)
         self._bind_compiled_signature_evidence(session, hmgr, conf)
+        self._eliminate_excluded_causes(session)
         # reap() otherwise only runs inside the main loop, after a
         # successful evidence round. If the loop exits on its very first
         # iteration (e.g. the deterministic anchor above already gathered
@@ -207,6 +224,7 @@ class TroubleshootingEngine:
                 existing_statements):
             hmgr.add(h.get("statement", ""), h.get("rationale", ""),
                      h.get("discriminating_signals", []), float(h.get("prior", 0.2) or 0.2))
+        self._eliminate_excluded_causes(session)
 
         if not session.active_hypotheses():
             session.status = ResolutionStatus.ESCALATE
@@ -606,6 +624,40 @@ class TroubleshootingEngine:
                 session.goal.objective, grounding, ev_summary, existing, max_new=2):
             hmgr.add(h.get("statement", ""), h.get("rationale", ""),
                      h.get("discriminating_signals", []), float(h.get("prior", 0.15) or 0.15))
+        self._eliminate_excluded_causes(session)
+
+    def _eliminate_excluded_causes(self, session: Session) -> None:
+        """A human already confirmed (via a deployed fix's own post-apply
+        verification) that one of these exact root-cause statements does
+        NOT explain the current problem for this target — eliminate it
+        outright rather than let it keep competing on its original prior.
+        This is what stops the exact cycle a real report showed: MTU-
+        mismatch fix applied, verification still broken, re-investigate,
+        MTU-mismatch (re-seeded from its own unchanged compiled prior) wins
+        again, identical fix proposed again, repeating indefinitely.
+        A confirmed failure is a fact, not a probabilistic signal — same
+        treatment _bind_compiled_signature_evidence already gives an
+        observed-state contradiction.
+
+        Overrides CONFIRMED too, not just ACTIVE: run_mismatch_investigation()
+        (called from _seed_deterministic_hypotheses, before this method's
+        first call in a given run()) runs its OWN internal hmgr.reap() —
+        real cross-device evidence plus a high compiled prior can confirm a
+        hypothesis in that very first seeding step, before this method ever
+        sees it while still ACTIVE. A hypothesis is only ever unreachable
+        here once it's ELIMINATED."""
+        excluded = getattr(self, "_excluded_causes", None)
+        if not excluded:
+            return
+        for h in session.hypotheses:
+            if h.state == HypothesisState.ELIMINATED or h.statement not in excluded:
+                continue
+            h.state = HypothesisState.ELIMINATED
+            h.rationale = (
+                (h.rationale + " " if h.rationale else "")
+                + "[Already applied and confirmed NOT to have resolved this issue in a "
+                  "prior attempt on this target — excluded without new evidence.]"
+            )
 
     def _observe_initial_state(self, session: Session, hmgr: HypothesisManager,
                               conf: ConfidenceCalculator, grounding: str,

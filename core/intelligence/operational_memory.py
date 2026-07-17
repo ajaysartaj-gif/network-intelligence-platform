@@ -97,6 +97,7 @@ class _Backend:
     """
     def __init__(self, dsn: str = "", sqlite_path: str = _DB_PATH):
         self.is_postgres = bool(dsn)
+        self._dsn = dsn
         if self.is_postgres:
             import psycopg2
             import psycopg2.extras
@@ -113,10 +114,45 @@ class _Backend:
     def kind(self) -> str:
         return "postgres" if self.is_postgres else "sqlite"
 
+    def _is_connection_error(self, exc: Exception) -> bool:
+        if isinstance(exc, (self._pg.OperationalError, self._pg.InterfaceError)):
+            return True
+        return "closed" in str(exc).lower()
+
+    def _reconnect(self) -> None:
+        try:
+            self._conn.close()
+        except Exception:
+            pass
+        self._conn = self._pg.connect(self._dsn)
+        self._conn.autocommit = True
+
     def execute(self, sql: str, params: tuple = ()):  # returns cursor
         # callers write SQL with '?' placeholders; translate for Postgres.
         if self.is_postgres:
             sql = sql.replace("?", "%s")
+            try:
+                cur = self._conn.cursor()
+                cur.execute(sql, params)
+                return cur
+            except Exception as exc:
+                # A pooled Postgres connection (Supabase's pgbouncer, etc.)
+                # can be closed server-side between calls in a long-lived
+                # process — a chat session's think-time between messages is
+                # easily longer than a pooler's idle timeout. Without this,
+                # the FIRST such failure permanently breaks every later
+                # write for the rest of the process (this module caches ONE
+                # OperationalMemory/_Backend instance for the whole
+                # process's life — see get_operational_memory()), which is
+                # exactly what silently disabled the entire learning loop
+                # for a real session: "learning update failed: connection
+                # already closed", repeated on every subsequent attempt.
+                if not self._is_connection_error(exc):
+                    raise
+                self._reconnect()
+                cur = self._conn.cursor()
+                cur.execute(sql, params)
+                return cur
         cur = self._conn.cursor()
         cur.execute(sql, params)
         return cur
@@ -124,9 +160,17 @@ class _Backend:
     def query(self, sql: str, params: tuple = ()) -> List[Dict[str, Any]]:
         if self.is_postgres:
             sql = sql.replace("?", "%s")
-            cur = self._conn.cursor(cursor_factory=self._extras.RealDictCursor)
-            cur.execute(sql, params)
-            return [dict(r) for r in cur.fetchall()]
+            try:
+                cur = self._conn.cursor(cursor_factory=self._extras.RealDictCursor)
+                cur.execute(sql, params)
+                return [dict(r) for r in cur.fetchall()]
+            except Exception as exc:
+                if not self._is_connection_error(exc):
+                    raise
+                self._reconnect()
+                cur = self._conn.cursor(cursor_factory=self._extras.RealDictCursor)
+                cur.execute(sql, params)
+                return [dict(r) for r in cur.fetchall()]
         cur = self._conn.cursor()
         cur.execute(sql, params)
         cols = [c[0] for c in cur.description] if cur.description else []

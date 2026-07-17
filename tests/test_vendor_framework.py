@@ -197,8 +197,14 @@ def test_engine_uses_gateway_end_to_end():
     devices = [Dev("10.0.0.1", "Cisco IOS Software 15.2"),
                Dev("10.0.0.2", "Cisco IOS Software 15.2"),
                Dev("10.0.0.3", "Cisco IOS Software 15.2")]
-    gw = VendorGateway(send=lambda d, cmds: {c: "2.2.2.2   0   EXSTART" for c in cmds},
-                       hint_provider=lambda d: {"sys_descr": d._descr})
+    # Real "show ip ospf neighbor" always prints trailing Dead Time/Address/
+    # Interface columns (see _OSPF_NEIGHBOR_PARSER) — without them, the
+    # engine has no interface to scope a fix to and correctly refuses to
+    # emit an ambiguous, unscoped "ip ospf mtu-ignore" with no preceding
+    # "interface X" line.
+    gw = VendorGateway(
+        send=lambda d, cmds: {c: "2.2.2.2   0   EXSTART/  -   00:00:33   10.0.0.9   Gi0/0" for c in cmds},
+        hint_provider=lambda d: {"sys_descr": d._descr})
     eng = TroubleshootingEngine(ai_call=ai, devices=devices, gateway=gw,
                                 config=TSConfig(max_steps=5))
     report = eng.run("why is OSPF stuck")
@@ -206,6 +212,8 @@ def test_engine_uses_gateway_end_to_end():
     assert s.status == ResolutionStatus.RESOLVED_PENDING_APPROVAL, s.status
     # the fix is VENDOR syntax produced by the ios-like adapter from the neutral intent
     assert s.fix and any("mtu-ignore" in c for c in s.fix.config_commands), s.fix.config_commands
+    # scoped to the actual interface, not a bare unscoped command
+    assert "interface Gi0/0" in s.fix.config_commands, s.fix.config_commands
     assert s.fix.rollback_commands                       # rollback always present
     # engine collected NORMALIZED objects (neighbor facts), not raw CLI
     assert any(o.subject.startswith("ospf") for o in s.observations)
