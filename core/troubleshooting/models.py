@@ -399,6 +399,81 @@ class TroubleshootReport:
             lines.append("\n### 🔎 Synthesized Answer")
             lines.append(s.synthesized_answer)
 
+        status_msg = {
+            ResolutionStatus.RESOLVED_PENDING_APPROVAL: "🟢 Root cause confirmed — fix awaiting your approval.",
+            ResolutionStatus.LIKELY_CAUSE_PRESENT: "🟡 Most likely cause identified below threshold — alternatives shown.",
+            ResolutionStatus.ESCALATE: f"🔴 Escalated: {s.escalation_reason or 'no safe conclusion possible from available evidence.'}",
+            ResolutionStatus.HEALTHY: "🟢 No fault found — system appears healthy.",
+            ResolutionStatus.IN_PROGRESS: "⏳ Investigation in progress.",
+            ResolutionStatus.RESOLVED: "✅ Resolved — confirmed fixed by the operator.",
+            ResolutionStatus.UNRESOLVED: "❌ Unresolved — operator confirmed the deployed fix did not work.",
+        }.get(s.status, s.status.value)
+
+        # ── Operator narrative: what's broken, why, how sure, what to do —
+        # in plain language, the way a senior TAC engineer would explain it.
+        # Everything an operator doesn't need to fix the problem (compiled-
+        # signature citations, confidence math, governance/risk internals,
+        # knowledge-source provenance) moves to the collapsed Diagnostic
+        # Details section below instead of interleaving with this.
+        rc = s.reasoning_chain
+        if rc:
+            lines.append(f"\n### 📍 You Are Here\nThe neighbor is stuck in **{rc['stuck_state']}**.")
+            lines.append(f"\n### 💬 What This Means\n{rc['stuck_meaning']}")
+        elif s.goal:
+            lines.append(f"\n### 📍 You Are Here\n{s.goal.objective or s.goal.query}")
+
+        lines.append("\n### 🧭 Most Likely Cause")
+        if top:
+            lines.append(f"{top.statement}\n\n**Confidence:** {top.confidence:.0%}")
+        else:
+            lines.append("_undetermined_")
+
+        if top and top.rationale:
+            lines.append(f"\n### 🗣️ Here's Why\n{top.rationale}")
+
+        lines.append("\n### 🔍 Check This")
+        if s.verification and s.verification.commands:
+            lines.append(s.verification.success_criteria)
+            lines.append("```")
+            lines.extend(s.verification.commands)
+            lines.append("```")
+        else:
+            lines.append("_pending root-cause confirmation_")
+
+        lines.append("\n### 🛠️ Fix This")
+        if s.fix and s.fix.config_commands:
+            lines.append(s.fix.explanation)
+            lines.append("```")
+            lines.extend(s.fix.config_commands)
+            lines.append("```")
+            if s.fix.validation_md:
+                lines.append(s.fix.validation_md)
+        else:
+            lines.append("_no fix generated — see resolution status_")
+
+        alternates = s.ranked()[1:]
+        eliminated = [h for h in s.hypotheses if h.state == HypothesisState.ELIMINATED]
+        if alternates or eliminated:
+            lines.append("\n### 🔁 If Not, Try These")
+            for h in alternates:
+                lines.append(f"- {h.statement} _(confidence: {h.confidence:.0%})_")
+            if eliminated:
+                lines.append(
+                    f"\n_Already ruled out: {', '.join(h.statement for h in eliminated)} "
+                    "— see Diagnostic Details for why._"
+                )
+
+        lines.append(f"\n### 🏁 Bottom Line\n{status_msg}")
+
+        # ── Diagnostic Details: everything above is built from this, kept
+        # verbatim and collapsed — for auditing the AI's own reasoning
+        # (confidence math, evidence log, governance/risk internals), not
+        # needed to act on the fix.
+        lines.append(
+            "\n<details><summary>🔧 <b>Diagnostic Details</b> (confidence math, evidence log, "
+            "governance/risk internals — for auditing the AI's own reasoning)</summary>\n"
+        )
+
         lines.append("\n### 🧪 Active Hypotheses")
         if s.ranked():
             for h in s.ranked():
@@ -416,7 +491,6 @@ class TroubleshootReport:
         # cause was eliminated, and what confidence it had reached before
         # being dropped, so a demotion to a different leading hypothesis
         # reads as a reasoned transition instead of an unexplained jump.
-        eliminated = [h for h in s.hypotheses if h.state == HypothesisState.ELIMINATED]
         if eliminated:
             lines.append("\n### ❌ Ruled Out")
             for h in eliminated:
@@ -446,7 +520,6 @@ class TroubleshootReport:
             )
 
         if s.reasoning_chain:
-            rc = s.reasoning_chain
             lines.append("\n### 🔗 Reasoning Chain")
             lines.append(f"**Observed:** neighbor state = `{rc['stuck_state']}`")
             if rc.get("confirmed_stages"):
@@ -460,29 +533,6 @@ class TroubleshootReport:
             if rc.get("likely_cause"):
                 lines.append(f"\n**Conclusion:** {rc['likely_cause']} "
                              f"_(compiled signature confidence: {rc['confidence']:.0%})_")
-
-        lines.append("\n### 🎯 Likely Root Cause")
-        lines.append(f"{top.statement if top else '_undetermined_'}")
-
-        lines.append("\n### 🛠️ Recommended Fix")
-        if s.fix and s.fix.config_commands:
-            lines.append(s.fix.explanation)
-            lines.append("```")
-            lines.extend(s.fix.config_commands)
-            lines.append("```")
-            if s.fix.validation_md:
-                lines.append(s.fix.validation_md)
-        else:
-            lines.append("_no fix generated — see resolution status_")
-
-        lines.append("\n### ✅ Verification Plan")
-        if s.verification and s.verification.commands:
-            lines.append(s.verification.success_criteria)
-            lines.append("```")
-            lines.extend(s.verification.commands)
-            lines.append("```")
-        else:
-            lines.append("_pending root-cause confirmation_")
 
         if s.risk:
             r = s.risk
@@ -499,14 +549,5 @@ class TroubleshootReport:
             for src in s.knowledge_sources:
                 lines.append(f"- {src}")
 
-        status_msg = {
-            ResolutionStatus.RESOLVED_PENDING_APPROVAL: "🟢 Root cause confirmed — fix awaiting your approval.",
-            ResolutionStatus.LIKELY_CAUSE_PRESENT: "🟡 Most likely cause identified below threshold — alternatives shown.",
-            ResolutionStatus.ESCALATE: f"🔴 Escalated: {s.escalation_reason or 'no safe conclusion possible from available evidence.'}",
-            ResolutionStatus.HEALTHY: "🟢 No fault found — system appears healthy.",
-            ResolutionStatus.IN_PROGRESS: "⏳ Investigation in progress.",
-            ResolutionStatus.RESOLVED: "✅ Resolved — confirmed fixed by the operator.",
-            ResolutionStatus.UNRESOLVED: "❌ Unresolved — operator confirmed the deployed fix did not work.",
-        }.get(s.status, s.status.value)
-        lines.append(f"\n### 🏁 Final Resolution Status\n{status_msg}")
+        lines.append("\n</details>")
         return "\n".join(lines)
