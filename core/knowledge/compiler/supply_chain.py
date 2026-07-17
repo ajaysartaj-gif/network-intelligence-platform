@@ -200,12 +200,37 @@ class NetworkIntelligenceSupplyChain:
         return self.memory.record_from_contract(
             contract, site=site, protocol=protocol, operator=operator, commands=commands)
 
-    def learn_from_incident(self, *, success: bool, intent: str = "", device: str = "",
-                            protocol: str = "", site: str = "", operator: str = "",
-                            commands: Optional[List[str]] = None) -> Dict[str, Any]:
+    def record_partial_resolution(self, intent: str, device: str, *, detail: str = "",
+                                  commands: Optional[List[str]] = None, site: str = "",
+                                  protocol: str = "", operator: str = "") -> List[str]:
+        """A fix that helped SOME but not all of its targets — e.g. resolved
+        1 of 2 broken neighbors. Explicitly NOT routed through
+        record_resolution (would wrongly mark this cause as reusable
+        "known-good") or record_failed_resolution (would wrongly count it
+        toward recurring-failure detection, discouraging a hypothesis that
+        was actually partly right). satisfied=False on the underlying
+        contract, but outcome="partial" overrides record_from_contract's
+        bool-derived default so it lands in neither bucket."""
+        contract = _Contract(intent=intent, device=device, satisfied=False,
+                             conditions=[_Condition(description=detail or "partially resolved")])
+        return self.memory.record_from_contract(
+            contract, site=site, protocol=protocol, operator=operator, commands=commands,
+            outcome="partial")
+
+    def learn_from_incident(self, *, success: Optional[bool] = None, intent: str = "",
+                            device: str = "", protocol: str = "", site: str = "",
+                            operator: str = "", commands: Optional[List[str]] = None,
+                            outcome: Optional[str] = None) -> Dict[str, Any]:
+        """`outcome="partial"`: a fix that helped SOME but not all of its
+        targets — neither a confirmed success nor a confirmed failure.
+        Pass `success=None` alongside it (the caller's job, mirroring
+        record_from_contract's own outcome override) so every existing
+        Learner that branches on `ev.success is True`/`is False` correctly
+        treats a partial outcome as neither, rather than misclassifying it
+        as a clean win or a clean loss."""
         from core.intelligence.learning.base import LearningEvent
-        event = LearningEvent(kind="incident", success=success, intent=intent, device=device,
-                              protocol=protocol, site=site, operator=operator,
+        event = LearningEvent(kind="incident", success=success, outcome=outcome, intent=intent,
+                              device=device, protocol=protocol, site=site, operator=operator,
                               commands=commands or [])
         return self.learning.learn_from(event)
 

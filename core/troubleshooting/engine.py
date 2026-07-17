@@ -33,8 +33,8 @@ from .hypotheses import (
 )
 from .memory import ExecutedCommandsMemory, SessionMemory, normalize_command
 from .models import (
-    Effect, Evidence, Fix, Goal, Hypothesis, HypothesisState, Observation, ResolutionStatus,
-    Session, TroubleshootReport, VerificationPlan,
+    ConfidenceDelta, Effect, Evidence, Fix, Goal, Hypothesis, HypothesisState, Observation,
+    ResolutionStatus, Session, TroubleshootReport, VerificationPlan,
 )
 from .reasoning import Reasoner, safe_ai_call
 
@@ -142,7 +142,8 @@ class TroubleshootingEngine:
             return ""
 
     # ── main entry ──────────────────────────────────────────────────────────────
-    def run(self, query: str, excluded_causes: Optional[List[str]] = None) -> TroubleshootReport:
+    def run(self, query: str, excluded_causes: Optional[List[str]] = None,
+            partial_causes: Optional[Dict[str, str]] = None) -> TroubleshootReport:
         """`excluded_causes`: root-cause statements already deployed and
         confirmed (by a human) NOT to have resolved the issue for this exact
         target — e.g. a caller re-investigating the same neighbor/interface
@@ -157,9 +158,17 @@ class TroubleshootingEngine:
         eliminated immediately after seeding instead of merely left to
         compete — a human-confirmed failure is a fact, not a probabilistic
         signal, the same treatment _bind_compiled_signature_evidence already
-        gives a deterministic state contradiction."""
+        gives a deterministic state contradiction.
+
+        `partial_causes`: root-cause statement -> reason, for a fix that
+        genuinely helped SOME but not all of its targets (see
+        _apply_partial_refinements). Unlike excluded_causes this does not
+        eliminate the hypothesis — it survives, penalized, so it can still
+        win if nothing better turns up, rather than being thrown away and
+        forcing a full restart on a hypothesis that was partly right."""
         session = Session()
         self._excluded_causes = set(excluded_causes or [])
+        self._partial_causes = dict(partial_causes or {})
         # Accumulates real {source, title, text} retrieved across BOTH
         # _grounder(...) calls this run() makes (here, and again before fix
         # generation) — used once at the end (_finish()) to synthesize one
@@ -192,6 +201,7 @@ class TroubleshootingEngine:
         self._ensure_protocol_state_observed(session, hmgr, conf, device_ips)
         self._bind_compiled_signature_evidence(session, hmgr, conf)
         self._eliminate_excluded_causes(session)
+        self._apply_partial_refinements(session)
         # reap() otherwise only runs inside the main loop, after a
         # successful evidence round. If the loop exits on its very first
         # iteration (e.g. the deterministic anchor above already gathered
@@ -225,6 +235,7 @@ class TroubleshootingEngine:
             hmgr.add(h.get("statement", ""), h.get("rationale", ""),
                      h.get("discriminating_signals", []), float(h.get("prior", 0.2) or 0.2))
         self._eliminate_excluded_causes(session)
+        self._apply_partial_refinements(session)
 
         if not session.active_hypotheses():
             session.status = ResolutionStatus.ESCALATE
@@ -625,6 +636,7 @@ class TroubleshootingEngine:
             hmgr.add(h.get("statement", ""), h.get("rationale", ""),
                      h.get("discriminating_signals", []), float(h.get("prior", 0.15) or 0.15))
         self._eliminate_excluded_causes(session)
+        self._apply_partial_refinements(session)
 
     def _eliminate_excluded_causes(self, session: Session) -> None:
         """A human already confirmed (via a deployed fix's own post-apply
@@ -657,6 +669,41 @@ class TroubleshootingEngine:
                 (h.rationale + " " if h.rationale else "")
                 + "[Already applied and confirmed NOT to have resolved this issue in a "
                   "prior attempt on this target — excluded without new evidence.]"
+            )
+
+    def _apply_partial_refinements(self, session: Session) -> None:
+        """A prior attempt at one of these exact root-cause statements
+        genuinely helped SOME but not all of its targets (see
+        copilot_engine.py's _classify_verification_outcome) — unlike
+        _eliminate_excluded_causes, this is not treated as disproven: a
+        partially-correct hypothesis should stay in play, just penalized,
+        so it can still win if nothing better turns up rather than forcing
+        a full restart on a cause that was partly right. Applied as an
+        ordinary CONTRADICT delta at half the weight of a deterministic
+        state contradiction (that's a certain fact; this is "didn't fully
+        explain it," a weaker signal) — reap()'s existing confidence floor
+        will eventually retire it on its own after enough repeated partial
+        failures, with no new elimination path needed."""
+        partial = getattr(self, "_partial_causes", None)
+        if not partial:
+            return
+        for h in session.hypotheses:
+            if h.state == HypothesisState.ELIMINATED or h.statement not in partial:
+                continue
+            if any((d.reason or "").startswith("partial-outcome-penalty") for d in h.deltas):
+                continue
+            reason = partial[h.statement]
+            weight = 0.3   # half of _bind_compiled_signature_evidence's deterministic 0.6
+            delta = ConfidenceDelta(
+                evidence_id="", effect=Effect.CONTRADICT, weight=weight,
+                log_odds_change=-ConfidenceCalculator.CONTRADICT_GAIN * weight,
+                reason=f"partial-outcome-penalty: {reason}",
+            )
+            h.apply(delta, "")
+            h.rationale = (
+                (h.rationale + " " if h.rationale else "")
+                + f"[Partially confirmed in a prior attempt on this target — {reason} "
+                  "Confidence reduced; still under consideration.]"
             )
 
     def _observe_initial_state(self, session: Session, hmgr: HypothesisManager,
@@ -696,7 +743,8 @@ class TroubleshootingEngine:
     def _norm_state(s: str) -> str:
         return re.sub(r"[^A-Z0-9]", "", (s or "").upper())
 
-    def _observed_protocol_state_obs(self, session: Session) -> Optional[Observation]:
+    def _observed_protocol_state_obs(self, session: Session,
+                                     target_ip: Optional[str] = None) -> Optional[Observation]:
         """Best-effort deterministic read of the most recent observation that
         reports an actual protocol/neighbor stuck-state (e.g. 'EXSTART') — the
         same vocabulary compiled FailureSignatures key off of via stuck_state.
@@ -707,7 +755,32 @@ class TroubleshootingEngine:
         see IosLikeAdapter's PROTOCOL object). Falling back to the coarse
         flag only when no neighbor-specific fact exists avoids the coarse
         "down" (meaning merely "no FULL neighbor yet") outranking the real,
-        specific observed state and being compared against it instead."""
+        specific observed state and being compared against it instead.
+
+        When `target_ip` is given — the specific neighbor THIS investigation
+        is actually about, e.g. a re-investigation query that explicitly
+        names "the OSPF neighbor 192.168.20.2" — scopes the search to
+        observations naming that neighbor specifically (its subject
+        contains its IP, e.g. "neighbor.192.168.20.2"). Without this, a
+        coincidentally more-recent fact about a COMPLETELY DIFFERENT
+        neighbor collected in the same evidence round (get_neighbors()
+        naturally returns every neighbor on a device, not just the one
+        under investigation) could silently stand in for "the observed
+        state". A real report showed exactly this: a continuation whose
+        Goal named 192.168.20.2 nonetheless compared against a "neighbor
+        FULL" fact that was actually about a different, healthy neighbor
+        (192.168.21.2) queried in the same sweep — the investigation's
+        target had silently shifted with no explanation. When target_ip is
+        given but nothing matches it yet, returns None rather than falling
+        back to an unrelated neighbor's fact — an unscoped guess here is
+        worse than honestly admitting nothing is known yet about THIS
+        neighbor."""
+        if target_ip:
+            for o in reversed(session.observations):
+                if (o.attribute == "state" and "neighbor" in o.subject.lower()
+                        and o.value and target_ip in o.subject):
+                    return o
+            return None
         for o in reversed(session.observations):
             if o.attribute == "state" and "neighbor" in o.subject.lower() and o.value:
                 return o
@@ -722,6 +795,16 @@ class TroubleshootingEngine:
     # passing ("the link went down") isn't misread as a deliberate claim
     # about the FSM state.
     _ASKED_STATE_RE = re.compile(r"stuck\s+(?:in|at|into)\s+(?:the\s+)?([A-Za-z0-9\-]+)", re.IGNORECASE)
+
+    # Matches how _continue_investigation_if_needed() (copilot_engine.py)
+    # phrases a re-investigation query: "...the OSPF neighbor 192.168.20.2
+    # on interface X stuck in Y" — capturing the specific neighbor this
+    # investigation is scoped to, if any.
+    _QUERY_TARGET_IP_RE = re.compile(r"\bneighbor\s+(\d{1,3}(?:\.\d{1,3}){3})\b", re.IGNORECASE)
+
+    def _query_target_ip(self, query: str) -> Optional[str]:
+        m = self._QUERY_TARGET_IP_RE.search(query or "")
+        return m.group(1) if m else None
 
     def _check_goal_evidence_match(self, session: Session, query: str) -> None:
         """Detects when the user's own question names a specific FSM state
@@ -747,7 +830,20 @@ class TroubleshootingEngine:
         neighbor reached Full", not a specific neighbor's own state) and too
         generic to act on. When no per-neighbor fact exists at all, the
         coarse flag is still reported, but honestly labeled as a protocol-
-        level status rather than disguised as a neighbor's FSM state."""
+        level status rather than disguised as a neighbor's FSM state.
+
+        When the query names a specific neighbor (_query_target_ip — the
+        re-investigation phrasing "...the OSPF neighbor 192.168.20.2..."),
+        scopes neighbor_obs to THAT neighbor only. Without this, a
+        coincidentally-collected fact about a DIFFERENT, unrelated neighbor
+        (e.g. a healthy one queried in the same get_neighbors() sweep) could
+        be compared against instead — a real report showed a continuation
+        whose Goal named one neighbor produce a mismatch banner built from
+        a completely different, healthy neighbor's state, with the
+        investigation's actual target silently shifting with no
+        explanation. If a target is named but nothing about it has been
+        collected yet, this returns without asserting anything, rather than
+        falling back to an unrelated neighbor's fact."""
         m = self._ASKED_STATE_RE.search(query or "")
         if not m:
             return
@@ -761,8 +857,13 @@ class TroubleshootingEngine:
         if not asked_state:
             return
 
-        neighbor_obs = [o for o in session.observations
-                       if o.attribute == "state" and "neighbor" in o.subject.lower() and o.value]
+        target_ip = self._query_target_ip(query)
+        all_neighbor_obs = [o for o in session.observations
+                           if o.attribute == "state" and "neighbor" in o.subject.lower() and o.value]
+        neighbor_obs = ([o for o in all_neighbor_obs if target_ip in o.subject]
+                       if target_ip else all_neighbor_obs)
+        if target_ip and not neighbor_obs:
+            return   # named a specific neighbor but have no evidence about it yet
         if neighbor_obs:
             if any(self._norm_state(o.value) == asked_norm for o in neighbor_obs):
                 return   # a neighbor genuinely IS in the asked state -> no mismatch
@@ -778,6 +879,8 @@ class TroubleshootingEngine:
             }
             return
 
+        if target_ip:
+            return   # named a specific neighbor; never fall back to a device-wide coarse flag
         # No per-neighbor fact was ever collected this round — only the
         # coarse protocol-level up/down summary exists. Report it honestly
         # as a protocol status, never disguised as a specific neighbor's
@@ -839,14 +942,21 @@ class TroubleshootingEngine:
         hypothesis (LLM-authored, mismatch-investigation-seeded with no
         compiled lineage at all) is untouched. Runs at most once per
         hypothesis (idempotent via the delta reason tag) so it never
-        double-counts across rounds."""
-        obs = self._observed_protocol_state_obs(session)
+        double-counts across rounds. Scoped to the specific neighbor named
+        in the query when the query names one (a re-investigation of one
+        particular neighbor) — see _observed_protocol_state_obs's own
+        docstring for why comparing against an unrelated neighbor's
+        coincidentally-more-recent fact is a real, previously-reported
+        bug."""
+        query = session.goal.query if session.goal else ""
+        target_ip = self._query_target_ip(query)
+        obs = self._observed_protocol_state_obs(session, target_ip=target_ip)
         if obs is None:
             return
         observed_norm = self._norm_state(obs.value)
         if not observed_norm:
             return
-        protocol = self._detect_protocol(session.goal.query if session.goal else "")
+        protocol = self._detect_protocol(query)
         from core.knowledge.compiler.protocol_models import build_protocol_model
         model = build_protocol_model(protocol)
         for hyp in session.active_hypotheses():
@@ -1084,7 +1194,14 @@ class TroubleshootingEngine:
             spec = get_spec(protocol)
             if spec is None or spec.state_model is None:
                 return
-            if self._observed_protocol_state_obs(session) is not None:
+            # Scoped to the specific neighbor named in the query, if any —
+            # otherwise this stops probing the moment ANY neighbor's state
+            # is known, even an unrelated one collected incidentally (e.g.
+            # a device's OTHER, healthy adjacency returned by the same
+            # get_neighbors() call) — the same staleness risk documented on
+            # _observed_protocol_state_obs itself.
+            target_ip = self._query_target_ip(session.goal.query)
+            if self._observed_protocol_state_obs(session, target_ip=target_ip) is not None:
                 return
             from core.vendor.operations import Op, Operation
 
@@ -1093,7 +1210,7 @@ class TroubleshootingEngine:
                 sig = self._op_signature(opname, params)
                 targets = [ip for ip in device_ips if not self.cmd_memory.has(ip, sig)]
                 if not targets:
-                    if self._observed_protocol_state_obs(session) is not None:
+                    if self._observed_protocol_state_obs(session, target_ip=target_ip) is not None:
                         break
                     continue
                 session.next_best_command = (
@@ -1111,7 +1228,7 @@ class TroubleshootingEngine:
                     session.executed.append(self.cmd_memory.record(
                         ip, sig, text, "deterministic neighbor/protocol-state anchor", reused=False))
                     self._ingest_output(sig, ip, text, session, hmgr, conf)
-                if self._observed_protocol_state_obs(session) is not None:
+                if self._observed_protocol_state_obs(session, target_ip=target_ip) is not None:
                     self._note_knowledge_source(
                         session, f"deterministic neighbor/protocol-state anchor: {protocol}/{opname}")
                     break
@@ -1163,7 +1280,8 @@ class TroubleshootingEngine:
     # ── conclusion ──────────────────────────────────────────────────────────────
     def _compiled_remediation_intent(self, session: Session, root_cause_statement: str,
                                      allowed_intents: List[str], protocol: str,
-                                     discriminating_signals: Optional[List[str]] = None) -> Optional[dict]:
+                                     discriminating_signals: Optional[List[str]] = None,
+                                     device_ip: str = "") -> Optional[dict]:
         """Checks the NKC's compiled RemediationTemplate mapping
         (core.knowledge.compiler.reasoning_artifact_compiler) for a
         deterministic cause->intent mapping BEFORE asking the LLM to guess
@@ -1198,7 +1316,15 @@ class TroubleshootingEngine:
         re-detecting from that text would silently fall back to "general"
         and never find a match — the same class of bug as the earlier
         query-wording seeding issue, fixed the same way: use the value
-        that's already known to be correct instead of re-guessing it."""
+        that's already known to be correct instead of re-guessing it.
+
+        `device_ip`: when set, every observation/executed-command scan below
+        is scoped to facts recorded against THIS device only — needed
+        because a cross-device root cause (e.g. an MTU mismatch) has two
+        different, genuinely different interface values, one per side; an
+        unscoped scan would give both devices whichever value was recorded
+        last in the whole session, not each device's own. Empty (default)
+        preserves the original unscoped behavior for the single-device case."""
         try:
             from core.knowledge.compiler.reasoning_artifact_compiler import ReasoningArtifactCompiler
             from core.knowledge.compiler.failure_signatures import compile_failure_signatures
@@ -1233,6 +1359,8 @@ class TroubleshootingEngine:
                 # winning over the Gi1/0 that's actually part of the broken
                 # adjacency under investigation).
                 for ec in reversed(session.executed):
+                    if device_ip and ec.device != device_ip:
+                        continue
                     m = re.search(r"get_interface_details\([^)]*\binterface=([^,)]+)", ec.command)
                     if m and m.group(1):
                         iface = m.group(1)
@@ -1245,10 +1373,14 @@ class TroubleshootingEngine:
                 # unrelated interface on a multi-interface device.
                 if not iface:
                     for o in reversed(session.observations):
+                        if device_ip and o.device != device_ip:
+                            continue
                         if o.subject.startswith("neighbor.") and o.attribute == "interface" and o.value:
                             iface = o.value
                             break
                 for o in session.observations:
+                    if device_ip and o.device != device_ip:
+                        continue
                     if o.subject.startswith("interface.") and o.attribute == "mtu" and not iface:
                         iface = o.subject.split(".", 1)[1]
                     # BGP (and any future neighbor-scoped protocol) remediation
@@ -1388,13 +1520,20 @@ class TroubleshootingEngine:
         doesn't actually explain the state that was just observed, there is
         nothing honest to narrate, and the chain is skipped entirely rather
         than explaining a state nobody saw.
+
+        Scoped to the specific neighbor named in the query when the query
+        names one — see _observed_protocol_state_obs's own docstring for
+        why an unrelated neighbor's coincidentally-more-recent fact must
+        never silently stand in for "what was observed" here.
         """
-        protocol = self._detect_protocol(session.goal.query if session.goal else "")
+        query = session.goal.query if session.goal else ""
+        protocol = self._detect_protocol(query)
         from core.knowledge.compiler.protocol_models import build_protocol_model
         model = build_protocol_model(protocol)
         if model is None:
             return
-        obs = self._observed_protocol_state_obs(session)
+        target_ip = self._query_target_ip(query)
+        obs = self._observed_protocol_state_obs(session, target_ip=target_ip)
         if obs is None:
             return
         observed_norm = self._norm_state(obs.value)
@@ -1441,41 +1580,99 @@ class TroubleshootingEngine:
         if top and ranker.converged(session) and self.gateway is not None:
             # Vendor-agnostic remediation: engine emits a NEUTRAL intent; the
             # adapter (via gateway) produces vendor fix + rollback + verification.
+            # Looped per participant device rather than a single call: a real
+            # production report showed an MTU mismatch (inherently two-sided)
+            # fixed with `ip ospf mtu-ignore` pushed to ONLY one of the two
+            # devices involved, because target_ip used to be a single
+            # arbitrary index into session.goal.devices — the asymmetric
+            # one-sided apply made the adjacency regress from EXSTART to
+            # INIT instead of reaching FULL. When the root cause names two
+            # participant devices ("... between A and B ...", the exact
+            # convention strategies/mismatch_bridge.py already produces for
+            # every cross-device Finding), remediate() is now called once
+            # per participant, each with ITS OWN correctly device-scoped
+            # interface (see _compiled_remediation_intent's device_ip param)
+            # — not the same single target as before.
             from core.vendor.operations import RemediationIntent
+            from .strategies.device_pair import extract_between_devices
 
-            target_ip = (session.goal.devices[0] if session.goal.devices else "")
-            device = self._ip_to_dev.get(target_ip) or (self.devices[0] if self.devices else None)
-            allowed = []
-            try:
-                if device is not None:
-                    allowed = self.gateway.supported_intents(device)
-            except Exception:
-                allowed = []
+            default_target = session.goal.devices[0] if session.goal.devices else ""
+            pair = extract_between_devices(top.statement)
+            if pair and all(ip in self._ip_to_dev for ip in pair):
+                participant_ips = list(pair)
+            else:
+                # No named pair, or one of the two isn't in this session's
+                # device scope -- exactly today's single-device behavior.
+                # Deliberately NOT "apply to whichever one IS known": that
+                # would just manufacture a new one-sided fix, the very shape
+                # of bug this loop exists to fix.
+                participant_ips = [default_target]
+
             protocol = self._detect_protocol(session.goal.query)
-            intent_raw = self._compiled_remediation_intent(
-                session, top.statement, allowed, protocol, top.discriminating_signals) or \
-                        self.reasoner.propose_intent(
-                            top.statement, session.goal.objective, self._evidence_summary(session), allowed)
-            intent = RemediationIntent(
-                name=str(intent_raw.get("name", "")).strip(),
-                params=intent_raw.get("params", {}) or {},
-                target_device=target_ip,
-                rationale=intent_raw.get("rationale", ""),
-            )
-            plan = self.gateway.remediate(device, intent) if (device and intent.name) else None
-            if plan and plan.supported and plan.fix_commands:
+            all_fix_cmds: List[str] = []
+            all_rollback_cmds: List[str] = []
+            verif_cmds: List[str] = []
+            per_device_plan: Dict[str, Any] = {}
+            last_intent_name = ""
+            last_explanation = ""
+            for ip in participant_ips:
+                device = self._ip_to_dev.get(ip) or (self.devices[0] if self.devices else None)
+                if device is None:
+                    continue
+                allowed = []
+                try:
+                    allowed = self.gateway.supported_intents(device)
+                except Exception:
+                    allowed = []
+                intent_raw = self._compiled_remediation_intent(
+                    session, top.statement, allowed, protocol, top.discriminating_signals,
+                    device_ip=ip) or \
+                            self.reasoner.propose_intent(
+                                top.statement, session.goal.objective,
+                                self._evidence_summary(session), allowed)
+                intent = RemediationIntent(
+                    name=str(intent_raw.get("name", "")).strip(),
+                    params=intent_raw.get("params", {}) or {},
+                    target_device=ip,
+                    rationale=intent_raw.get("rationale", ""),
+                )
+                plan = self.gateway.remediate(device, intent) if intent.name else None
+                if not (plan and plan.supported and plan.fix_commands):
+                    continue
+                per_device_plan[ip] = plan
+                last_intent_name = intent.name
+                last_explanation = plan.explanation or intent.rationale
+                # Tag each line only when there's more than one participant —
+                # a single-device fix stays byte-identical to today's output.
+                tag = f"(on {ip}) " if len(participant_ips) > 1 else ""
+                all_fix_cmds.extend(tag + c for c in plan.fix_commands)
+                all_rollback_cmds.extend(tag + c for c in plan.rollback_commands)
+                verif_cmds.extend(plan.verification_commands)
+
+            if per_device_plan:
+                validation_md = f"Vendor-validated by adapter for intent `{last_intent_name}`."
+                if len(per_device_plan) > 1:
+                    validation_md += f" Applied across {len(per_device_plan)} devices."
+                skipped = [ip for ip in participant_ips if ip not in per_device_plan]
+                if skipped:
+                    validation_md += f" (no fix produced for: {', '.join(skipped)})"
                 session.fix = Fix(
-                    root_cause=top.statement, config_commands=plan.fix_commands,
-                    rollback_commands=plan.rollback_commands,
-                    explanation=plan.explanation or intent.rationale, syntax_ok=True,
-                    validation_md=f"Vendor-validated by adapter for intent `{intent.name}`.",
+                    root_cause=top.statement, config_commands=all_fix_cmds,
+                    rollback_commands=all_rollback_cmds,
+                    explanation=last_explanation, syntax_ok=True,
+                    validation_md=validation_md,
+                    target_devices=list(per_device_plan.keys()),
                 )
                 compiled_verif = self._compiled_verification(session, protocol)
+                # both participants likely share verification commands
+                # verbatim (e.g. "show ip ospf neighbor") -- de-dup, preserve order.
+                seen: set = set()
+                verif_cmds = [c for c in verif_cmds if not (c in seen or seen.add(c))]
                 session.verification = VerificationPlan(
-                    commands=plan.verification_commands,
+                    commands=verif_cmds,
                     success_criteria=(compiled_verif["success_criteria"] if compiled_verif
                                      else "Adapter-defined verification of the applied intent."),
-                    rollback_on_fail=plan.rollback_commands,
+                    rollback_on_fail=all_rollback_cmds,
                 )
                 session.status = ResolutionStatus.RESOLVED_PENDING_APPROVAL
                 if top.state == HypothesisState.ACTIVE:

@@ -46,6 +46,7 @@ class ResolutionStatus(str, Enum):
     HEALTHY = "healthy"                                       # nothing wrong found
     RESOLVED = "resolved"       # terminal: human confirmed the deployed fix actually worked
     UNRESOLVED = "unresolved"   # terminal: human confirmed the deployed fix did NOT work
+    PARTIALLY_RESOLVED = "partially_resolved"  # terminal: fix helped some targets, not all
 
 
 # ── Confidence primitives ──────────────────────────────────────────────────────
@@ -187,6 +188,15 @@ class Fix:
     explanation: str = ""          # WHY this addresses the root cause
     validation_md: str = ""        # syntax/safety validation result
     syntax_ok: bool = False
+    # Which device IPs this fix actually targets, in remediation order.
+    # Empty for the common single-device case (config_commands/
+    # rollback_commands carry no "(on <ip>)" tags then either). Populated
+    # by engine.py's vendor-gateway Fix Generator when a root cause names
+    # 2+ participant devices (see strategies/device_pair.py) — each
+    # device's own commands are tagged "(on <ip>) ..." in config_commands/
+    # rollback_commands, this field is presentational/scoping metadata,
+    # not the authoritative per-device split.
+    target_devices: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -261,12 +271,37 @@ class Session:
         r = self.ranked()
         return r[0] if r else None
 
-    def close(self, resolved: bool) -> None:
+    def close(self, resolved: bool, partial: bool = False) -> None:
         """Writes back a human's confirmed outcome for a deployed fix —
         the one terminal transition nothing else sets. Safe to call from
         outside the engine (e.g. copilot_engine.py, after a Confirm/Deny
-        click on a live session object)."""
-        self.status = ResolutionStatus.RESOLVED if resolved else ResolutionStatus.UNRESOLVED
+        click on a live session object). `partial` overrides `resolved`
+        entirely: a fix that helped some targets but not all is neither a
+        clean RESOLVED nor an UNRESOLVED — it needs its own terminal state
+        so it isn't miscounted as either in reports or in learning."""
+        if partial:
+            self.status = ResolutionStatus.PARTIALLY_RESOLVED
+        else:
+            self.status = ResolutionStatus.RESOLVED if resolved else ResolutionStatus.UNRESOLVED
+
+
+def _elimination_reason(h: Hypothesis) -> str:
+    """Recovers a human-readable reason a hypothesis was ruled out.
+
+    Elimination happens in two different places in the engine, each
+    leaving its own trace rather than a shared "reason" field: a
+    deterministic state-contradiction records a CONTRADICT delta whose
+    `reason` starts with "deterministic-state-match", while a prior
+    confirmed-not-to-work fix (excluded_causes) appends a bracketed note
+    to `rationale`. Falls back to a generic message if neither trace is
+    present (e.g. eliminated by plain confidence decay).
+    """
+    for d in reversed(h.deltas):
+        if d.reason and d.reason.startswith("deterministic-state-match"):
+            return d.reason.split(": ", 1)[-1]
+    if h.rationale and "[Already applied" in h.rationale:
+        return "already applied and confirmed not to resolve this issue in a prior attempt"
+    return "confidence dropped as contradicting evidence accumulated"
 
 
 @dataclass
@@ -284,6 +319,11 @@ class TroubleshootReport:
                 {"statement": h.statement, "confidence": h.confidence,
                  "evidence_count": len(h.evidence_ids), "rationale": h.rationale}
                 for h in s.ranked()
+            ],
+            "eliminated_hypotheses": [
+                {"statement": h.statement, "last_confidence": h.confidence,
+                 "reason": _elimination_reason(h)}
+                for h in s.hypotheses if h.state == HypothesisState.ELIMINATED
             ],
             "evidence_summary": [
                 {"device": o.device, "fact": f"{o.subject}.{o.attribute}={o.value}"}
@@ -369,6 +409,18 @@ class TroubleshootReport:
                     lines.append(f"  - _why: {h.rationale}_")
         else:
             lines.append("- _none active_")
+
+        # A hypothesis that disappears from Active Hypotheses with no
+        # trace looks arbitrary — as if the platform just changed its mind
+        # for no stated reason. This is the bridge: WHY each ruled-out
+        # cause was eliminated, and what confidence it had reached before
+        # being dropped, so a demotion to a different leading hypothesis
+        # reads as a reasoned transition instead of an unexplained jump.
+        eliminated = [h for h in s.hypotheses if h.state == HypothesisState.ELIMINATED]
+        if eliminated:
+            lines.append("\n### ❌ Ruled Out")
+            for h in eliminated:
+                lines.append(f"- **{h.statement}** _(was {h.confidence:.0%})_ — {_elimination_reason(h)}")
 
         lines.append("\n### 🔍 Evidence Summary")
         if s.observations:

@@ -163,19 +163,21 @@ class _FakeReport:
 
 class _FakeFollowUpEngine:
     """Stands in for core.troubleshooting.TroubleshootingEngine — records the
-    query/devices/excluded_causes it was invoked with and returns a
-    pre-built report."""
+    query/devices/excluded_causes/partial_causes it was invoked with and
+    returns a pre-built report."""
     last_devices = None
     last_query = None
     last_excluded_causes = None
+    last_partial_causes = None
     report_to_return = None
 
     def __init__(self, ai_call, devices, gateway, config, session_store=None):
         _FakeFollowUpEngine.last_devices = devices
 
-    def run(self, query, excluded_causes=None):
+    def run(self, query, excluded_causes=None, partial_causes=None):
         _FakeFollowUpEngine.last_query = query
         _FakeFollowUpEngine.last_excluded_causes = excluded_causes
+        _FakeFollowUpEngine.last_partial_causes = partial_causes
         return _FakeFollowUpEngine.report_to_return
 
 
@@ -196,7 +198,8 @@ def test_continue_investigation_scopes_a_fresh_run_and_surfaces_a_new_fix(monkey
 
     fake_fix = types.SimpleNamespace(
         root_cause="Timer mismatch on GigabitEthernet1/0",
-        config_commands=["ip ospf dead-interval 40"], rollback_commands=["no ip ospf dead-interval 40"])
+        config_commands=["ip ospf dead-interval 40"], rollback_commands=["no ip ospf dead-interval 40"],
+        target_devices=[])
     fake_verification = types.SimpleNamespace(commands=["show ip ospf neighbor"])
     session = _FakeSession(fix=fake_fix, verification=fake_verification, goal_devices=["10.0.0.1"])
     _FakeFollowUpEngine.report_to_return = _FakeReport("### follow-up report", session)
@@ -508,3 +511,125 @@ def test_record_ts_outcome_tolerates_pending_state_with_no_session(tmp_path, mon
     pending = _pending_state(["ip ospf mtu-ignore"])  # no "session" key
     msg = copilot_engine._record_ts_outcome(pending, success=True)
     assert "resolved" in msg.lower()
+
+
+# ── Multi-device fix targeting (real production bug: an MTU mismatch is
+# two-sided, but the fix was only ever pushed to one of the two devices) ──
+def test_split_by_device_tag_groups_tagged_lines_and_returns_untagged_separately():
+    tagged, untagged = copilot_engine._split_by_device_tag([
+        "(on 10.0.0.1) interface Gi0/0",
+        "(on 10.0.0.1) ip ospf mtu-ignore",
+        "(on 10.0.0.2) interface Gi0/1",
+        "no tag here",
+        "",
+    ])
+    assert tagged == {
+        "10.0.0.1": ["interface Gi0/0", "ip ospf mtu-ignore"],
+        "10.0.0.2": ["interface Gi0/1"],
+    }
+    assert untagged == ["no tag here"]
+
+
+def test_split_by_device_tag_all_untagged_returns_empty_dict():
+    tagged, untagged = copilot_engine._split_by_device_tag(["ip ospf mtu-ignore"])
+    assert tagged == {}
+    assert untagged == ["ip ospf mtu-ignore"]
+
+
+def test_apply_ts_fix_two_devices_each_get_only_their_own_commands(monkeypatch):
+    """The exact reported bug: a fix naming two devices must push EACH
+    device only ITS OWN commands, never the other device's, and never the
+    full combined list blasted at both."""
+    fake_ie = FakeIntentEngine()
+    monkeypatch.setattr(copilot_engine, "_build_intent_engine", lambda call_ai_fn, devices: fake_ie)
+    r1, r2 = FakeDevice("192.168.96.136", "R1"), FakeDevice("192.168.20.2", "R2")
+    pending = {
+        "kind": "ts_fix",
+        "root_cause": "interface_mtu must equal violated on ospf_adjacency between "
+                      "192.168.96.136 and 192.168.20.2 (local=1500, remote=1200)",
+        "fix_commands": [
+            "(on 192.168.96.136) interface GigabitEthernet0/0",
+            "(on 192.168.96.136) ip ospf mtu-ignore",
+            "(on 192.168.20.2) interface GigabitEthernet0/1",
+            "(on 192.168.20.2) ip ospf mtu-ignore",
+        ],
+        "rollback_commands": [
+            "(on 192.168.96.136) no ip ospf mtu-ignore",
+            "(on 192.168.20.2) no ip ospf mtu-ignore",
+        ],
+        "verification_commands": ["show ip ospf neighbor"],
+        "target_ip": r1.ip, "devices": [r1, r2],
+    }
+    result = copilot_engine._apply_ts_fix(None, pending)
+
+    assert result["applied_any"] is True
+    applied = dict(fake_ie.applied)
+    assert applied[r1.ip] == ["interface GigabitEthernet0/0", "ip ospf mtu-ignore"]
+    assert applied[r2.ip] == ["interface GigabitEthernet0/1", "ip ospf mtu-ignore"]
+    assert any("Applied on R1" in l for l in result["summary_lines"])
+    assert any("Applied on R2" in l for l in result["summary_lines"])
+    # both devices' verification was actually re-collected, not just one
+    collected_ips = {ip for ip, _ in fake_ie.collect_calls}
+    assert collected_ips == {r1.ip, r2.ip}
+
+
+def test_apply_ts_fix_per_device_governance_blocks_one_device_not_the_other(monkeypatch):
+    """A policy violation on ONE device's commands must not block the
+    other's — each device is governed independently."""
+    fake_ie = FakeIntentEngine()
+    monkeypatch.setattr(copilot_engine, "_build_intent_engine", lambda call_ai_fn, devices: fake_ie)
+    r1, r2 = FakeDevice("192.168.96.136", "R1"), FakeDevice("192.168.20.2", "R2")
+    pending = {
+        "kind": "ts_fix",
+        "root_cause": "interface_mtu must equal violated on ospf_adjacency between "
+                      "192.168.96.136 and 192.168.20.2 (local=1500, remote=1200)",
+        "fix_commands": [
+            "(on 192.168.96.136) no ip address",   # matches CONFIG_DENY_PATTERNS -> blocked
+            "(on 192.168.20.2) ip ospf mtu-ignore",
+        ],
+        "rollback_commands": [],
+        "verification_commands": [],
+        "target_ip": r1.ip, "devices": [r1, r2],
+    }
+    result = copilot_engine._apply_ts_fix(None, pending)
+
+    applied = dict(fake_ie.applied)
+    assert r1.ip not in applied, "the blocked device must never reach _ssh_apply"
+    assert applied[r2.ip] == ["ip ospf mtu-ignore"]
+    assert any("Blocked on R1" in l for l in result["summary_lines"])
+    assert any("Applied on R2" in l for l in result["summary_lines"])
+
+
+def test_apply_ts_fix_skips_a_tagged_device_not_selected_this_session(monkeypatch):
+    fake_ie = FakeIntentEngine()
+    monkeypatch.setattr(copilot_engine, "_build_intent_engine", lambda call_ai_fn, devices: fake_ie)
+    r1 = FakeDevice("192.168.96.136", "R1")   # only R1 selected -- not R2
+    pending = {
+        "kind": "ts_fix",
+        "root_cause": "interface_mtu must equal violated on ospf_adjacency between "
+                      "192.168.96.136 and 192.168.20.2 (local=1500, remote=1200)",
+        "fix_commands": [
+            "(on 192.168.96.136) ip ospf mtu-ignore",
+            "(on 192.168.20.2) ip ospf mtu-ignore",
+        ],
+        "rollback_commands": [],
+        "verification_commands": [],
+        "target_ip": r1.ip, "devices": [r1],
+    }
+    result = copilot_engine._apply_ts_fix(None, pending)
+
+    applied = dict(fake_ie.applied)
+    assert applied == {r1.ip: ["ip ospf mtu-ignore"]}
+    assert any("skipped" in l.lower() and "192.168.20.2" in l for l in result["summary_lines"])
+
+
+def test_apply_ts_fix_single_device_untagged_behavior_is_unchanged(monkeypatch):
+    """No tags anywhere (the overwhelming majority case) must produce
+    exactly today's single-device behavior -- this is the regression check
+    for the common case."""
+    fake_ie = FakeIntentEngine()
+    monkeypatch.setattr(copilot_engine, "_build_intent_engine", lambda call_ai_fn, devices: fake_ie)
+    pending = _pending_state(["ip ospf mtu-ignore"], verification=["show ip ospf neighbor"])
+    result = copilot_engine._apply_ts_fix(None, pending)
+    assert fake_ie.applied == [("10.0.0.1", ["ip ospf mtu-ignore"])]
+    assert result["applied_any"] is True

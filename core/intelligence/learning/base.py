@@ -73,6 +73,7 @@ class LearningEvent:
     """The single normalised thing every workflow feeds back into learning."""
     kind: str                      # deployment | incident | action | operator | verification
     success: Optional[bool] = None
+    outcome: Optional[str] = None   # "partial", when success alone (True/False/None) is too coarse
     intent: str = ""
     device: str = ""
     protocol: str = ""

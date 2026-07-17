@@ -19,7 +19,9 @@ import os
 import re
 import streamlit as st
 from uuid import uuid4
-from typing import List, Any, Dict, Optional
+from typing import List, Any, Dict, Optional, Tuple
+
+from core.troubleshooting.strategies.device_pair import extract_between_devices
 
 logger = logging.getLogger(__name__)
 
@@ -552,6 +554,67 @@ def _infer_protocol(text: str) -> str:
     return ""
 
 
+def _pre_fix_targets(session, protocol: str, target_ips: List[str]) -> Dict[str, List[Dict[str, str]]]:
+    """Pre-fix baseline for _classify_verification_outcome, same shape as
+    verification_targets ({device_ip: [{"ip","state","interface"}]}) but
+    built from the diagnosis-time neighbor-state facts already sitting in
+    `session.observations` — no extra SSH round-trip. Scoped to only the
+    devices this fix actually targets (target_ips) and, per neighbor, only
+    the MOST RECENT state/interface observation (reversed scan, first hit
+    wins) — reusing the same "most recent wins" convention engine.py's own
+    target-scoped observation lookups already rely on, so this can't mix in
+    a stale or unrelated state from earlier in the same investigation."""
+    if protocol != "ospf" or session is None or not target_ips:
+        return {}
+    targets = set(target_ips)
+    latest_state: Dict[tuple, str] = {}
+    latest_iface: Dict[tuple, str] = {}
+    for o in reversed(session.observations):
+        if not o.subject.startswith("neighbor.") or o.device not in targets or not o.value:
+            continue
+        key = (o.device, o.subject)
+        if o.attribute == "state" and key not in latest_state:
+            latest_state[key] = o.value
+        elif o.attribute == "interface" and key not in latest_iface:
+            latest_iface[key] = o.value
+    out: Dict[str, List[Dict[str, str]]] = {}
+    for (device, subject), state in latest_state.items():
+        norm = state.upper().replace("-", "")
+        if norm == "FULL":
+            continue
+        out.setdefault(device, []).append({
+            "ip": subject.split(".", 1)[-1], "state": norm,
+            "interface": latest_iface.get((device, subject), ""),
+        })
+    return out
+
+
+_ON_DEVICE_RE = re.compile(r"^\(on ([^)]+)\)\s*")
+
+
+def _split_by_device_tag(lines: List[str]) -> Tuple[Dict[str, List[str]], List[str]]:
+    """Splits a fix/rollback command list into {device_ip: [commands]} for
+    every line tagged "(on <ip>) ..." (engine.py's _finish() emits this tag
+    per-line when a root cause names two participant devices — see
+    strategies/device_pair.py), plus a separate list of untagged lines.
+    Order-preserving per device. A single flat list with no tags at all
+    (the common, single-device case) returns an empty dict and everything
+    in the untagged list, so callers can fall back to today's behavior
+    exactly."""
+    tagged: Dict[str, List[str]] = {}
+    untagged: List[str] = []
+    for c in lines:
+        if not c or not c.strip():
+            continue
+        c = c.strip()
+        m = _ON_DEVICE_RE.match(c)
+        if m:
+            tagged.setdefault(m.group(1), []).append(_ON_DEVICE_RE.sub("", c, count=1).strip())
+        else:
+            untagged.append(c)
+    return tagged, untagged
+
+
 def _apply_ts_fix(call_ai_fn, pending_state) -> Dict[str, Any]:
     """Apply an approved troubleshooting fix to the target device(s). Human-gated,
     and — GOVERNANCE-gated: core.governance.engine.GovernanceEngine (already
@@ -582,28 +645,57 @@ def _apply_ts_fix(call_ai_fn, pending_state) -> Dict[str, Any]:
     target_ip = pending_state.get("target_ip", "")
     root_cause = pending_state.get("root_cause", "")
     ie = _build_intent_engine(call_ai_fn, devices)
-    # fix/rollback commands are plain config lines; strip any "(on X)" prefix defensively
-    import re as _re
-    cfg = [_re.sub(r"^\(on [^)]+\)\s*", "", c).strip()
-           for c in pending_state.get("fix_commands", []) if c and c.strip()]
-    rollback = [_re.sub(r"^\(on [^)]+\)\s*", "", c).strip()
-               for c in pending_state.get("rollback_commands", []) if c and c.strip()]
-    verification_cmds = [c.strip() for c in pending_state.get("verification_commands", []) if c and c.strip()]
-    targets = [d for d in devices if getattr(d, "ip", None) == target_ip] or devices
 
-    if not cfg:
+    fix_tagged, fix_untagged = _split_by_device_tag(pending_state.get("fix_commands", []))
+    rb_tagged, rb_untagged = _split_by_device_tag(pending_state.get("rollback_commands", []))
+    verification_cmds = [c.strip() for c in pending_state.get("verification_commands", []) if c and c.strip()]
+    known_ips = {getattr(d, "ip", None) for d in devices}
+    unknown_ips: set = set()
+
+    if not fix_tagged:
+        # No per-device tags anywhere -- exactly today's single-device
+        # behavior: one target (or every selected device as a fallback),
+        # same flat command list applied to whichever device(s) that is.
+        targets = [d for d in devices if getattr(d, "ip", None) == target_ip] or devices
+        cmds_by_device = {getattr(d, "ip", None): fix_untagged for d in targets}
+        rollback_by_device = {getattr(d, "ip", None): rb_untagged for d in targets}
+    else:
+        # A root cause naming 2+ participant devices (engine.py's _finish()
+        # tags each device's own commands "(on <ip>) ...") -- route each
+        # device ONLY its own commands, never the full combined list, and
+        # never silently apply to a device this session didn't select.
+        if fix_untagged:
+            fix_tagged.setdefault(target_ip, []).extend(fix_untagged)
+        if rb_untagged:
+            rb_tagged.setdefault(target_ip, []).extend(rb_untagged)
+        unknown_ips = set(fix_tagged) - known_ips
+        targets = [d for d in devices if getattr(d, "ip", None) in fix_tagged]
+        cmds_by_device = {ip: cmds for ip, cmds in fix_tagged.items() if ip in known_ips}
+        rollback_by_device = {ip: cmds for ip, cmds in rb_tagged.items() if ip in known_ips}
+
+    if not any(cmds_by_device.values()):
         return {"summary_lines": ["ℹ️ No config commands resolved from the fix."],
                "verification_output": {}, "applied_any": False}
 
     gov = get_governance_engine()
     protocol = _infer_protocol(root_cause)
+    pre_fix_targets = _pre_fix_targets(pending_state.get("session"), protocol,
+                                       [getattr(d, "ip", None) for d in targets])
     summary: List[str] = []
+    if unknown_ips:
+        summary.append(
+            f"⚠️ Fix names device(s) not selected in this session, skipped: "
+            f"{', '.join(sorted(unknown_ips))}")
     verification_output: Dict[str, str] = {}
     verification_warnings: Dict[str, str] = {}
     verification_targets: Dict[str, List[Dict[str, str]]] = {}
     applied_any = False
     for dev in targets:
         label = getattr(dev, "hostname", None) or dev.ip
+        cfg = cmds_by_device.get(dev.ip) or []
+        rollback = rollback_by_device.get(dev.ip) or []
+        if not cfg:
+            continue
         contract = gov.govern(device=dev.ip, commands=cfg, intent=root_cause,
                               protocol=protocol,
                               rollback_commands=rollback, strict=False)
@@ -635,11 +727,8 @@ def _apply_ts_fix(call_ai_fn, pending_state) -> Dict[str, Any]:
         summary = ["ℹ️ No config commands resolved to apply."]
     return {"summary_lines": summary, "verification_output": verification_output,
            "verification_warnings": verification_warnings,
-           "verification_targets": verification_targets, "applied_any": applied_any}
-
-
-_BETWEEN_DEVICES_RE = re.compile(
-    r"between\s+(\d{1,3}(?:\.\d{1,3}){3})\s+and\s+(\d{1,3}(?:\.\d{1,3}){3})")
+           "verification_targets": verification_targets,
+           "pre_fix_targets": pre_fix_targets, "applied_any": applied_any}
 
 
 def _target_neighbor_still_broken(pending_state) -> bool:
@@ -657,38 +746,94 @@ def _target_neighbor_still_broken(pending_state) -> bool:
     if not verification_targets:
         return False
     still_broken_ips = {t.get("ip") for targets in verification_targets.values() for t in targets}
-    m = _BETWEEN_DEVICES_RE.search(pending_state.get("root_cause", ""))
-    if not m:
+    pair = extract_between_devices(pending_state.get("root_cause", ""))
+    if not pair:
         return bool(still_broken_ips)
-    return bool(still_broken_ips & set(m.groups()))
+    return bool(still_broken_ips & set(pair))
+
+
+def _classify_verification_outcome(pending_state, default_when_no_evidence: str = "resolved") -> str:
+    """Objective three-way classification of a fix's outcome: "resolved"
+    (nothing left broken), "partial" (some, but not all, of the
+    previously-broken neighbors are now FULL — a fix that genuinely helped
+    without fully succeeding), or "failed" (no improvement at all). This is
+    the Evaluate step the engine was missing: today a fix that resolves 1
+    of 2 broken neighbors is indistinguishable from one that did nothing,
+    both collapsing into _target_neighbor_still_broken()'s single bool.
+
+    Compares the fresh verification_targets (computed moments earlier by
+    _apply_ts_fix from LIVE re-collected output) against pre_fix_targets
+    (the diagnosis-time baseline captured just before that fix was pushed —
+    see _pre_fix_targets). Scoped to the specific neighbor pair root_cause
+    names ("between A and B"), same convention _target_neighbor_still_broken
+    already uses, so an unrelated broken neighbor elsewhere never pollutes
+    this comparison. Falls back to _target_neighbor_still_broken()'s coarser
+    binary result (resolved/failed only, never partial) when no usable
+    pre-fix baseline was captured — an incomplete baseline degrades safely
+    to today's existing behavior instead of guessing at "partial".
+
+    `default_when_no_evidence`: when there is NO current evidence of
+    anything still broken for this scope, that's ambiguous on its own —
+    it could mean the fix genuinely worked, or it could mean no
+    verification ever ran at all. Absent evidence must never invent a
+    "resolved" out of thin air when a human explicitly reported the issue
+    is still broken — callers with an operator claim to fall back on
+    (_record_ts_outcome) should pass "failed" here when that claim was
+    negative; callers with no such claim (_continue_investigation_if_needed,
+    which only ever reaches this function when SOME evidence already
+    exists) can rely on the "resolved" default."""
+    verification_targets = pending_state.get("verification_targets") or {}
+    post_ips = {t.get("ip") for targets in verification_targets.values() for t in targets}
+    pair = extract_between_devices(pending_state.get("root_cause", ""))
+    named_ips = set(pair) if pair else None
+
+    def _scope(ips):
+        return (ips & named_ips) if named_ips else ips
+
+    scoped_post = _scope(post_ips)
+    if not scoped_post:
+        return default_when_no_evidence
+
+    pre_fix_targets = pending_state.get("pre_fix_targets") or {}
+    pre_ips = {t.get("ip") for targets in pre_fix_targets.values() for t in targets}
+    scoped_pre = _scope(pre_ips)
+    if not scoped_pre:
+        return "failed" if _target_neighbor_still_broken(pending_state) else "resolved"
+    if scoped_post < scoped_pre:
+        return "partial"
+    return "failed"
 
 
 def _record_ts_outcome(pending_state, success: bool) -> str:
     """Human-confirmed learning feedback: the ONE call site in the live runtime
     that invokes core.knowledge.compiler.supply_chain.NetworkIntelligenceSupplyChain's
-    record_resolution/record_failed_resolution + learn_from_incident — all
-    already built and tested (tests/test_supply_chain.py), never previously
-    invoked outside their own tests. A human confirming/denying resolution
-    (never an automatic keyword guess against free-text success_criteria) is
-    what triggers this, so the learning system is only ever trained on ground
-    truth, not a fragile inference.
+    record_resolution/record_failed_resolution/record_partial_resolution +
+    learn_from_incident — all already built and tested
+    (tests/test_supply_chain.py), never previously invoked outside their own
+    tests. A human confirming/denying resolution (never an automatic keyword
+    guess against free-text success_criteria) is what triggers this, so the
+    learning system is only ever trained on ground truth, not a fragile
+    inference.
 
-    That said, a "Confirms Fixed" click is not the ONLY ground truth
-    available in this same turn — the fresh, live-re-collected post-apply
-    verification (verification_targets, gathered moments earlier by
-    _apply_ts_fix) is stronger evidence than a click, and the two can
+    That said, a "Confirms Fixed"/"Still Broken" click is not the ONLY
+    ground truth available in this same turn — the fresh, live-re-collected
+    post-apply verification (verification_targets, gathered moments earlier
+    by _apply_ts_fix) is stronger evidence than a click, and the two can
     disagree: a real report showed the platform saying "verification shows
     192.168.20.2 still EXSTART — this fix may have only resolved PART of
     the issue" and then, immediately after a Confirms Fixed click,
-    "Recorded as resolved" — followed by "Continuing — investigating the
-    remaining issue [on that SAME neighbor]." Recording a plain resolution
-    there trains the learning system on a false positive for the exact
-    thing the platform's own evidence, gathered seconds earlier, said was
-    still broken. When _target_neighbor_still_broken() finds that
-    contradiction, the recorded outcome (and the returned message) reflect
-    the evidence, not the click — the click still ends this session's
-    review (so a stuck "still open" state doesn't linger forever), but it
-    cannot silently overwrite what verification just showed."""
+    "Recorded as resolved". Recording a plain resolution there trains the
+    learning system on a false positive for the exact thing the platform's
+    own evidence, gathered seconds earlier, said was still broken.
+
+    _classify_verification_outcome() is the objective ground truth here —
+    it always wins over the click, exactly like the "contradicted" downgrade
+    this replaces, just generalized from two outcomes to three: "resolved"
+    (recorded as fixed), "partial" (a fix that genuinely helped some but not
+    all targets — recorded distinctly, neither a false-positive success nor
+    a wasted, fully-excluded hypothesis), or "failed" (recorded as
+    unresolved). The click still ends this session's review either way, but
+    it cannot silently overwrite what fresh verification just showed."""
     from core.knowledge.compiler.supply_chain import NetworkIntelligenceSupplyChain
 
     root_cause = pending_state.get("root_cause", "")
@@ -698,13 +843,23 @@ def _record_ts_outcome(pending_state, success: bool) -> str:
     device_ip = target_ip or (getattr(devices[0], "ip", "") if devices else "")
     cfg = pending_state.get("fix_commands", [])
 
-    contradicted = success and _target_neighbor_still_broken(pending_state)
-    effective_success = success and not contradicted
+    outcome = _classify_verification_outcome(
+        pending_state, default_when_no_evidence=("resolved" if success else "failed"))
+    contradicted = success and outcome != "resolved"
 
     sc = NetworkIntelligenceSupplyChain()
     try:
-        if effective_success:
+        if outcome == "resolved":
             sc.record_resolution(root_cause, device_ip, commands=cfg, protocol=protocol)
+            sc.learn_from_incident(success=True, intent=root_cause, device=device_ip,
+                                   protocol=protocol, commands=cfg)
+        elif outcome == "partial":
+            detail = ("Post-apply verification showed some, but not all, targeted neighbors "
+                     "reached FULL.")
+            sc.record_partial_resolution(root_cause, device_ip, detail=detail, commands=cfg,
+                                         protocol=protocol)
+            sc.learn_from_incident(success=None, outcome="partial", intent=root_cause,
+                                   device=device_ip, protocol=protocol, commands=cfg)
         else:
             reason = ("Post-apply verification (collected moments earlier) still showed the "
                      "target neighbor not FULL, contradicting the operator's 'Confirms Fixed' "
@@ -713,8 +868,8 @@ def _record_ts_outcome(pending_state, success: bool) -> str:
                      if contradicted else
                      "Operator reported the issue was not resolved.")
             sc.record_failed_resolution(root_cause, device_ip, reason=reason, commands=cfg, protocol=protocol)
-        sc.learn_from_incident(success=effective_success, intent=root_cause, device=device_ip,
-                               protocol=protocol, commands=cfg)
+            sc.learn_from_incident(success=False, intent=root_cause, device=device_ip,
+                                   protocol=protocol, commands=cfg)
     except Exception as exc:
         return f"⚠️ Outcome recorded locally, but learning update failed: {exc}"
 
@@ -725,15 +880,19 @@ def _record_ts_outcome(pending_state, success: bool) -> str:
     # confirmed whether the deployed fix worked.
     session = pending_state.get("session")
     if session is not None:
-        session.close(resolved=effective_success)
+        session.close(resolved=(outcome == "resolved"), partial=(outcome == "partial"))
 
+    if outcome == "partial":
+        return ("⚠️ Partially resolved — some, but not all, targeted neighbors reached FULL. "
+               "Recorded as **partial**, not resolved — this cause stays under consideration "
+               "with reduced confidence rather than being fully ruled out or falsely confirmed.")
     if contradicted:
         return ("⚠️ You confirmed this as fixed, but the verification collected right after "
                "applying it still showed the target neighbor NOT yet FULL — recorded as "
                "**unresolved**, not resolved, so this doesn't mislead future troubleshooting. "
                "If that verification was stale, re-run the investigation to confirm.")
     return ("✅ Recorded as resolved — this outcome now informs future troubleshooting."
-           if effective_success else
+           if outcome == "resolved" else
            "📝 Recorded as unresolved — flagged for review; a recurring pattern here "
            "will be surfaced automatically.")
 
@@ -752,16 +911,21 @@ def _continue_investigation_if_needed(call_ai_fn, pending_state) -> Dict[str, An
     exactly like every other fix in this UI — only the "notice and
     investigate" step is automatic, never "apply".
 
-    Carries `excluded_causes` forward from pending_state and appends the
-    root cause that was just tried — a real production report showed the
-    fix that JUST failed verification (e.g. an MTU-mismatch fix, still
-    stuck afterward) getting re-proposed identically on every subsequent
-    "still not FULL" cycle, since each cycle built a completely fresh
-    TroubleshootingEngine.run() with no memory that this exact cause had
-    already been deployed and confirmed not to work for this exact target.
-    Passing it through TroubleshootingEngine.run()'s own excluded_causes
-    parameter eliminates that hypothesis outright on re-seed instead of
-    letting it win again on its unchanged compiled prior.
+    Carries `excluded_causes` AND `partial_causes` forward from pending_state.
+    A real production report showed the fix that JUST failed verification
+    (e.g. an MTU-mismatch fix, still stuck afterward) getting re-proposed
+    identically on every subsequent "still not FULL" cycle, since each cycle
+    built a completely fresh TroubleshootingEngine.run() with no memory that
+    this exact cause had already been deployed and confirmed not to work for
+    this exact target. Which list the just-tried root cause goes into
+    depends on _classify_verification_outcome(): a "failed" outcome (no
+    improvement at all) appends to `excluded_causes`, eliminating that
+    hypothesis outright on re-seed exactly as before; a "partial" outcome
+    (it helped SOME targets) appends to `partial_causes` instead, which only
+    penalizes the hypothesis's confidence — it survives to compete again
+    rather than being thrown away for having been partly right. (This
+    function is only reached when verification_targets is non-empty, so
+    the outcome here is always "partial" or "failed", never "resolved".)
 
     Returns {"messages": [chat message dicts to append],
     "next_pending_state": {} or a fresh "ts_fix" pending_state}."""
@@ -775,7 +939,12 @@ def _continue_investigation_if_needed(call_ai_fn, pending_state) -> Dict[str, An
             f"{target['interface']} stuck in {target['state']}")
     prior_root_cause = pending_state.get("root_cause", "")
     excluded_causes = list(pending_state.get("excluded_causes", []))
-    if prior_root_cause and prior_root_cause not in excluded_causes:
+    partial_causes = dict(pending_state.get("partial_causes", {}))
+    outcome = _classify_verification_outcome(pending_state)
+    if prior_root_cause and outcome == "partial":
+        partial_causes[prior_root_cause] = (
+            "a prior fix based on this cause resolved some but not all targeted neighbors")
+    elif prior_root_cause and prior_root_cause not in excluded_causes:
         excluded_causes.append(prior_root_cause)
     try:
         from core.troubleshooting import TroubleshootingEngine, TSConfig
@@ -783,7 +952,7 @@ def _continue_investigation_if_needed(call_ai_fn, pending_state) -> Dict[str, An
         tse = TroubleshootingEngine(ai_call=call_ai_fn, devices=devices, gateway=gw,
                                     config=TSConfig(max_steps=6),
                                     session_store=_get_ts_session_backend())
-        report = tse.run(query, excluded_causes=excluded_causes)
+        report = tse.run(query, excluded_causes=excluded_causes, partial_causes=partial_causes)
     except Exception as exc:
         return {"messages": [{
             "role": "assistant",
@@ -807,9 +976,11 @@ def _continue_investigation_if_needed(call_ai_fn, pending_state) -> Dict[str, An
             "rollback_commands": list(s.fix.rollback_commands),
             "verification_commands": list(s.verification.commands) if s.verification else [],
             "target_ip": target_ip,
+            "target_devices": list(s.fix.target_devices),
             "devices": devices,
             "session": s,
             "excluded_causes": excluded_causes,
+            "partial_causes": partial_causes,
         }
     return {"messages": messages, "next_pending_state": next_state}
 
@@ -1193,6 +1364,7 @@ def render_copilot_page(call_ai_fn):
                                     "rollback_commands": list(s.fix.rollback_commands),
                                     "verification_commands": list(s.verification.commands) if s.verification else [],
                                     "target_ip": target_ip,
+                                    "target_devices": list(s.fix.target_devices),
                                     "devices": target_devices,
                                     "session": s,
                                 }
@@ -1424,6 +1596,7 @@ def render_copilot_page(call_ai_fn):
                                 **pending_state, "kind": "ts_verify",
                                 "verification_warnings": result.get("verification_warnings", {}),
                                 "verification_targets": result.get("verification_targets", {}),
+                                "pre_fix_targets": result.get("pre_fix_targets", {}),
                             }
                         else:
                             action_states[active_conversation["id"]] = {}

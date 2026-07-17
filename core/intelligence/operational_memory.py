@@ -296,17 +296,30 @@ class OperationalMemory:
         self, contract: Any, *, site: str = "", protocol: str = "",
         interface: str = "", operator: str = "",
         commands: Optional[List[str]] = None,
+        outcome: Optional[str] = None,
     ) -> List[str]:
         """
         The hook every workflow calls AFTER verification. Turns a
         ContractResult into durable memory: a deployment-outcome event, plus a
         remediation event if it succeeded, plus a recurring-failure event if it
         didn't (and the same signature has failed before).
+
+        `outcome`: explicit override ("success" | "failure" | "partial"),
+        for a caller that already has a finer-grained classification than
+        the contract's own bool `satisfied` (e.g. a fix that resolved SOME
+        but not all of its targets — see copilot_engine.py's
+        _classify_verification_outcome). Defaults to the bool-derived value
+        when omitted, so every existing caller is unaffected. "partial" is
+        deliberately excluded from both the "known-good" remediation branch
+        AND the recurring-failure branch below — it's neither reusable
+        proven experience nor a confirmed failure, and should not inflate
+        either count.
         """
         ids: List[str] = []
         intent = getattr(contract, "intent", "") or ""
         device = getattr(contract, "device", "") or ""
         satisfied = bool(getattr(contract, "satisfied", False))
+        outcome_str = outcome or ("success" if satisfied else "failure")
         conditions = getattr(contract, "conditions", []) or []
         cond_text = "\n".join(
             f"- {getattr(c,'description','')}: {getattr(getattr(c,'verdict',None),'value',c.__dict__.get('verdict',''))} "
@@ -316,29 +329,30 @@ class OperationalMemory:
             getattr(c, "description", "") for c in conditions
             if getattr(getattr(c, "verdict", None), "value", "") == "fail"
         ])
+        icon = {"success": "✅", "partial": "⚠️"}.get(outcome_str, "⚠️")
 
         # 1) deployment outcome (always)
         ids.append(self.record(MemoryEvent(
             event_type=EventType.DEPLOYMENT.value,
-            summary=f"{'✅' if satisfied else '⚠️'} {intent} on {device}",
+            summary=f"{icon} {intent} on {device}",
             detail=(("Commands:\n" + "\n".join(commands) + "\n\n") if commands else "")
                    + "Post-conditions:\n" + cond_text,
             device=device, interface=interface, site=site, protocol=protocol,
-            outcome="success" if satisfied else "failure",
+            outcome=outcome_str,
             signature=signature, intent=intent, operator=operator,
         )))
 
         # 2) verification result (the proof itself)
         ids.append(self.record(MemoryEvent(
             event_type=EventType.VERIFICATION.value,
-            summary=f"Verification {'passed' if satisfied else 'failed'}: {intent} on {device}",
+            summary=f"Verification {outcome_str}: {intent} on {device}",
             detail=cond_text, device=device, interface=interface, site=site,
-            protocol=protocol, outcome="success" if satisfied else "failure",
+            protocol=protocol, outcome=outcome_str,
             signature=signature, intent=intent, operator=operator,
             related_ids=[ids[0]],
         )))
 
-        if satisfied:
+        if outcome_str == "success":
             # 3) successful remediation — reusable experience
             ids.append(self.record(MemoryEvent(
                 event_type=EventType.REMEDIATION.value,
@@ -346,6 +360,18 @@ class OperationalMemory:
                 detail=(("Commands:\n" + "\n".join(commands)) if commands else intent),
                 device=device, interface=interface, site=site, protocol=protocol,
                 outcome="success", signature=signature, intent=intent,
+                operator=operator, related_ids=[ids[0]],
+            )))
+        elif outcome_str == "partial":
+            # 3) partial remediation — helped, but not reusable as a
+            # known-good fix and not a confirmed failure either.
+            ids.append(self.record(MemoryEvent(
+                event_type=EventType.REMEDIATION.value,
+                summary=f"Partially resolved: {intent} on {device}",
+                detail=(("Commands:\n" + "\n".join(commands) + "\n\n") if commands else "")
+                       + cond_text,
+                device=device, interface=interface, site=site, protocol=protocol,
+                outcome="partial", signature=signature, intent=intent,
                 operator=operator, related_ids=[ids[0]],
             )))
         else:
