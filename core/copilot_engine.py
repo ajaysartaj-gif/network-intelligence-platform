@@ -638,6 +638,31 @@ def _apply_ts_fix(call_ai_fn, pending_state) -> Dict[str, Any]:
            "verification_targets": verification_targets, "applied_any": applied_any}
 
 
+_BETWEEN_DEVICES_RE = re.compile(
+    r"between\s+(\d{1,3}(?:\.\d{1,3}){3})\s+and\s+(\d{1,3}(?:\.\d{1,3}){3})")
+
+
+def _target_neighbor_still_broken(pending_state) -> bool:
+    """True if the fresh, post-apply verification (verification_targets,
+    computed moments earlier in _apply_ts_fix from LIVE re-collected output
+    — not stale data) still shows the SPECIFIC neighbor this fix's own
+    root_cause names as not-yet-FULL. Tries to extract that neighbor's IP
+    from the root_cause text (OSPF's compiled/merged statements say
+    "between A and B"); when no specific IP can be extracted (e.g. a
+    root_cause with no embedded address at all), falls back to treating
+    ANY still-not-full neighbor as ambiguous evidence against a plain
+    "resolved" — erring toward not recording a false positive rather than
+    silently trusting a claim the evidence doesn't support."""
+    verification_targets = pending_state.get("verification_targets") or {}
+    if not verification_targets:
+        return False
+    still_broken_ips = {t.get("ip") for targets in verification_targets.values() for t in targets}
+    m = _BETWEEN_DEVICES_RE.search(pending_state.get("root_cause", ""))
+    if not m:
+        return bool(still_broken_ips)
+    return bool(still_broken_ips & set(m.groups()))
+
+
 def _record_ts_outcome(pending_state, success: bool) -> str:
     """Human-confirmed learning feedback: the ONE call site in the live runtime
     that invokes core.knowledge.compiler.supply_chain.NetworkIntelligenceSupplyChain's
@@ -646,7 +671,24 @@ def _record_ts_outcome(pending_state, success: bool) -> str:
     invoked outside their own tests. A human confirming/denying resolution
     (never an automatic keyword guess against free-text success_criteria) is
     what triggers this, so the learning system is only ever trained on ground
-    truth, not a fragile inference."""
+    truth, not a fragile inference.
+
+    That said, a "Confirms Fixed" click is not the ONLY ground truth
+    available in this same turn — the fresh, live-re-collected post-apply
+    verification (verification_targets, gathered moments earlier by
+    _apply_ts_fix) is stronger evidence than a click, and the two can
+    disagree: a real report showed the platform saying "verification shows
+    192.168.20.2 still EXSTART — this fix may have only resolved PART of
+    the issue" and then, immediately after a Confirms Fixed click,
+    "Recorded as resolved" — followed by "Continuing — investigating the
+    remaining issue [on that SAME neighbor]." Recording a plain resolution
+    there trains the learning system on a false positive for the exact
+    thing the platform's own evidence, gathered seconds earlier, said was
+    still broken. When _target_neighbor_still_broken() finds that
+    contradiction, the recorded outcome (and the returned message) reflect
+    the evidence, not the click — the click still ends this session's
+    review (so a stuck "still open" state doesn't linger forever), but it
+    cannot silently overwrite what verification just showed."""
     from core.knowledge.compiler.supply_chain import NetworkIntelligenceSupplyChain
 
     root_cause = pending_state.get("root_cause", "")
@@ -656,15 +698,22 @@ def _record_ts_outcome(pending_state, success: bool) -> str:
     device_ip = target_ip or (getattr(devices[0], "ip", "") if devices else "")
     cfg = pending_state.get("fix_commands", [])
 
+    contradicted = success and _target_neighbor_still_broken(pending_state)
+    effective_success = success and not contradicted
+
     sc = NetworkIntelligenceSupplyChain()
     try:
-        if success:
+        if effective_success:
             sc.record_resolution(root_cause, device_ip, commands=cfg, protocol=protocol)
         else:
-            sc.record_failed_resolution(
-                root_cause, device_ip, reason="Operator reported the issue was not resolved.",
-                commands=cfg, protocol=protocol)
-        sc.learn_from_incident(success=success, intent=root_cause, device=device_ip,
+            reason = ("Post-apply verification (collected moments earlier) still showed the "
+                     "target neighbor not FULL, contradicting the operator's 'Confirms Fixed' "
+                     "click — recorded as unresolved so this doesn't train the learning system "
+                     "on a false positive."
+                     if contradicted else
+                     "Operator reported the issue was not resolved.")
+            sc.record_failed_resolution(root_cause, device_ip, reason=reason, commands=cfg, protocol=protocol)
+        sc.learn_from_incident(success=effective_success, intent=root_cause, device=device_ip,
                                protocol=protocol, commands=cfg)
     except Exception as exc:
         return f"⚠️ Outcome recorded locally, but learning update failed: {exc}"
@@ -676,9 +725,15 @@ def _record_ts_outcome(pending_state, success: bool) -> str:
     # confirmed whether the deployed fix worked.
     session = pending_state.get("session")
     if session is not None:
-        session.close(resolved=success)
+        session.close(resolved=effective_success)
+
+    if contradicted:
+        return ("⚠️ You confirmed this as fixed, but the verification collected right after "
+               "applying it still showed the target neighbor NOT yet FULL — recorded as "
+               "**unresolved**, not resolved, so this doesn't mislead future troubleshooting. "
+               "If that verification was stale, re-run the investigation to confirm.")
     return ("✅ Recorded as resolved — this outcome now informs future troubleshooting."
-           if success else
+           if effective_success else
            "📝 Recorded as unresolved — flagged for review; a recurring pattern here "
            "will be surfaced automatically.")
 

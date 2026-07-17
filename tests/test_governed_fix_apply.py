@@ -407,6 +407,95 @@ def test_record_ts_outcome_closes_the_live_session_as_unresolved(tmp_path, monke
     assert session.status == ResolutionStatus.UNRESOLVED
 
 
+def test_target_neighbor_still_broken_true_when_root_causes_own_neighbor_still_not_full():
+    pending = _pending_state(
+        ["ip ospf mtu-ignore"],
+        root_cause="interface_mtu must equal violated on ospf_adjacency between "
+                   "10.0.0.1 and 10.0.0.2 (local=1500, remote=1200)")
+    pending["verification_targets"] = {"10.0.0.1": [{"ip": "10.0.0.2", "state": "EXSTART", "interface": "Gi0/0"}]}
+    assert copilot_engine._target_neighbor_still_broken(pending) is True
+
+
+def test_target_neighbor_still_broken_false_when_a_different_neighbor_is_the_leftover():
+    """The fix's OWN target (10.0.0.2) came back FULL — some UNRELATED
+    neighbor (10.0.0.9) being separately broken must not block recording
+    THIS fix as resolved."""
+    pending = _pending_state(
+        ["ip ospf mtu-ignore"],
+        root_cause="interface_mtu must equal violated on ospf_adjacency between "
+                   "10.0.0.1 and 10.0.0.2 (local=1500, remote=1200)")
+    pending["verification_targets"] = {"10.0.0.1": [{"ip": "10.0.0.9", "state": "DOWN", "interface": "Gi0/1"}]}
+    assert copilot_engine._target_neighbor_still_broken(pending) is False
+
+
+def test_target_neighbor_still_broken_conservative_fallback_with_no_extractable_ip():
+    """root_cause names no specific neighbor IP at all (e.g. a BGP cause
+    like "Repeated TCP connection failures to the peer address") — cannot
+    positively confirm the SAME neighbor is the leftover, so treat ANY
+    still-not-full neighbor as ambiguous evidence against a plain
+    "resolved" rather than silently allowing it through."""
+    pending = _pending_state(["neighbor 10.0.0.2 ebgp-multihop 2"],
+                             root_cause="Repeated TCP connection failures to the peer address")
+    pending["verification_targets"] = {"10.0.0.1": [{"ip": "10.0.0.9", "state": "Active", "interface": ""}]}
+    assert copilot_engine._target_neighbor_still_broken(pending) is True
+
+
+def test_target_neighbor_still_broken_false_with_no_verification_targets_at_all():
+    pending = _pending_state(["ip ospf mtu-ignore"])
+    assert copilot_engine._target_neighbor_still_broken(pending) is False
+
+
+def test_record_ts_outcome_downgrades_a_confirms_fixed_click_when_fresh_verification_disagrees(
+        tmp_path, monkeypatch):
+    """Regression for a real production report: 'Recorded as resolved' was
+    followed, in the very next message, by 'Continuing — investigating the
+    remaining issue' for the SAME neighbor the fresh post-apply
+    verification had just shown still stuck in EXSTART. A Confirms Fixed
+    click must not silently overwrite what verification just proved."""
+    monkeypatch.delenv("AI_NET_STUDIO_MEMORY_DSN", raising=False)
+    monkeypatch.delenv("NETBRAIN_MEMORY_DSN", raising=False)
+    import core.knowledge.compiler.supply_chain as sc_mod
+    from core.troubleshooting.models import ResolutionStatus, Session
+    sc = _real_supply_chain(tmp_path)
+    monkeypatch.setattr(sc_mod, "NetworkIntelligenceSupplyChain", lambda: sc)
+
+    session = Session()
+    session.status = ResolutionStatus.RESOLVED_PENDING_APPROVAL
+    pending = _pending_state(
+        ["ip ospf mtu-ignore"],
+        root_cause="interface_mtu must equal violated on ospf_adjacency between "
+                   "192.168.96.136 and 192.168.20.2 (local=1500, remote=1200)")
+    pending["verification_targets"] = {
+        "192.168.96.136": [{"ip": "192.168.20.2", "state": "EXSTART", "interface": "GigabitEthernet1/0"}]}
+    pending["session"] = session
+
+    msg = copilot_engine._record_ts_outcome(pending, success=True)   # the "Confirms Fixed" click
+
+    assert "unresolved" in msg.lower()
+    assert "still" in msg.lower() or "not yet full" in msg.lower() or "NOT yet FULL" in msg
+    assert sc.learning.learn_from_calls[-1].success is False
+    assert session.status == ResolutionStatus.UNRESOLVED
+
+
+def test_record_ts_outcome_success_still_records_normally_when_nothing_contradicts_it(tmp_path, monkeypatch):
+    monkeypatch.delenv("AI_NET_STUDIO_MEMORY_DSN", raising=False)
+    monkeypatch.delenv("NETBRAIN_MEMORY_DSN", raising=False)
+    import core.knowledge.compiler.supply_chain as sc_mod
+    sc = _real_supply_chain(tmp_path)
+    monkeypatch.setattr(sc_mod, "NetworkIntelligenceSupplyChain", lambda: sc)
+
+    pending = _pending_state(
+        ["ip ospf mtu-ignore"],
+        root_cause="interface_mtu must equal violated on ospf_adjacency between "
+                   "192.168.96.136 and 192.168.20.2 (local=1500, remote=1200)")
+    # no verification_targets at all this time -> genuinely resolved
+    msg = copilot_engine._record_ts_outcome(pending, success=True)
+
+    assert "unresolved" not in msg.lower()
+    assert "resolved" in msg.lower()
+    assert sc.learning.learn_from_calls[-1].success is True
+
+
 def test_record_ts_outcome_tolerates_pending_state_with_no_session(tmp_path, monkeypatch):
     """Older/other pending_state dicts (e.g. built before this change, or in
     a code path that never attached a session) must not raise."""
