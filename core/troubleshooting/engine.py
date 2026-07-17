@@ -1722,7 +1722,40 @@ class TroubleshootingEngine:
         elif top and top.confidence >= ranker.PRESENT_THRESHOLD:
             session.status = ResolutionStatus.LIKELY_CAUSE_PRESENT
         elif not session.ranked() and session.observations:
+            # "No hypothesis survived" is NOT the same fact as "confirmed
+            # healthy" — a real production report showed this exact
+            # confusion: a re-investigation's own target-scoping correctly
+            # refused to bind evidence for an unrelated neighbor and
+            # correctly declined to raise a goal-mismatch banner without
+            # real evidence for the NAMED target, leaving zero hypotheses —
+            # and this branch then converted that into "🟢 No fault found",
+            # even though the SAME session's observations plainly showed a
+            # different neighbor stuck in EXSTART (not the protocol's
+            # healthy terminal state). Before declaring healthy, check
+            # whether any neighbor/protocol observation this session
+            # actually gathered contradicts that — if so, this is an
+            # "insufficient evidence to explain what we DID see" case, not
+            # a clean bill of health.
             session.status = ResolutionStatus.HEALTHY
+            protocol = self._detect_protocol(session.goal.query)
+            from core.knowledge.compiler.protocol_models import build_protocol_model
+            model = build_protocol_model(protocol)
+            if model is not None and model.states:
+                good = self._norm_state(model.states[-1])
+                for o in session.observations:
+                    subj = o.subject.lower()
+                    if ("neighbor" not in subj and "protocol" not in subj):
+                        continue
+                    if o.attribute not in ("state", "adjacency") or not o.value:
+                        continue
+                    if self._norm_state(o.value) != good:
+                        session.status = ResolutionStatus.ESCALATE
+                        session.escalation_reason = (
+                            f"observed {o.attribute} '{o.value}' on {o.subject} is not "
+                            f"this protocol's healthy terminal state ('{model.states[-1]}'), "
+                            "but no hypothesis could be confidently formed to explain it — "
+                            "escalating rather than reporting healthy.")
+                        break
         else:
             if session.status == ResolutionStatus.IN_PROGRESS:
                 session.status = ResolutionStatus.ESCALATE
