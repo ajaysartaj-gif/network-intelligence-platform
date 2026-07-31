@@ -225,6 +225,33 @@ class TroubleshootingEngine:
         except Exception as exc:
             logger.debug("Goal-evidence match check skipped: %s", exc)
 
+        # A real production report showed this exact confusion: a
+        # re-investigation named a neighbor stuck in Down; the mismatch
+        # check above correctly found the neighbor is actually FULL now
+        # (the goal_mismatch banner said so) — but the run continued on to
+        # ask the LLM for MORE hypotheses about the (already-disproven)
+        # symptom anyway, seeded a 20%-confidence, zero-evidence guess
+        # ("OSPF authentication mismatch"), and closed with "🔴 Escalated"
+        # — a confusing, alarming verdict for what the evidence plainly
+        # shows is a healthy, converged adjacency. Deterministic seeding
+        # earlier in this same run() call already covers every real
+        # FAILURE state (compiled failure signatures don't model "stuck in
+        # Full" — Full isn't a failure), so if the specific target the
+        # goal_mismatch check just confirmed is already at the protocol's
+        # healthy terminal state, there is nothing left to diagnose: skip
+        # the LLM hypothesis round entirely and let _finish()'s own
+        # healthy/escalate guard (below) reach its already-correct
+        # conclusion from an empty, un-polluted hypothesis set.
+        if session.goal_mismatch and session.goal_mismatch.get("neighbor_states"):
+            protocol_gm = self._detect_protocol(query)
+            from core.knowledge.compiler.protocol_models import build_protocol_model as _build_model_gm
+            model_gm = _build_model_gm(protocol_gm)
+            if model_gm is not None and model_gm.states:
+                good_gm = self._norm_state(model_gm.states[-1])
+                ns_list = session.goal_mismatch["neighbor_states"]
+                if ns_list and all(self._norm_state(ns.get("value", "")) == good_gm for ns in ns_list):
+                    return self._finish(session, ranker)
+
         # 1. seed hypotheses FROM the objective + the state just observed —
         #    the LLM EXTENDS the deterministic seed above, it never replaces it
         #    (existing statements are passed so it doesn't duplicate them).
@@ -244,6 +271,7 @@ class TroubleshootingEngine:
 
         best_so_far = 0.0
         stale = 0
+        self._diagnostics_attempted: set = set()  # (technology, device_ip) tried this run
 
         # 2. confidence-driven loop
         for _step in range(self.cfg.max_steps):
@@ -273,11 +301,18 @@ class TroubleshootingEngine:
                     outputs = None
 
             if not outputs:
-                session.status = ResolutionStatus.ESCALATE
-                session.escalation_reason = (
-                    "no further non-redundant evidence adds diagnostic value "
-                    "(requesting more evidence rather than guessing).")
-                break
+                diagnostic = self._request_diagnostic_evidence(session, device_ips, query)
+                if diagnostic is None:
+                    session.status = ResolutionStatus.ESCALATE
+                    session.escalation_reason = (
+                        "no further non-redundant evidence adds diagnostic value "
+                        "(requesting more evidence rather than guessing).")
+                    break
+                dev_ip, output, label = diagnostic
+                self._ingest_output(label, dev_ip, output, session, hmgr, conf)
+                self._bind_compiled_signature_evidence(session, hmgr, conf)
+                hmgr.reap()
+                continue
 
             # 4. analyze each output — Result Analyzer
             for dev_ip, output in outputs.items():
@@ -314,6 +349,19 @@ class TroubleshootingEngine:
         return self._finish(session, ranker)
 
     # ── loop helpers ────────────────────────────────────────────────────────────
+    @staticmethod
+    def _candidate_value(c: dict) -> float:
+        """The LLM's own self-reported usefulness score for a candidate
+        command/operation, defaulting to 0.5 only when truly absent.
+
+        `float(c.get("value", 0.5) or 0.5)` looks equivalent but isn't: a
+        genuinely-worthless candidate the LLM scored 0 is falsy in Python,
+        so `0 or 0.5` silently promotes it back up to the same score as an
+        unscored one -- exactly the candidates this scoring step exists to
+        rank last end up tied with everything else instead."""
+        value = c.get("value", 0.5)
+        return float(value) if value is not None else 0.5
+
     def _pick_command(self, candidates: List[dict]) -> Optional[tuple]:
         """Choose the highest-value, safe, non-duplicate command."""
         scored = []
@@ -330,7 +378,7 @@ class TroubleshootingEngine:
             fresh_targets = [t for t in targets if not self.cmd_memory.has(t, command)]
             if not fresh_targets:
                 continue
-            value = float(c.get("value", 0.5) or 0.5)
+            value = self._candidate_value(c)
             n_hyp = len(c.get("tests_hypotheses", []) or [])
             score = value + 0.1 * n_hyp
             scored.append((score, fresh_targets[0] if len(fresh_targets) == 1 else "all",
@@ -371,16 +419,32 @@ class TroubleshootingEngine:
         """
         from core.vendor.operations import KNOWN_OPERATIONS, Operation  # local import: framework optional
 
+        protocol = self._detect_protocol(session.goal.query if session.goal else "")
+
         cands = self.reasoner.plan_operations(
             session.goal.objective, active, grounding, already, device_ips,
             sorted(KNOWN_OPERATIONS))
-        # choose best, non-duplicate operation
-        best = None
+        # Score every usable candidate the same way _pick_command already does
+        # for the raw-command path, instead of taking the first one the LLM
+        # listed. The LLM is asked to return "value"/"tests_hypotheses" for
+        # operations exactly like it does for commands, but that signal was
+        # being computed and then silently discarded here -- this is why the
+        # planner could hand back a generic operation ahead of a targeted one
+        # whenever the LLM's own ordering wasn't already need-ranked.
+        scored = []
         for c in cands:
             opname = (c.get("operation") or "").strip()
             if not opname:
                 continue
-            params = c.get("params") or {}
+            params = dict(c.get("params") or {})
+            # The engine already knows the protocol under investigation --
+            # never leave it to the LLM to remember to include it. Omitting
+            # it silently degrades e.g. cisco_ios_like.py's build_command()
+            # to 3 hardcoded generic commands instead of this protocol's
+            # real ones, which is a direct, concrete cause of "generic
+            # command instead of a targeted one."
+            if not params.get("protocol") and protocol:
+                params["protocol"] = protocol
             sig = self._op_signature(opname, params)
             dev = (c.get("device") or "all").strip()
             targets = ([dev] if dev in self._ip_to_dev else list(self._ip_to_dev.keys()))
@@ -392,13 +456,15 @@ class TroubleshootingEngine:
                 continue
             if all(self.cmd_memory.has(t, sig) for t in targets):
                 continue
-            best = (dev if dev in self._ip_to_dev else "all", opname, params,
-                    c.get("purpose", ""), sig, targets)
-            break
-        if not best:
+            value = self._candidate_value(c)
+            n_hyp = len(c.get("tests_hypotheses", []) or [])
+            score = value + 0.1 * n_hyp
+            scored.append((score, dev if dev in self._ip_to_dev else "all", opname, params,
+                          c.get("purpose", ""), sig, targets))
+        if not scored:
             return None
-
-        dev, opname, params, purpose, sig, targets = best
+        scored.sort(key=lambda x: x[0], reverse=True)
+        _, dev, opname, params, purpose, sig, targets = scored[0]
         session.next_best_command = f"[operation] {opname} {params or ''} → {dev}"
         outputs: Dict[str, str] = {}
         for ip in targets:
@@ -418,6 +484,55 @@ class TroubleshootingEngine:
             session.executed.append(self.cmd_memory.record(ip, sig, text, purpose, reused=False))
             outputs[ip] = text
         return outputs
+
+    def _request_diagnostic_evidence(self, session: Session, device_ips: List[str],
+                                     query: str) -> Optional[tuple]:
+        """Read-only evidence is exhausted for this step. Before escalating,
+        ask the Diagnostic Capability Framework whether a bounded, governed
+        diagnostic action (e.g. a debug session) applies -- this engine
+        never sees a vendor command either way, only "give me more evidence
+        for <technology>". Returns (device_ip, output, label) for the first
+        device where a capability actually produced evidence, else None
+        (the caller falls through to the existing escalation path unchanged).
+        """
+        from core.diagnostics import request_evidence
+
+        protocol = self._detect_protocol(query)
+        vendor = "ios-like"
+        if self.gateway is not None:
+            try:
+                _, profile = self.gateway.resolve(self._ip_to_dev.get(device_ips[0]))
+                vendor = profile.vendor or vendor
+            except Exception:
+                pass
+
+        for ip in device_ips:
+            key = (protocol, ip)
+            if key in self._diagnostics_attempted:
+                continue
+            self._diagnostics_attempted.add(key)
+            dev = self._ip_to_dev.get(ip)
+            if dev is None:
+                continue
+            result = request_evidence(
+                technology=protocol, vendor=vendor, device=ip,
+                send=lambda cmds, _dev=dev: self._collector(_dev, cmds) or {},
+                active_hypotheses=session.active_hypotheses(),
+                read_only_evidence_exhausted=True,
+                intent=f"diagnostic evidence request: {protocol}",
+            )
+            if result is None:
+                continue
+            label = f"[diagnostic] {result.command}"
+            rec = self.cmd_memory.record(ip, label, result.output, "diagnostic capability request",
+                                         reused=False)
+            session.executed.append(rec)
+            if result.refused or not result.output:
+                logger.info("Diagnostic capability for %s/%s not used: %s",
+                            protocol, ip, result.refusal_reason or "no output")
+                continue
+            return ip, result.output, label
+        return None
 
     @staticmethod
     def _op_signature(opname: str, params: dict) -> str:
@@ -562,6 +677,22 @@ class TroubleshootingEngine:
                 if kv.get("ip_mtu"):
                     facts.append({"subject": f"interface.{oid or '?'}",
                                  "attribute": "ip_mtu", "value": kv["ip_mtu"]})
+                # Every one of these is ALREADY parsed by the vendor
+                # adapter's own "show ... interface"-style parsers (e.g.
+                # IosLikeAdapter's OSPF-interface block: area, network type,
+                # DR/BDR role, hello/dead timers, authentication, router ID)
+                # and was sitting right there in `kv` — but was silently
+                # dropped here, so it never became comparable evidence. This
+                # is exactly what made an OSPF area-ID mismatch (or an
+                # authentication-type mismatch, or a network-type mismatch)
+                # impossible to deterministically confirm or rule out even
+                # when the real, differing values were already collected
+                # from both devices in the same command's output.
+                for key in ("area", "network_type", "ospf_state", "hello", "dead",
+                           "auth", "router_id", "network_mask"):
+                    if kv.get(key):
+                        facts.append({"subject": f"interface.{oid or '?'}",
+                                     "attribute": key, "value": kv[key]})
         return facts
 
     def _deterministic_facts(self, output: str) -> List[Dict[str, str]]:
@@ -743,8 +874,10 @@ class TroubleshootingEngine:
     def _norm_state(s: str) -> str:
         return re.sub(r"[^A-Z0-9]", "", (s or "").upper())
 
-    def _observed_protocol_state_obs(self, session: Session,
-                                     target_ip: Optional[str] = None) -> Optional[Observation]:
+    def _observed_protocol_state_obs(
+        self, session: Session,
+        target_ip: Optional["str | List[str]"] = None,
+    ) -> Optional[Observation]:
         """Best-effort deterministic read of the most recent observation that
         reports an actual protocol/neighbor stuck-state (e.g. 'EXSTART') — the
         same vocabulary compiled FailureSignatures key off of via stuck_state.
@@ -757,28 +890,33 @@ class TroubleshootingEngine:
         "down" (meaning merely "no FULL neighbor yet") outranking the real,
         specific observed state and being compared against it instead.
 
-        When `target_ip` is given — the specific neighbor THIS investigation
-        is actually about, e.g. a re-investigation query that explicitly
-        names "the OSPF neighbor 192.168.20.2" — scopes the search to
-        observations naming that neighbor specifically (its subject
-        contains its IP, e.g. "neighbor.192.168.20.2"). Without this, a
-        coincidentally more-recent fact about a COMPLETELY DIFFERENT
-        neighbor collected in the same evidence round (get_neighbors()
-        naturally returns every neighbor on a device, not just the one
-        under investigation) could silently stand in for "the observed
-        state". A real report showed exactly this: a continuation whose
-        Goal named 192.168.20.2 nonetheless compared against a "neighbor
-        FULL" fact that was actually about a different, healthy neighbor
-        (192.168.21.2) queried in the same sweep — the investigation's
-        target had silently shifted with no explanation. When target_ip is
-        given but nothing matches it yet, returns None rather than falling
-        back to an unrelated neighbor's fact — an unscoped guess here is
-        worse than honestly admitting nothing is known yet about THIS
-        neighbor."""
-        if target_ip:
+        `target_ip` accepts either a single IP string (the original,
+        re-investigation-only case) or a list of IPs (from
+        _query_target_ips, which also resolves device hostnames — a query
+        naming two devices, e.g. "issue at R1 and R2", is scoped to EITHER
+        one's IP, since the relevant neighbor fact could be tagged with
+        either side's address depending on which device's `show` output it
+        came from). Scopes the search to observations naming one of the
+        given IPs (its subject contains that IP, e.g.
+        "neighbor.192.168.20.2"). Without this, a coincidentally more-recent
+        fact about a COMPLETELY DIFFERENT neighbor collected in the same
+        evidence round (get_neighbors() naturally returns every neighbor on
+        a device, not just the one under investigation) could silently stand
+        in for "the observed state". A real report showed exactly this: a
+        continuation whose Goal named 192.168.20.2 nonetheless compared
+        against a "neighbor FULL" fact that was actually about a different,
+        healthy neighbor (192.168.21.2) queried in the same sweep — the
+        investigation's target had silently shifted with no explanation.
+        When a target is given but nothing matches it yet, returns None
+        rather than falling back to an unrelated neighbor's fact — an
+        unscoped guess here is worse than honestly admitting nothing is
+        known yet about THIS neighbor."""
+        targets: List[str] = (
+            [target_ip] if isinstance(target_ip, str) else list(target_ip or []))
+        if targets:
             for o in reversed(session.observations):
                 if (o.attribute == "state" and "neighbor" in o.subject.lower()
-                        and o.value and target_ip in o.subject):
+                        and o.value and any(t in o.subject for t in targets)):
                     return o
             return None
         for o in reversed(session.observations):
@@ -805,6 +943,44 @@ class TroubleshootingEngine:
     def _query_target_ip(self, query: str) -> Optional[str]:
         m = self._QUERY_TARGET_IP_RE.search(query or "")
         return m.group(1) if m else None
+
+    def _query_target_ips(self, query: str) -> List[str]:
+        """Like _query_target_ip, but also resolves device HOSTNAMES named in
+        the query (e.g. "why OSPF have a issue at R1 and R2") to their IPs via
+        self._ip_to_dev, and returns every match instead of just one.
+
+        _query_target_ip alone only recognizes the internal re-investigation
+        phrasing ("...the OSPF neighbor 192.168.20.2..."), which requires a
+        literal dotted IP in the query text. An ordinary first-time user
+        question almost never includes one — it names devices by hostname —
+        so without this, _observed_protocol_state_obs's target scoping was
+        silently dormant for the overwhelming majority of real queries and
+        fell back to "the most recent neighbor-state fact anywhere in the
+        session", which can belong to a completely different, unrelated
+        adjacency on a multi-neighbor device (a real report showed exactly
+        this: an OSPF area-ID mismatch injected between two named routers
+        was ruled out using a healthy 'FULL' state that actually belonged to
+        one of those routers' OTHER neighbors).
+
+        When a query names two devices ("R1 and R2"), both IPs are returned
+        together: the neighbor fact this investigation cares about is the
+        R1<->R2 relationship specifically, and it may be tagged with either
+        device's IP as the neighbor identifier depending on which side's
+        `show` output it was collected from — matching on either is correct,
+        matching on only one would still miss half the real cases.
+        """
+        ips: List[str] = []
+        single = self._query_target_ip(query)
+        if single:
+            ips.append(single)
+        q_low = (query or "").lower()
+        for ip, dev in self._ip_to_dev.items():
+            hostname = (getattr(dev, "hostname", "") or "").strip()
+            if not hostname or ip in ips:
+                continue
+            if re.search(r"\b" + re.escape(hostname.lower()) + r"\b", q_low):
+                ips.append(ip)
+        return ips
 
     def _check_goal_evidence_match(self, session: Session, query: str) -> None:
         """Detects when the user's own question names a specific FSM state
@@ -857,12 +1033,12 @@ class TroubleshootingEngine:
         if not asked_state:
             return
 
-        target_ip = self._query_target_ip(query)
+        target_ips = self._query_target_ips(query)
         all_neighbor_obs = [o for o in session.observations
                            if o.attribute == "state" and "neighbor" in o.subject.lower() and o.value]
-        neighbor_obs = ([o for o in all_neighbor_obs if target_ip in o.subject]
-                       if target_ip else all_neighbor_obs)
-        if target_ip and not neighbor_obs:
+        neighbor_obs = ([o for o in all_neighbor_obs if any(t in o.subject for t in target_ips)]
+                       if target_ips else all_neighbor_obs)
+        if target_ips and not neighbor_obs:
             return   # named a specific neighbor but have no evidence about it yet
         if neighbor_obs:
             if any(self._norm_state(o.value) == asked_norm for o in neighbor_obs):
@@ -879,7 +1055,7 @@ class TroubleshootingEngine:
             }
             return
 
-        if target_ip:
+        if target_ips:
             return   # named a specific neighbor; never fall back to a device-wide coarse flag
         # No per-neighbor fact was ever collected this round — only the
         # coarse protocol-level up/down summary exists. Report it honestly
@@ -949,8 +1125,8 @@ class TroubleshootingEngine:
         coincidentally-more-recent fact is a real, previously-reported
         bug."""
         query = session.goal.query if session.goal else ""
-        target_ip = self._query_target_ip(query)
-        obs = self._observed_protocol_state_obs(session, target_ip=target_ip)
+        target_ips = self._query_target_ips(query)
+        obs = self._observed_protocol_state_obs(session, target_ip=target_ips)
         if obs is None:
             return
         observed_norm = self._norm_state(obs.value)
@@ -1200,8 +1376,8 @@ class TroubleshootingEngine:
             # a device's OTHER, healthy adjacency returned by the same
             # get_neighbors() call) — the same staleness risk documented on
             # _observed_protocol_state_obs itself.
-            target_ip = self._query_target_ip(session.goal.query)
-            if self._observed_protocol_state_obs(session, target_ip=target_ip) is not None:
+            target_ips = self._query_target_ips(session.goal.query)
+            if self._observed_protocol_state_obs(session, target_ip=target_ips) is not None:
                 return
             from core.vendor.operations import Op, Operation
 
@@ -1210,7 +1386,7 @@ class TroubleshootingEngine:
                 sig = self._op_signature(opname, params)
                 targets = [ip for ip in device_ips if not self.cmd_memory.has(ip, sig)]
                 if not targets:
-                    if self._observed_protocol_state_obs(session, target_ip=target_ip) is not None:
+                    if self._observed_protocol_state_obs(session, target_ip=target_ips) is not None:
                         break
                     continue
                 session.next_best_command = (
@@ -1228,7 +1404,7 @@ class TroubleshootingEngine:
                     session.executed.append(self.cmd_memory.record(
                         ip, sig, text, "deterministic neighbor/protocol-state anchor", reused=False))
                     self._ingest_output(sig, ip, text, session, hmgr, conf)
-                if self._observed_protocol_state_obs(session, target_ip=target_ip) is not None:
+                if self._observed_protocol_state_obs(session, target_ip=target_ips) is not None:
                     self._note_knowledge_source(
                         session, f"deterministic neighbor/protocol-state anchor: {protocol}/{opname}")
                     break
@@ -1281,7 +1457,7 @@ class TroubleshootingEngine:
     def _compiled_remediation_intent(self, session: Session, root_cause_statement: str,
                                      allowed_intents: List[str], protocol: str,
                                      discriminating_signals: Optional[List[str]] = None,
-                                     device_ip: str = "") -> Optional[dict]:
+                                     device_ip: str = "", peer_ip: str = "") -> Optional[dict]:
         """Checks the NKC's compiled RemediationTemplate mapping
         (core.knowledge.compiler.reasoning_artifact_compiler) for a
         deterministic cause->intent mapping BEFORE asking the LLM to guess
@@ -1324,7 +1500,20 @@ class TroubleshootingEngine:
         different, genuinely different interface values, one per side; an
         unscoped scan would give both devices whichever value was recorded
         last in the whole session, not each device's own. Empty (default)
-        preserves the original unscoped behavior for the single-device case."""
+        preserves the original unscoped behavior for the single-device case.
+
+        `peer_ip`: when set, the neighbor-table interface lookup (second
+        priority below) is further scoped to facts about THIS specific
+        neighbor. A real production incident showed why this matters: a
+        device with TWO real OSPF neighbors got the fix applied to
+        whichever neighbor's interface fact happened to be most recently
+        recorded for that device — not necessarily the one actually
+        involved in this root cause — silently mtu-ignoring an unrelated
+        interface while the real problem interface never got touched, and
+        the untouched adjacency regressed from ExStart to Down. Device
+        scoping alone (device_ip) is not enough once a device has more
+        than one neighbor; peer_ip is the missing second axis. Empty
+        (default) preserves prior behavior for the single-neighbor case."""
         try:
             from core.knowledge.compiler.reasoning_artifact_compiler import ReasoningArtifactCompiler
             from core.knowledge.compiler.failure_signatures import compile_failure_signatures
@@ -1371,32 +1560,81 @@ class TroubleshootingEngine:
                 # trailing Interface column) — more reliable than the
                 # generic mtu-observation fallback below, which can pick an
                 # unrelated interface on a multi-interface device.
+                #
+                # Peer-matching only kicks in when this device genuinely
+                # has MORE THAN ONE distinct neighbor — a device with just
+                # one has no real ambiguity to resolve, and the neighbor
+                # subject's own identifier is often the peer's OSPF
+                # router-id, not its device IP (a real, common config —
+                # router-id is frequently loopback-based, independent of
+                # any interface address), so peer_ip won't always appear
+                # in a single-neighbor device's own subject text even
+                # though there's nothing to disambiguate. Only once a
+                # device has 2+ distinct neighbors does device-scoping
+                # alone stop being enough (see peer_ip's docstring for the
+                # real incident this closes) — and only THEN does a failed
+                # peer-match leave iface empty rather than silently
+                # falling back to a different neighbor's interface;
+                # render_remediation_fix() already refuses to emit a
+                # command with no interface, so this device is skipped for
+                # this fix instead of misconfigured.
                 if not iface:
+                    by_subject: Dict[str, str] = {}
+                    order: List[str] = []
                     for o in reversed(session.observations):
                         if device_ip and o.device != device_ip:
                             continue
                         if o.subject.startswith("neighbor.") and o.attribute == "interface" and o.value:
-                            iface = o.value
+                            if o.subject not in by_subject:
+                                by_subject[o.subject] = o.value
+                                order.append(o.subject)
+                    if len(by_subject) <= 1 or not peer_ip:
+                        if order:
+                            iface = by_subject[order[0]]
+                    else:
+                        for subj in order:
+                            if peer_ip in subj:
+                                iface = by_subject[subj]
+                                break
+                # BGP (and any future neighbor-scoped protocol) remediation
+                # intents act on a specific peer, not an interface — e.g.
+                # "no neighbor <ip> shutdown" needs the actual neighbor
+                # identity. When the caller already knows the peer (a named
+                # cross-device root cause), use it directly rather than
+                # re-deriving "the first neighbor fact for this device",
+                # which has the identical multi-neighbor ambiguity iface did.
+                neighbor_ip = peer_ip
+                if not neighbor_ip:
+                    for o in session.observations:
+                        if device_ip and o.device != device_ip:
+                            continue
+                        if o.subject.startswith("neighbor.") and o.attribute == "state" and o.value:
+                            neighbor_ip = o.subject.split(".", 1)[1]
+                            break
+                # The generic mtu-observation fallback and STP's errdisable
+                # lookup carry no neighbor identity at all (an interface's
+                # MTU/errdisable state isn't peer-specific) — only used when
+                # no peer was named, so they never override a peer-scoped
+                # (or peer-scoping-failed) result above with an unrelated
+                # interface's fact.
+                if not peer_ip:
+                    for o in session.observations:
+                        if device_ip and o.device != device_ip:
+                            continue
+                        if o.subject.startswith("interface.") and o.attribute == "mtu" and not iface:
+                            iface = o.subject.split(".", 1)[1]
                             break
                 for o in session.observations:
                     if device_ip and o.device != device_ip:
                         continue
-                    if o.subject.startswith("interface.") and o.attribute == "mtu" and not iface:
-                        iface = o.subject.split(".", 1)[1]
-                    # BGP (and any future neighbor-scoped protocol) remediation
-                    # intents act on a specific peer, not an interface — e.g.
-                    # "no neighbor <ip> shutdown" needs the actual neighbor
-                    # identity, which OSPF's interface-scoped intents never
-                    # needed to carry.
-                    if o.subject.startswith("neighbor.") and o.attribute == "state" and not neighbor_ip:
-                        neighbor_ip = o.subject.split(".", 1)[1]
                     # STP's enable_errdisable_recovery intent needs the actual
                     # observed cause word (udld/link-flap/...) to fill in
                     # "errdisable recovery cause {errdisable_reason}" — unlike
                     # every other compiled intent, this value is a VALUE fact,
                     # not an id recovered from the observation's subject.
-                    if o.subject.startswith("neighbor.") and o.attribute == "errdisable_reason" and not errdisable_reason:
+                    if o.subject.startswith("neighbor.") and o.attribute == "errdisable_reason" and o.value:
                         errdisable_reason = o.value
+                        break
                 self._note_knowledge_source(
                     session, f"compiled remediation template: {protocol}/{template.intent_name}")
                 return {"name": template.intent_name,
@@ -1532,8 +1770,8 @@ class TroubleshootingEngine:
         model = build_protocol_model(protocol)
         if model is None:
             return
-        target_ip = self._query_target_ip(query)
-        obs = self._observed_protocol_state_obs(session, target_ip=target_ip)
+        target_ips = self._query_target_ips(query)
+        obs = self._observed_protocol_state_obs(session, target_ip=target_ips)
         if obs is None:
             return
         observed_norm = self._norm_state(obs.value)
@@ -1624,9 +1862,16 @@ class TroubleshootingEngine:
                     allowed = self.gateway.supported_intents(device)
                 except Exception:
                     allowed = []
+                # The other participant in this pair, if any — passed
+                # through so the interface (and neighbor_ip) resolved for
+                # THIS device is scoped to the specific adjacency being
+                # fixed, not just "the first neighbor fact this device
+                # happens to have" (see _compiled_remediation_intent's
+                # peer_ip docstring for the real incident this closes).
+                peer_ip = next((p for p in participant_ips if p != ip), "")
                 intent_raw = self._compiled_remediation_intent(
                     session, top.statement, allowed, protocol, top.discriminating_signals,
-                    device_ip=ip) or \
+                    device_ip=ip, peer_ip=peer_ip) or \
                             self.reasoner.propose_intent(
                                 top.statement, session.goal.objective,
                                 self._evidence_summary(session), allowed)
@@ -1742,9 +1987,22 @@ class TroubleshootingEngine:
             model = build_protocol_model(protocol)
             if model is not None and model.states:
                 good = self._norm_state(model.states[-1])
+                # Scoped to "neighbor."-prefixed facts only — a coarse
+                # "protocol.<x>.state = up/down" flag uses a completely
+                # different vocabulary than the FSM's own state names (e.g.
+                # OSPF's "up" vs. its terminal state "Full", and "down"
+                # collides with the FSM's OWN "Down" state despite meaning
+                # something entirely different: "process administratively
+                # down" vs. "neighbor hasn't exchanged hellos yet"). A
+                # coarse flag comparing false against the FSM vocabulary
+                # would make this guard ALWAYS escalate a genuinely healthy
+                # session that only ever recorded protocol-level facts —
+                # the exact "neighbor facts are authoritative, protocol-
+                # level ones are just a coarse fallback" precedent this
+                # session's target-scoping fix already established.
                 for o in session.observations:
                     subj = o.subject.lower()
-                    if ("neighbor" not in subj and "protocol" not in subj):
+                    if "neighbor" not in subj:
                         continue
                     if o.attribute not in ("state", "adjacency") or not o.value:
                         continue

@@ -317,7 +317,13 @@ class TroubleshootReport:
             "current_state": s.status.value,
             "active_hypotheses": [
                 {"statement": h.statement, "confidence": h.confidence,
-                 "evidence_count": len(h.evidence_ids), "rationale": h.rationale}
+                 "evidence_count": len(h.evidence_ids), "rationale": h.rationale,
+                 # A hypothesis with zero evidence was never disproven --
+                 # it was simply never tested this session (no command
+                 # ever produced evidence relevant to it). Distinct from
+                 # "considered, still uncertain": callers should not treat
+                 # confidence on an unevaluated hypothesis as a real signal.
+                 "evaluated": bool(h.evidence_ids)}
                 for h in s.ranked()
             ],
             "eliminated_hypotheses": [
@@ -456,7 +462,14 @@ class TroubleshootReport:
         if alternates or eliminated:
             lines.append("\n### 🔁 If Not, Try These")
             for h in alternates:
-                lines.append(f"- {h.statement} _(confidence: {h.confidence:.0%})_")
+                if h.evidence_ids:
+                    lines.append(f"- {h.statement} _(confidence: {h.confidence:.0%})_")
+                else:
+                    # Never tested this session -- listing it at face value
+                    # next to genuinely-checked alternatives implies it was
+                    # weighed and found less likely, when nothing actually
+                    # weighed it at all.
+                    lines.append(f"- {h.statement} _(not evaluated — no evidence collected)_")
             if eliminated:
                 lines.append(
                     f"\n_Already ruled out: {', '.join(h.statement for h in eliminated)} "
@@ -477,9 +490,20 @@ class TroubleshootReport:
         lines.append("\n### 🧪 Active Hypotheses")
         if s.ranked():
             for h in s.ranked():
-                bar = "🟩" if h.confidence >= 0.8 else "🟨" if h.confidence >= 0.4 else "🟥"
-                lines.append(f"- {bar} **{h.confidence:.0%}** — {h.statement} "
-                             f"_(evidence: {len(h.evidence_ids)})_")
+                # A hypothesis that never received any evidence wasn't
+                # weighed and found wanting -- nothing ever tested it. A
+                # red/yellow/green traffic light next to a raw seeded prior
+                # reads as "we considered this and it's unlikely", which
+                # overstates what actually happened. Mark it neutral and
+                # say so plainly instead of reporting "evidence: 0" as if
+                # that were just a low count on an otherwise real signal.
+                if not h.evidence_ids:
+                    lines.append(f"- ⬜ **{h.confidence:.0%}** — {h.statement} "
+                                 f"_(not evaluated — no evidence collected this session)_")
+                else:
+                    bar = "🟩" if h.confidence >= 0.8 else "🟨" if h.confidence >= 0.4 else "🟥"
+                    lines.append(f"- {bar} **{h.confidence:.0%}** — {h.statement} "
+                                 f"_(evidence: {len(h.evidence_ids)})_")
                 if h.rationale:
                     lines.append(f"  - _why: {h.rationale}_")
         else:

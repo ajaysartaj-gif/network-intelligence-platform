@@ -135,6 +135,37 @@ def cmd_stats(args):
         print(f"  {k}: {v}")
 
 
+def cmd_audit_knowledge(args):
+    from core.knowledge.compiler.completeness_check import format_report, run_full_audit
+    reports = run_full_audit()
+    if args.protocol:
+        reports = [r for r in reports if r.subject == args.protocol]
+    print(format_report(reports))
+    if not all(r.clean for r in reports):
+        raise SystemExit(1)
+
+
+def cmd_draft_knowledge(args):
+    from core.ai_engine import get_api_key, ask_ai
+    from core.knowledge.compiler.auto_draft import draft_and_publish
+    from core.knowledge.compiler.completeness_check import check_corpus_completeness, format_report
+
+    if not get_api_key():
+        raise SystemExit(
+            "GROQ_API_KEY isn't configured (checked Streamlit secrets, env, .env) — "
+            "drafting needs a real LLM call, unlike audit-knowledge which is fully offline.")
+    # ask_ai's global default (800) is tuned for the live troubleshooting
+    # chat flow's short answers — a KnowledgePackage with several
+    # MatchParameters (each carrying name/relation/fatal/read_intent/
+    # symptom/applies_when/provenance) genuinely needs more room; VXLAN/
+    # EVPN's real params got silently truncated mid-JSON at 800. Scoped to
+    # this offline drafting tool only, not the live chat path.
+    ai_call = lambda prompt: ask_ai(prompt, max_tokens=2000)
+    path = draft_and_publish(args.relationship_type, args.protocol, ai_call)
+    print(f"Drafted and published: {path}")
+    print(format_report([check_corpus_completeness(args.relationship_type)]))
+
+
 def main():
     ap = argparse.ArgumentParser(description="Network Compiler — universal knowledge ingestion.")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -168,6 +199,19 @@ def main():
     p.set_defaults(func=cmd_search)
 
     sub.add_parser("stats", help="show knowledge base metrics").set_defaults(func=cmd_stats)
+
+    p = sub.add_parser("audit-knowledge",
+                       help="check compiled protocol knowledge for state-tag/readability/fixability gaps")
+    p.add_argument("protocol", nargs="?", default=None,
+                   help="limit to one protocol/relationship_type (default: check everything)")
+    p.set_defaults(func=cmd_audit_knowledge)
+
+    p = sub.add_parser("draft-knowledge",
+                       help="draft Mismatch Investigation PARAM lines from corpus/general/<protocol>.txt "
+                            "and publish them live (no review gate) — needs GROQ_API_KEY")
+    p.add_argument("relationship_type", help='e.g. "vrrp_pairing"')
+    p.add_argument("protocol", help='e.g. "vrrp" (must have corpus/general/<protocol>.txt already)')
+    p.set_defaults(func=cmd_draft_knowledge)
 
     args = ap.parse_args()
     args.func(args)

@@ -1,0 +1,56 @@
+{
+  "192.168.96.136": {
+    "logs": [
+      {
+        "type": "approval",
+        "summary": "Device approved by admin. Type: cisco_ios. Open ports: [22, 23]. Source: arp. Site: Site1, Noida1, India, APAC.",
+        "ts": "2026-06-27T11:00:34.788993"
+      },
+      {
+        "type": "manual_login",
+        "summary": "Login OK as admin. Prompt: R1#. 6 up/0 down.",
+        "ts": "2026-06-27T11:00:49.653655"
+      }
+    ],
+    "ai_history": [],
+    "last_health": "unknown"
+  },
+  "192.168.21.2": {
+    "logs": [
+      {
+        "type": "approval",
+        "summary": "Device approved by admin. Type: cisco_ios. Open ports: [22, 23]. Source: range_scan. Site: Site1, Noida1, India, APAC.",
+        "ts": "2026-06-27T11:02:57.524638"
+      }
+    ],
+    "ai_history": [],
+    "last_health": "unknown"
+  },
+  "192.168.21.1": {
+    "logs": [
+      {
+        "type": "approval",
+        "summary": "Device approved by admin. Type: cisco_ios. Open ports: [22, 23]. Source: range_scan. Site: Site1, Noida1, India, APAC.",
+        "ts": "2026-06-27T11:03:19.976884"
+      },
+      {
+        "type": "disapproval",
+        "summary": "Device moved back to pending by admin.",
+        "ts": "2026-06-27T11:04:09.359308"
+      }
+    ],
+    "ai_history": [],
+    "last_health": "unknown"
+  },
+  "192.168.20.2": {
+    "logs": [
+      {
+        "type": "approval",
+        "summary": "Device approved by admin. Type: cisco_ios. Open ports: [22, 23]. Source: range_scan. Site: Site1, Noida1, India, APAC.",
+        "ts": "2026-06-27T11:04:37.534513"
+      }
+    ],
+    "ai_history": [],
+    "last_health": "unknown"
+  }
+}

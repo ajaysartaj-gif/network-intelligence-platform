@@ -23,8 +23,6 @@ class FortinetFetcher(VendorFetcher):
     vendor_key   = "fortinet"
     display_name = "Fortinet"
     trusted_domains = ["fortinet.com"]
-
-    DDG_SEARCH_URL = "https://html.duckduckgo.com/html/?q={query}"
     MAX_CANDIDATES = 4
 
     def search_candidates(
@@ -36,14 +34,14 @@ class FortinetFetcher(VendorFetcher):
             return []
 
         queries = [
-            f'"{command}" FortiOS "CLI Reference" site:docs.fortinet.com',
-            f'"{command}" FortiGate site:fortinet.com',
+            f'"{command}" FortiOS "CLI Reference"',
+            f'"{command}" FortiGate',
         ]
 
         seen: set = set()
         candidates: List[Tuple[str, str]] = []
         for q in queries:
-            for url, title in self._duckduckgo_search(q):
+            for url, title in self._web_search(q):
                 if url in seen:
                     continue
                 if "fortinet.com" not in url:
@@ -54,30 +52,6 @@ class FortinetFetcher(VendorFetcher):
                     return candidates
         return candidates
 
-    def _duckduckgo_search(self, query: str) -> List[Tuple[str, str]]:
-        try:
-            import requests
-            from urllib.parse import unquote
-            url = self.DDG_SEARCH_URL.format(query=quote_plus(query))
-            r = requests.get(url, timeout=self.HTTP_TIMEOUT,
-                             headers={"User-Agent": self.USER_AGENT})
-            if r.status_code != 200:
-                return []
-            soup = self._get_soup(r.text)
-            if not soup:
-                return []
-            out: List[Tuple[str, str]] = []
-            for a in soup.find_all("a", class_="result__a", limit=15):
-                href = a.get("href", "")
-                title = self._clean_text(a.get_text(), 200)
-                m = re.search(r"uddg=([^&]+)", href)
-                real_url = unquote(m.group(1)) if m else href
-                if real_url.startswith("http"):
-                    out.append((real_url, title))
-            return out
-        except Exception as exc:
-            logger.debug(f"DDG search failed: {exc}")
-            return []
 
     def parse_page(
         self,

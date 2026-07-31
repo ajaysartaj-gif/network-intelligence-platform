@@ -1,0 +1,9 @@
+# Auto-drafted by core.knowledge.compiler.auto_draft from corpus/general/ prose — published without a review gate; each PARAM's trailing comment cites its source section for later audit.
+
+ENUMERATE: mpls_l3vpn_service
+HEALTHY: established, routes_exchanged
+
+PARAM: route_target | must_equal | true | import_export_control | routes_not_imported | vrf_configuration  # source: mpls_l3vpn.txt §What MPLS L3VPN is
+PARAM: route_distinguisher | must_differ | true | global_uniqueness | route_collision | vrf_configuration  # source: mpls_l3vpn.txt §What MPLS L3VPN is
+PARAM: address_family_vpnv4 | must_equal | true | vpn_route_exchange | mp_bgp_session_idle | mp_bgp_configuration  # source: mpls_l3vpn.txt §Common failure symptom: MP-BGP VPNv4 session won't establish
+PARAM: vpn_label | must_equal | true | mpls_forwarding | traffic_dropped | mpls_label_distribution  # source: mpls_l3vpn.txt §Common failure symptom: traffic reaches the far PE but is dropped or misrouted there

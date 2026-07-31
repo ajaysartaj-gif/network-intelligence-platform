@@ -11,12 +11,40 @@ Defines the data contracts every layer uses:
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit, urlunsplit
+
+
+def normalize_document_url(url: str) -> str:
+    """TODAY's default strategy for computing KnowledgeEntry.source_doc_id
+    (see that field's docstring for the abstraction this backs) — not the
+    definition of canonical identity itself, just the only signal a
+    generic web fetcher can rely on right now. Strips query string,
+    fragment, and trailing slash, lowercases scheme+host, so two URLs
+    differing only in a tracking parameter or a #anchor resolve to the
+    SAME id; a different path is a genuinely different one.
+
+    This strategy has a known, accepted limitation: if a vendor moves a
+    page to a new URL, this treats it as a brand-new document (loses
+    continuity) rather than recognizing it as the same one revised — the
+    tradeoff was accepted because URL identity is the only thing
+    available today, not because it's the right long-term answer. A
+    future vendor-doc-ID- or semantic-identity-based strategy (see
+    source_doc_id's docstring) would close that gap without needing any
+    caller of this function to change."""
+    if not url:
+        return ""
+    parts = urlsplit(url)
+    scheme = (parts.scheme or "https").lower()
+    netloc = parts.netloc.lower()
+    path = parts.path.rstrip("/") or "/"
+    return urlunsplit((scheme, netloc, path, "", ""))
 
 logger = logging.getLogger("AI Net Studio.Knowledge")
 
@@ -113,6 +141,51 @@ class KnowledgeEntry:
     verified_at:    str = field(default_factory=lambda: datetime.utcnow().isoformat())
     ttl_days:       int = 90
     hit_count:      int = 0
+    # sha256 over the actual knowledge content (not citation/timestamps) —
+    # lets a refresh compare "did the real content change" before
+    # re-persisting/re-embedding it, instead of always treating a
+    # re-fetch as new knowledge. Auto-computed in __post_init__ when not
+    # explicitly supplied, so every construction path (fetch(), the new
+    # Tavily ingestion pipeline, DB row reconstruction, the unverified()
+    # fallback) gets one for free with no call-site changes.
+    content_hash:   str = ""
+    # An ABSTRACTION, deliberately: "the stable identity of the real-world
+    # document this entry came from" — not "a normalized URL". Whatever
+    # computes it just has to be internally consistent (same real
+    # document -> same id, different real documents -> different ids);
+    # nothing downstream (content_hash comparison scoping in
+    # KnowledgeOrchestrator._persist_fetch_result, cache persistence)
+    # inspects its shape or assumes it's URL-derived.
+    #
+    # normalize_document_url() is TODAY's default, used only because it's
+    # the one signal every generic web fetcher already has. Two concrete
+    # upgrade paths this field was designed to absorb without a rename or
+    # a migration, whenever a source can supply something better:
+    #   - a real vendor document ID (e.g. a KB/KCS article id, a doc-set
+    #     + revision number) — survives the vendor moving the page to a
+    #     new URL, which today's URL-based default cannot.
+    #   - a semantic identity ("cisco:ios-xe:show ip ospf neighbor:
+    #     command-reference") for sources with no stable URL or doc ID at
+    #     all, keyed on what the knowledge is ABOUT rather than where it
+    #     currently lives.
+    # A caller that has one of these just passes source_doc_id= explicitly
+    # at construction time — __post_init__ below only fills in the URL-
+    # based default when the field is left empty, so this override path
+    # already exists today with no code changes needed.
+    source_doc_id:  str = ""
+
+    def __post_init__(self) -> None:
+        if not self.content_hash:
+            self.content_hash = self.compute_content_hash()
+        if not self.source_doc_id:
+            # Default/fallback strategy only -- see source_doc_id's own
+            # docstring above for why this isn't the permanent definition
+            # of canonical identity.
+            self.source_doc_id = normalize_document_url(self.citation.source_url or "")
+
+    def compute_content_hash(self) -> str:
+        basis = f"{self.syntax}\n{self.description}\n{self.example_output}".strip()
+        return hashlib.sha256(basis.encode("utf-8")).hexdigest()
 
     def is_stale(self) -> bool:
         """Check if this entry has exceeded its TTL."""
@@ -160,6 +233,8 @@ class KnowledgeEntry:
             "verified_at":    self.verified_at,
             "ttl_days":       self.ttl_days,
             "hit_count":      self.hit_count,
+            "content_hash":   self.content_hash,
+            "source_doc_id":  self.source_doc_id,
         }
 
 

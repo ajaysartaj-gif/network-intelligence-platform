@@ -197,6 +197,106 @@ def test_full_engine_run_wires_mismatch_investigation(monkeypatch):
     assert "ospf_hello_interval" in md
 
 
+# ── multi-homed device: interface pairing must not silently give up ─────────
+# Regression for a real production report: R1 had THREE OSPF-enabled
+# interfaces (a real multi-neighbor router). The user manually introduced an
+# OSPF area-ID mismatch between R1 and R2 specifically, but the Mismatch
+# Investigation produced ZERO findings for it. Root cause: without real
+# CDP/LLDP topology discovery, _infer_local_interface/_infer_remote_interface
+# only resolved a device's interface when it had EXACTLY ONE protocol-enabled
+# interface -- any device with more than one neighbor (R1 here) always fell
+# through to "ambiguous, skip", regardless of how unambiguous the ACTUAL
+# neighbor relationship being investigated was. Fix: use the specific
+# neighbor's OWN interface (already captured by _OSPF_NEIGHBOR_PARSER's
+# trailing Interface column) instead of guessing from the device as a whole.
+
+def _multi_homed_r1_gateway(r1_area="0", r2_area="0"):
+    r1 = FakeDevice("10.0.12.1", "R1")
+    r2 = FakeDevice("10.0.12.2", "R2")
+
+    # R1: three real OSPF interfaces -- only Gi1/0 faces the approved
+    # device R2; the other two face routers this test never approves.
+    r1_ospf_iface = "\n".join([
+        _ospf_interface_text(r1_area, "1.1.1.1", "BROADCAST", "10", "40", "10.0.12.1")
+            .replace("GigabitEthernet0/0", "GigabitEthernet1/0"),
+        _ospf_interface_text("0", "1.1.1.1", "BROADCAST", "10", "40", "10.0.13.1")
+            .replace("GigabitEthernet0/0", "FastEthernet0/0"),
+        _ospf_interface_text("0", "1.1.1.1", "BROADCAST", "10", "40", "10.0.14.1")
+            .replace("GigabitEthernet0/0", "GigabitEthernet2/0"),
+    ])
+    r1_ospf_nbr = "\n".join([
+        "Neighbor ID     Pri   State           Dead Time   Address         Interface",
+        "2.2.2.2       0   FULL/  -        00:00:33    10.0.12.2       GigabitEthernet1/0",
+        "9.9.9.9       0   FULL/  -        00:00:33    10.0.13.9       FastEthernet0/0",
+        "8.8.8.8       0   FULL/  -        00:00:33    10.0.14.9       GigabitEthernet2/0",
+    ])
+
+    r2_ospf_iface = _ospf_interface_text(r2_area, "2.2.2.2", "BROADCAST", "10", "40", "10.0.12.2") \
+        .replace("GigabitEthernet0/0", "GigabitEthernet1/0")
+    r2_ospf_nbr = ("Neighbor ID     Pri   State           Dead Time   Address         Interface\n"
+                  "1.1.1.1       0   FULL/  -        00:00:33    10.0.12.1       GigabitEthernet1/0\n")
+
+    responses = {
+        ("10.0.12.1", "show ip ospf interface"): r1_ospf_iface,
+        ("10.0.12.1", "show ip ospf neighbor"): r1_ospf_nbr,
+        ("10.0.12.2", "show ip ospf interface"): r2_ospf_iface,
+        ("10.0.12.2", "show ip ospf neighbor"): r2_ospf_nbr,
+    }
+
+    def send(device, cmds):
+        return {c: responses.get((device.ip, c), f"% unrecognized: {c}") for c in cmds}
+
+    def hint_provider(device):
+        return {"device_type": device.device_type, "hostname": device.hostname}
+
+    gw = VendorGateway(send=send, hint_provider=hint_provider)
+    ip_to_dev = {r1.ip: r1, r2.ip: r2}
+    return gw, ip_to_dev
+
+
+def test_multi_homed_device_resolves_the_specific_neighbors_own_interface():
+    """Unit-level proof: R1 has 3 OSPF interfaces. enumerate_relationship
+    must still resolve the R1<->R2 pair to R1's Gi1/0 specifically (the
+    interface the neighbor table says R2 is actually on) instead of giving
+    up because R1 as a whole has more than one OSPF interface."""
+    from core.troubleshooting.strategies.gateway_adapter import GatewayDeviceAdapter
+
+    gw, ip_to_dev = _multi_homed_r1_gateway()
+    adapter = GatewayDeviceAdapter(gw, ip_to_dev, "ospf_adjacency")
+    instances = adapter.enumerate_relationship("ospf_adjacency", "")
+
+    assert len(instances) == 1, instances
+    inst = instances[0]
+    assert {inst.local.device, inst.remote.device} == {"10.0.12.1", "10.0.12.2"}
+    local = inst.local if inst.local.device == "10.0.12.1" else inst.remote
+    assert local.context == "GigabitEthernet1/0", local.context
+
+
+def test_multi_homed_device_area_mismatch_is_seeded_not_silently_skipped(monkeypatch):
+    """Real end-to-end reproduction of the reported bug: R1 (3 OSPF
+    interfaces) and R2 have genuinely different Area IDs on the link
+    between them. Before the fix, run_mismatch_investigation returned
+    seeded=False here -- not because the comparison logic was wrong, but
+    because interface pairing gave up on R1 for having more than one OSPF
+    interface, regardless of how unambiguous THIS specific neighbor was."""
+    _no_real_topology(monkeypatch)
+    gw, ip_to_dev = _multi_homed_r1_gateway(r1_area="0", r2_area="1")
+    session = Session()
+    hmgr = HypothesisManager(session)
+    graph = EvidenceGraph()
+
+    seeded = run_mismatch_investigation(
+        relationship_type="ospf_adjacency", devices=list(ip_to_dev.values()),
+        ip_to_device=ip_to_dev, gateway=gw, ai_call=None,
+        session=session, hmgr=hmgr, graph=graph,
+    )
+    assert seeded is True
+    assert any("ospf_area_id" in h.statement for h in session.hypotheses), \
+        [h.statement for h in session.hypotheses]
+    top = session.top()
+    assert top is not None and top.confidence > 0.5, (top.statement if top else None)
+
+
 # ── safety: missing gateway / no relationship keyword never raises ──────────
 def test_no_gateway_returns_false_not_exception():
     session = Session()

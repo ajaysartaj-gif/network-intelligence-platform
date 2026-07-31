@@ -1,0 +1,9 @@
+# Auto-drafted by core.knowledge.compiler.auto_draft from corpus/general/ prose — published without a review gate; each PARAM's trailing comment cites its source section for later audit.
+
+ENUMERATE: neighborship establishment
+HEALTHY: established
+
+PARAM: autonomous_system_number | must_equal | true | neighborship establishment | neighbor never forms | always  # source: eigrp.txt §Common failure symptom: neighbor never forms — AS number or
+PARAM: subnet | must_equal | true | neighborship establishment | neighbor never forms | always  # source: eigrp.txt §Common failure symptom: neighbor never forms — AS number or
+PARAM: k_values | must_equal | true | neighborship establishment | neighbor flaps or never forms | always  # source: eigrp.txt §Common failure symptom: neighbor flaps or never forms — K-value mismatch
+PARAM: authentication | must_equal | true | neighborship establishment | neighbor drops due to authentication failure | authentication is configured  # source: eigrp.txt §Common failure symptom: neighbor drops due to authentication

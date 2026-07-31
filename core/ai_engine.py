@@ -64,7 +64,7 @@ def get_client():
 # ASK AI
 # =========================================================
 
-def ask_ai(query: str) -> str:
+def ask_ai(query: str, max_tokens: int = 800) -> str:
     client = get_client()
     if not client:
         return "AI is unavailable. Please check your GROQ_API_KEY in .streamlit/secrets.toml"
@@ -96,7 +96,7 @@ RESPONSE GUIDELINES:
                 }
             ],
             temperature=0.1,
-            max_tokens=800
+            max_tokens=max_tokens
         )
         return response.choices[0].message.content
     except Exception as e:

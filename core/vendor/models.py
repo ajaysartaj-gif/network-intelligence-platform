@@ -47,7 +47,16 @@ class NormalizedObject:
         return self.attributes.get(key, default)
 
     def summary(self) -> str:
-        kv = ", ".join(f"{k}={v}" for k, v in list(self.attributes.items())[:6])
+        # This text is the ONLY channel gateway-mode evidence collection has
+        # back to the reasoning engine (core.troubleshooting.engine's
+        # _gateway_object_facts re-parses exactly this string) -- an earlier
+        # `[:6]` cap here silently discarded whichever attributes didn't fit
+        # in the first six by dict-insertion order, which made real,
+        # already-collected facts (e.g. an OSPF interface's configured Area,
+        # or its authentication type) simply vanish before they could ever
+        # become comparable evidence, entirely depending on where a given
+        # adapter happened to insert that key. All attributes are included.
+        kv = ", ".join(f"{k}={v}" for k, v in self.attributes.items())
         return f"{self.type}[{self.id or '-'}]@{self.device or '-'} {{{kv}}}"
 
 

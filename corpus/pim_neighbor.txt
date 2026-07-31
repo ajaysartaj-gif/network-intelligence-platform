@@ -1,0 +1,11 @@
+# Auto-drafted by core.knowledge.compiler.auto_draft from corpus/general/ prose — published without a review gate; each PARAM's trailing comment cites its source section for later audit.
+
+ENUMERATE: multicast_traffic
+HEALTHY: pim_neighbor_formed, rpf_check_passed
+
+PARAM: pim_enabled | must_equal | true | pim_sparse_mode_enabled | no_pim_neighbor_forms | interface_level  # source: multicast_pim.txt §Common failure symptom: no PIM neighbor forms on a link
+PARAM: pim_hello_interval | must_equal | true | pim_hello_interval_configured | pim_neighbor_formation_fails | interface_level  # source: multicast_pim.txt §Common failure symptom: no PIM neighbor forms on a link
+PARAM: pim_version | must_equal | true | pim_version_configured | pim_neighbor_formation_fails | interface_level  # source: multicast_pim.txt §Common failure symptom: no PIM neighbor forms on a link
+PARAM: pim_mode | must_equal | true | pim_mode_configured | pim_neighbor_formation_fails | interface_level  # source: multicast_pim.txt §Common failure symptom: no PIM neighbor forms on a link
+PARAM: rp_address | must_equal | true | rp_address_configured | receivers_cannot_get_traffic | domain_level  # source: multicast_pim.txt §Common failure symptom: missing or unreachable Rendezvous Point (RP)
+PARAM: igmp_version | must_equal | true | igmp_version_configured | receiver_never_gets_added_to_mroute | interface_level  # source: multicast_pim.txt §Common failure symptom: IGMP — receiver never gets added to the local mroute

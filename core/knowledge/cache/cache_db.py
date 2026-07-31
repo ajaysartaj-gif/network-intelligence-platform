@@ -58,6 +58,8 @@ CREATE TABLE IF NOT EXISTS knowledge_cache (
     verified_at     TEXT NOT NULL,
     ttl_days        INTEGER DEFAULT 90,
     hit_count       INTEGER DEFAULT 0,
+    content_hash    TEXT DEFAULT '',
+    source_doc_id   TEXT DEFAULT '',
     UNIQUE(vendor, platform, command)
 );
 
@@ -102,7 +104,20 @@ class KnowledgeCacheDB:
         with self._conn_lock, self._connect() as conn:
             conn.executescript(SCHEMA_SQL)
             conn.commit()
+            self._migrate_add_column(conn, "content_hash", "TEXT DEFAULT ''")
+            self._migrate_add_column(conn, "source_doc_id", "TEXT DEFAULT ''")
         logger.info(f"Knowledge cache initialized at {self.db_path}")
+
+    @staticmethod
+    def _migrate_add_column(conn: sqlite3.Connection, column: str, decl: str) -> None:
+        """CREATE TABLE IF NOT EXISTS only affects brand-new DBs — a
+        pre-existing knowledge.db from before this column existed needs an
+        explicit ALTER TABLE. Safe to call on every startup: no-ops once
+        the column is already there."""
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(knowledge_cache)").fetchall()}
+        if column not in cols:
+            conn.execute(f"ALTER TABLE knowledge_cache ADD COLUMN {column} {decl}")
+            conn.commit()
 
     # ── CRUD ──────────────────────────────────────────────────────────────────
 
@@ -161,8 +176,9 @@ class KnowledgeCacheDB:
                        (vendor, platform, command, syntax, description,
                         example_output, min_version, source_url, source_title,
                         source_name, source_type, confidence,
-                        fetched_at, verified_at, ttl_days, hit_count)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        fetched_at, verified_at, ttl_days, hit_count, content_hash,
+                        source_doc_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT(vendor, platform, command) DO UPDATE SET
                          syntax = excluded.syntax,
                          description = excluded.description,
@@ -174,7 +190,9 @@ class KnowledgeCacheDB:
                          source_type = excluded.source_type,
                          confidence = excluded.confidence,
                          verified_at = excluded.verified_at,
-                         ttl_days = excluded.ttl_days
+                         ttl_days = excluded.ttl_days,
+                         content_hash = excluded.content_hash,
+                         source_doc_id = excluded.source_doc_id
                     """,
                     (
                         entry.vendor.lower(),
@@ -193,6 +211,8 @@ class KnowledgeCacheDB:
                         entry.verified_at,
                         entry.ttl_days,
                         entry.hit_count,
+                        entry.content_hash,
+                        entry.source_doc_id,
                     ),
                 )
                 conn.commit()
@@ -200,6 +220,25 @@ class KnowledgeCacheDB:
             except Exception as exc:
                 logger.error(f"Cache upsert failed: {exc}")
                 return False
+
+    def touch(self, vendor: str, command: str, platform: str = "") -> bool:
+        """A re-fetch whose content_hash matched what's already stored:
+        the document hasn't actually changed, so just extend the
+        freshness clock (verified_at) instead of rewriting every field —
+        the "only re-ingest if the document has changed" half of the
+        refresh-efficiency contract. Returns False if no matching row
+        exists (caller should upsert() instead in that case)."""
+        vendor = (vendor or "").lower().strip()
+        command = (command or "").strip()
+        platform = (platform or "").lower().strip()
+        with self._conn_lock, self._connect() as conn:
+            cur = conn.execute(
+                """UPDATE knowledge_cache SET verified_at = ?
+                   WHERE vendor = ? AND command = ? AND platform = ?""",
+                (datetime.utcnow().isoformat(), vendor, command, platform),
+            )
+            conn.commit()
+            return cur.rowcount > 0
 
     def delete(self, vendor: str, command: str, platform: str = "") -> bool:
         """Remove a specific entry."""
@@ -306,6 +345,12 @@ class KnowledgeCacheDB:
             verified_at=row["verified_at"],
             ttl_days=row["ttl_days"] or 90,
             hit_count=row["hit_count"] or 0,
+            # Pass the STORED hash/doc-id through explicitly -- KnowledgeEntry's
+            # __post_init__ only auto-computes these when empty, so a row
+            # reconstructed from the DB keeps exactly what it was
+            # persisted with rather than silently recomputing new ones.
+            content_hash=row["content_hash"] if "content_hash" in row.keys() else "",
+            source_doc_id=row["source_doc_id"] if "source_doc_id" in row.keys() else "",
         )
 
 

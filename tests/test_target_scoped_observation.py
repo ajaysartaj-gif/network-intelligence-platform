@@ -168,3 +168,86 @@ def test_reinvestigation_of_one_neighbor_is_not_confused_by_a_different_healthy_
     # Must be Down (the NAMED neighbor's real state) -- NOT Full (the other one).
     assert s.goal_mismatch["observed_state"] == "Down", s.goal_mismatch
     assert all(ns["subject"].endswith("192.168.20.2") for ns in s.goal_mismatch["neighbor_states"])
+
+
+# ── unit: _query_target_ips() also resolves hostnames, not just literal IPs ─
+# Regression for a second, distinct real report: "why OSPF have a issue at
+# R1 and R2" (an ORDINARY first-time question, not the internal
+# re-investigation phrasing) named both routers by HOSTNAME only. The
+# original _query_target_ip() only recognizes a literal dotted IP after the
+# word "neighbor", so it returned None here -- silently falling back to
+# "the most recent neighbor-state fact anywhere in the session", which
+# turned out to belong to one of R1's OTHER, unrelated OSPF neighbors (R1
+# has multiple OSPF-enabled interfaces). That unrelated healthy 'FULL' state
+# then incorrectly ruled out the area-ID-mismatch signature the user had
+# actually (deliberately) introduced between R1 and R2 specifically.
+
+def test_query_target_ips_resolves_hostnames_named_in_an_ordinary_query():
+    r1 = FakeDevice("192.168.96.136", "R1")
+    r2 = FakeDevice("192.168.20.2", "R2")
+    eng = _engine(devices=[r1, r2])
+    ips = eng._query_target_ips("why OSPF have a issue at R1 and R2")
+    assert set(ips) == {"192.168.96.136", "192.168.20.2"}
+
+
+def test_query_target_ips_is_empty_for_a_query_naming_no_known_device():
+    r1 = FakeDevice("192.168.96.136", "R1")
+    eng = _engine(devices=[r1])
+    assert eng._query_target_ips("why OSPF stuck in ExStart") == []
+
+
+def test_observed_protocol_state_obs_accepts_a_list_and_matches_either_ip():
+    eng = _engine()
+    session = Session(goal=Goal(query="why OSPF have a issue at R1 and R2"))
+    # An unrelated, healthy neighbor on R1 -- must be ignored.
+    session.observations.append(Observation(device="192.168.96.136", subject="neighbor.192.168.21.2",
+                                            attribute="state", value="Full"))
+    # The actual R1<->R2 relationship's real, broken state.
+    session.observations.append(Observation(device="192.168.96.136", subject="neighbor.192.168.20.2",
+                                            attribute="state", value="Down"))
+    obs = eng._observed_protocol_state_obs(session, target_ip=["192.168.96.136", "192.168.20.2"])
+    assert obs is not None and obs.value == "Down" and obs.subject.endswith("192.168.20.2")
+
+
+def test_ordinary_hostname_query_is_not_confused_by_an_unrelated_neighbor_on_r1(monkeypatch):
+    """Real end-to-end reproduction of the reported bug: R1 has THREE OSPF
+    neighbors (matching the report's three OSPF-enabled interfaces) — two
+    healthy (FULL) and one, R2, genuinely stuck (Down, e.g. from the area-ID
+    mismatch the user injected). The user's actual question names both
+    routers by hostname only, with no IP and none of the internal
+    re-investigation phrasing. The deterministic compiled-signature
+    elimination must be scoped to the R1<->R2 relationship, never a
+    coincidentally-healthy OTHER neighbor on R1."""
+    _no_real_topology(monkeypatch)
+    r1 = FakeDevice("192.168.96.136", "R1")
+    r2 = FakeDevice("192.168.20.2", "R2")
+
+    def send(device, cmds):
+        text = (
+            "Neighbor ID     Pri   State           Dead Time   Address         Interface\n"
+            "192.168.21.2       1   FULL/DR        00:00:33    192.168.21.2       GigabitEthernet2/0\n"
+            "192.168.22.2       1   FULL/DR        00:00:35    192.168.22.2       GigabitEthernet1/0\n"
+            "192.168.20.2       1   DOWN/DROTHER   00:00:36    192.168.20.2       FastEthernet0/0\n"
+        )
+        return {c: text for c in cmds}
+
+    gw = VendorGateway(send=send, hint_provider=lambda d: {"device_type": "cisco_ios"})
+    eng = TroubleshootingEngine(ai_call=lambda p: "", devices=[r1, r2], gateway=gw,
+                                config=TSConfig(max_steps=6))
+
+    report = eng.run("why OSPF have a issue at R1 and R2")
+    s = report.session
+
+    target_ips = eng._query_target_ips("why OSPF have a issue at R1 and R2")
+    assert set(target_ips) == {"192.168.96.136", "192.168.20.2"}
+    obs = eng._observed_protocol_state_obs(s, target_ip=target_ips)
+    assert obs is not None
+    # Must be Down (R2's real state) -- NOT Full (R1's OTHER, unrelated neighbors).
+    assert obs.value.upper() == "DOWN", obs
+    assert obs.subject.endswith("192.168.20.2")
+
+    # No deterministic elimination reason may cite the unrelated 'Full' state
+    # as grounds for ruling out a signature -- that was the exact reported bug.
+    bogus = [e for e in s.evidence
+             if "deterministic-state-match" in (e.reason or "") and "'Full'" in (e.reason or "")]
+    assert not bogus, [e.reason for e in bogus]

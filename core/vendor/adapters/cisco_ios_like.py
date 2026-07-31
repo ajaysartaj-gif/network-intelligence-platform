@@ -108,6 +108,15 @@ class IosLikeAdapter(VendorAdapter):
         # most commonly reported real STP complaint (an access port BPDU-
         # Guard shut down) would be structurally invisible to this adapter,
         # the same class of gap MTU was for OSPF's ExStart above.
+        # "show standby brief" (the primary command above) reports only
+        # interface/group/priority/preempt-flag/state — it has NO virtual
+        # IP, version, authentication, or hello/hold timer columns at all.
+        # Those 4 Mismatch Investigation parameters (hsrp_virtual_ip,
+        # hsrp_version, hsrp_auth, hsrp_timers) were declared in the corpus
+        # from day one but structurally unreadable without this second,
+        # verbose command.
+        if operation.name == Op.GET_INTERFACE_DETAILS and proto == "hsrp":
+            commands.append(f"show standby{suffix}")
         if operation.name == Op.GET_INTERFACE_DETAILS and proto == "stp":
             commands.append("show interfaces status")
             # The PLAIN "show interfaces status" above only ever shows a
@@ -217,8 +226,59 @@ class IosLikeAdapter(VendorAdapter):
                         mm = re.search(pat, block)
                         if mm:
                             attrs[key] = mm.group(1)
+                    # ospf_auth and ospf_network_mask were declared in
+                    # corpus/ospf_adjacency.txt from day one but never
+                    # emitted at all — both values are already sitting in
+                    # this SAME command's output, just not extracted yet.
+                    # Explicit "none" (not absent) when no auth line is
+                    # present, so a genuine one-side-has-auth/other-doesn't
+                    # mismatch compares as a real difference rather than
+                    # one side silently reporting "unavailable".
+                    if re.search(r"Message digest authentication enabled", block):
+                        attrs["auth"] = "md5"
+                    elif re.search(r"Simple password authentication enabled", block):
+                        attrs["auth"] = "simple"
+                    else:
+                        attrs["auth"] = "none"
+                    mask_m = re.search(r"Internet Address \S+/(\d+)", block)
+                    if mask_m:
+                        attrs["network_mask"] = mask_m.group(1)
                     out.append(obj(ObjectType.INTERFACE, device=ip, id=mi.group(1),
                                    ospf=True, **attrs))
+            elif "standby" in low and "brief" not in low:
+                # Verbose "show standby" — id uses the SAME "iface:group"
+                # composite _HSRP_STANDBY_PARSER's id_template produces, so
+                # gateway_adapter.py's _interfaces() merge-by-id picks up
+                # both this command's and "show standby brief"'s attributes
+                # on the identical NormalizedObject rather than two
+                # different ones.
+                for block in re.split(r"\n(?=\S)", t):
+                    mh = re.match(r"(\S+)\s*-\s*Group\s+(\d+)(?:\s*\(version\s+(\d+)\))?", block)
+                    if not mh:
+                        continue
+                    iface, grp, ver = mh.group(1), mh.group(2), mh.group(3) or "1"
+                    attrs = {"version": ver}
+                    mv = re.search(r"Virtual IP address is (\S+)", block)
+                    if mv:
+                        attrs["virtual_ip"] = mv.group(1)
+                    mt = re.search(r"Hello time (\d+) sec, hold time (\d+) sec", block)
+                    if mt:
+                        attrs["timers"] = f"{mt.group(1)}/{mt.group(2)}"
+                    # Real IOS prints one of: `Authentication text "STRING"`,
+                    # `Authentication MD5, key-string ...`, or no
+                    # Authentication line at all (no auth configured) — the
+                    # 3-way distinction matters because "MUST_EQUAL" is
+                    # violated by ANY of {differing string, differing type,
+                    # one side configured/other not}, not just a differing
+                    # string.
+                    ma = re.search(r'Authentication text "([^"]+)"', block)
+                    if ma:
+                        attrs["auth"] = ma.group(1)
+                    elif re.search(r"Authentication MD5", block):
+                        attrs["auth"] = "md5"
+                    else:
+                        attrs["auth"] = "none"
+                    out.append(obj(ObjectType.INTERFACE, device=ip, id=f"{iface}:{grp}", **attrs))
             elif low.strip() == "show interface" or low.strip().startswith("show interface "):
                 # Long-form "show interface [name]" — singular, deliberately
                 # distinct from "show interfaces" (plural) below, which is a

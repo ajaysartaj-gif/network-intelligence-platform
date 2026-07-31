@@ -1,0 +1,13 @@
+# Auto-drafted by core.knowledge.compiler.auto_draft from corpus/general/ prose — published without a review gate; each PARAM's trailing comment cites its source section for later audit.
+
+ENUMERATE: establish vxlan evpn peering
+HEALTHY: established
+
+PARAM: underlay_reachability | must_equal | true | confirm underlay reachability | evpn bgp peering never comes up | always  # source: vxlan_evpn.txt §Common failure symptom: EVPN BGP peering never comes up
+PARAM: l2vpn_evpn_address_family | must_equal | true | confirm l2vpn evpn address-family is activated | evpn bgp peering never comes up | always  # source: vxlan_evpn.txt §Common failure symptom: EVPN BGP peering never comes up
+PARAM: route_reflector_client_relationship | must_equal | true | confirm route-reflector client relationship symmetry | evpn bgp peering never comes up | when using route reflectors  # source: vxlan_evpn.txt §Common failure symptom: EVPN BGP peering never comes up
+PARAM: as_path_ebgp_multihop | must_equal | true | confirm as-path/ebgp-multihop configuration | evpn bgp peering never comes up | when using ebgp underlay  # source: vxlan_evpn.txt §Common failure symptom: EVPN BGP peering never comes up
+PARAM: route_target_import_export | must_equal | true | confirm route-target import/export match | no routes or incorrect routes | always  # source: vxlan_evpn.txt §Common failure symptom: BGP EVPN session is Established but no routes
+PARAM: vni_provisioning | must_equal | true | confirm vni is provisioned in nve/vtep | no routes or incorrect routes | always  # source: vxlan_evpn.txt §Common failure symptom: BGP EVPN session is Established but no routes
+PARAM: mac_table_aging_timer | must_differ | false | check mac-table aging timer | intermittent reachability to specific hosts | when silent hosts are present  # source: vxlan_evpn.txt §Common failure symptom: intermittent reachability to specific (silent) hosts
+PARAM: vlan_to_vni_mapping | must_equal | true | confirm vlan-to-vni mapping consistency | vni/vlan mapping inconsistency | always  # source: vxlan_evpn.txt §Common failure symptom: VNI/VLAN mapping inconsistency across VTEPs

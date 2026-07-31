@@ -168,6 +168,16 @@ def _load_secrets_into_env() -> None:
         "GNS3_TELNET_USER", "GNS3_ROUTER_USER", "GNS3_ROUTER_PASS",
         "GNS3_LOG_GITHUB_URL", "GNS3_LOG_DEFAULT_DEVICE", "GNS3_LOG_GITHUB_TOKEN",
         "GROQ_API_KEY",
+        # Real search API backing live vendor-doc lookups (core/knowledge/
+        # fetchers/*.py) — DuckDuckGo's keyless HTML scrape that used to
+        # back this now reliably gets blocked by DuckDuckGo's own anti-bot
+        # detection (confirmed by hand: HTTP 202 challenge page, not real
+        # results, for every automated request). Tavily's free tier
+        # (1,000 credits/month, no credit card) is genuinely free, unlike
+        # Brave's (killed Feb 2026, now requires a card on file). Optional:
+        # fetchers fall back to the (now largely non-functional) DDG
+        # scrape if absent.
+        "TAVILY_API_KEY",
         # Operational Memory shared brain (Postgres/Supabase). When present,
         # all instances read/write ONE cloud brain in real time; absent, the
         # service falls back to a local SQLite file automatically. Both the

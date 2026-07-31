@@ -257,6 +257,17 @@ def render_remediation_fix(spec: RemediationRecipe, protocol: str, params: Dict[
     ctx.update(proto=protocol, iface=iface, neighbor_ip=neighbor_ip,
               fhrp_iface=fhrp_iface, fhrp_group=fhrp_group,
               local_as=params.get("local_as", ""))
+    # knowledge/normalize.py's _ntype canonicalizes to underscore form
+    # ("point_to_point") for comparison purposes — Cisco's actual CLI
+    # keyword is hyphenated ("point-to-point"). Translating only here (not
+    # in the comparison path) keeps the MUST_EQUAL check vendor-neutral
+    # while still rendering real, valid IOS syntax.
+    if "network_type" in ctx:
+        ctx["network_type"] = {
+            "point_to_point": "point-to-point",
+            "point_to_multipoint": "point-to-multipoint",
+            "nbma": "non-broadcast",
+        }.get(ctx["network_type"], ctx["network_type"])
     # A recipe's context_param names whichever piece of scoping evidence
     # (interface / neighbor_ip / local_as / errdisable_reason / fhrp_iface)
     # its command references. Two cases require it regardless of
@@ -459,12 +470,24 @@ _OSPF_SIGNATURES = [
                      likely_cause="No hello packets exchanged — Layer 1/2 connectivity issue, "
                                  "OSPF not enabled on the interface, or an ACL blocking IP protocol 89",
                      evidence_fields=["admin_state"], confidence=0.55),
+    # A distinct real cause from the one above, not a variant of it: real
+    # IOS behavior rejects a hello with a mismatched area ID outright at
+    # receipt (%OSPF-4-ERRRCV), so the neighbor never even reaches Init —
+    # it stays at Down, same as a Layer 1/2 outage, but for a completely
+    # different (and directly fixable) reason. Previously this was folded
+    # into the Init signature below, which is wrong: Init means a hello
+    # WAS accepted and negotiation stalled, which never happens for an
+    # area mismatch.
+    FailureSignature(protocol="ospf", stuck_state="Down",
+                     likely_cause="OSPF area ID mismatch between neighbors — the hello packet is "
+                                 "rejected outright before the neighbor state can advance",
+                     evidence_fields=["area"], confidence=0.6),
     FailureSignature(protocol="ospf", stuck_state="Attempt",
                      likely_cause="Statically configured NBMA neighbor not responding to unicast hellos",
                      evidence_fields=[], confidence=0.5),
     FailureSignature(protocol="ospf", stuck_state="Init",
-                     likely_cause="Hello/dead interval or area ID mismatch between neighbors",
-                     evidence_fields=["timer_type", "areas"], confidence=0.75),
+                     likely_cause="Hello or dead interval mismatch between neighbors",
+                     evidence_fields=["hello", "dead"], confidence=0.75),
     # 2-Way is often a NORMAL stable state between two DROTHERs on a
     # broadcast network (no adjacency required) — flagged only because a
     # point-to-point/point-to-multipoint network type expecting full
@@ -522,6 +545,33 @@ _OSPF_CISCO_RECIPES = [
                       context_template="interface {iface}",
                       command_template="ip ospf {process} area {area}",
                       defaults={"process": "1", "area": "0"}),
+    # Duplicate router-id isn't state-shaped (no single FSM stuck_state
+    # names it — it manifests as flapping/unreliable adjacency rather than
+    # a stall), so this has no RemediationPolicy/trigger_state entry above;
+    # it's reached only via the Mismatch Investigation's ospf_router_id
+    # parameter (_INTENT_FOR_PARAM in gateway_adapter.py), never via the
+    # compiled-signature path.
+    RemediationRecipe(intent_name="fix_duplicate_router_id",
+                      context_template="router ospf {process}", context_param="process",
+                      command_template="router-id {router_id}",
+                      defaults={"process": "1"}),
+    # These 4 were already mapped in gateway_adapter.py's _INTENT_FOR_PARAM
+    # (set_ospf_hello_interval / set_ospf_dead_interval / set_interface_mtu /
+    # set_ospf_network_type) but had no matching recipe at all — a
+    # Mismatch-Investigation-detected violation on any of these 4 params
+    # produced "! adapter declined remediation" regardless of confidence.
+    RemediationRecipe(intent_name="set_ospf_hello_interval",
+                      context_template="interface {iface}",
+                      command_template="ip ospf hello-interval {hello}"),
+    RemediationRecipe(intent_name="set_ospf_dead_interval",
+                      context_template="interface {iface}",
+                      command_template="ip ospf dead-interval {dead}"),
+    RemediationRecipe(intent_name="set_interface_mtu",
+                      context_template="interface {iface}",
+                      command_template="ip mtu {mtu}"),
+    RemediationRecipe(intent_name="set_ospf_network_type",
+                      context_template="interface {iface}",
+                      command_template="ip ospf network {network_type}"),
 ]
 
 _OSPF_VERIFICATION = VerificationTemplate(
@@ -898,6 +948,30 @@ _HSRP_CISCO_RECIPES = [
     RemediationRecipe(intent_name="add_hsrp_preempt",
                       context_template="interface {fhrp_iface}", context_param="fhrp_iface",
                       command_template="standby {fhrp_group} preempt"),
+    # These 4 back the Mismatch Investigation's hsrp_priority/virtual_ip/
+    # auth/version parameters (gateway_adapter.py's _INTENT_FOR_PARAM) — a
+    # detected violation on any of these previously had no path to a fix
+    # at all (0 of HSRP's 6 declared parameters were readable OR fixable
+    # before this pass). hsrp_group_number and hsrp_timers are declared and
+    # readable but deliberately left without a recipe here: renumbering a
+    # group is a multi-line structural change, not a single safe command,
+    # and timers are stored as a single "hello/hold" string this template
+    # substitution can't safely split back into two positions.
+    RemediationRecipe(intent_name="set_hsrp_priority",
+                      context_template="interface {fhrp_iface}", context_param="fhrp_iface",
+                      command_template="standby {fhrp_group} priority {prio}"),
+    RemediationRecipe(intent_name="set_hsrp_virtual_ip",
+                      context_template="interface {fhrp_iface}", context_param="fhrp_iface",
+                      command_template="standby {fhrp_group} ip {virtual_ip}"),
+    # Only covers the plain-text authentication case (the common lab
+    # config) — real MD5 auth needs a key-string value this parameter
+    # doesn't carry, so aligning to an MD5 peer still needs a human.
+    RemediationRecipe(intent_name="set_hsrp_auth",
+                      context_template="interface {fhrp_iface}", context_param="fhrp_iface",
+                      command_template="standby {fhrp_group} authentication {auth}"),
+    RemediationRecipe(intent_name="set_hsrp_version",
+                      context_template="interface {fhrp_iface}", context_param="fhrp_iface",
+                      command_template="standby version {version}"),
 ]
 
 _HSRP_VERIFICATION = VerificationTemplate(
@@ -949,11 +1023,16 @@ _VRRP_BRIEF_PARSER = TableRowParserSpec(
     protocol="vrrp", command_key="vrrp brief",
     # Real "show vrrp brief" rows: interface, group, priority, a timer
     # value, then two single-letter Y/N columns (Own, Pre[empt]) before
-    # the state name — anchored the same way as HSRP.
-    row_pattern=(r"^(?P<iface>\S+)\s+(?P<grp>\d+)\s+(?P<prio>\d+)\s+\S+\s+"
+    # the state name — anchored the same way as HSRP. The timer column
+    # (Master's advertisement interval / this router's Master-down
+    # interval) used to be matched but discarded — the Mismatch
+    # Investigation's auto-drafted advertisement_interval parameter needs
+    # it, and it was already sitting in this same command's output.
+    row_pattern=(r"^(?P<iface>\S+)\s+(?P<grp>\d+)\s+(?P<prio>\d+)\s+(?P<timer>\S+)\s+"
                 r"(?P<own>[YN])\s+(?P<pre>[YN])\s+(?P<state>Initialize|Backup|Master)\b"),
     id_template="{iface}:{grp}",
-    extra_attrs={"preempt_enabled": lambda m: "true" if m.group("pre").upper() == "Y" else "false"},
+    extra_attrs={"preempt_enabled": lambda m: "true" if m.group("pre").upper() == "Y" else "false",
+                "adv_interval": lambda m: m.group("timer")},
     success_state="MASTER",
 )
 
@@ -967,6 +1046,15 @@ _VRRP_CISCO_RECIPES = [
     RemediationRecipe(intent_name="enable_vrrp_preempt",
                       context_template="interface {fhrp_iface}", context_param="fhrp_iface",
                       command_template="vrrp {fhrp_group} preempt"),
+    # Backs the auto-drafted advertisement_interval parameter
+    # (corpus/vrrp_pairing.txt) — real syntax; the mismatched interval
+    # itself is what causes "multiple routers simultaneously claim
+    # Master" (a Backup's Master-down timer derives from the advertised
+    # interval, so a large gap between the two routers' configured
+    # intervals lets a Backup time out and claim Master prematurely).
+    RemediationRecipe(intent_name="set_vrrp_advertisement_interval",
+                      context_template="interface {fhrp_iface}", context_param="fhrp_iface",
+                      command_template="vrrp {fhrp_group} timers advertise {adv_interval}"),
 ]
 
 _VRRP_VERIFICATION = VerificationTemplate(

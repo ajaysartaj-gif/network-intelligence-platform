@@ -52,11 +52,36 @@ READ_INTENT_ATTR = {
     "ospf_router_id": "router_id",
     "ospf_auth": "auth",
     "ospf_network_mask": "network_mask",
+    # HSRP's 6 corpus/hsrp_pairing.txt parameters were declared from day
+    # one but had ZERO entries here — every one was structurally
+    # unreadable regardless of adapter support. hsrp_group_number/priority
+    # were already emitted by the existing "show standby brief" parser
+    # (attrs "grp"/"prio"); the other 4 needed cisco_ios_like.py's new
+    # verbose "show standby" parsing (see its GET_INTERFACE_DETAILS branch)
+    # to be readable at all.
+    "hsrp_group_number": "grp",
+    "hsrp_priority": "prio",
+    "hsrp_virtual_ip": "virtual_ip",
+    "hsrp_version": "version",
+    "hsrp_auth": "auth",
+    "hsrp_timers": "timers",
+    # Auto-drafted corpus/vrrp_pairing.txt params — keyed by their
+    # read_intent field, which the drafter named distinctly from the
+    # param's own `name` (e.g. name="advertisement_interval",
+    # read_intent="master_election"). "show vrrp brief"'s Time column was
+    # previously matched-but-discarded; now captured as "adv_interval".
+    "master_election": "adv_interval",
+    "master_reclaim": "preempt_enabled",
 }
 
 # relationship_type (as declared in the corpus/KP) -> the gateway Operation
 # protocol parameter used to collect neighbors/interfaces for it.
 RELATIONSHIP_PROTOCOL = {
+    "mpls_l3vpn_peering": "mpls_l3vpn",
+    "vxlan_evpn_peering": "vxlan_evpn",
+    "pim_neighbor": "multicast_pim",
+    "eigrp_adjacency": "eigrp",
+    "vrrp_pairing": "vrrp",
     "ospf_adjacency": "ospf",
     "hsrp_pairing": "hsrp",
 }
@@ -68,6 +93,27 @@ _INTENT_FOR_PARAM = {
     "ospf_dead_interval": "set_ospf_dead_interval",
     "interface_mtu": "set_interface_mtu",
     "ospf_network_type": "set_ospf_network_type",
+    # Reuses the existing enable_ospf_on_interface / fix_duplicate_router_id
+    # Cisco recipes (core.knowledge.compiler.protocol_registry) — a
+    # Mismatch-Investigation-detected area or router-id violation previously
+    # had no remediation mapping at all here and silently produced no fix.
+    "ospf_area_id": "enable_ospf_on_interface",
+    "ospf_router_id": "fix_duplicate_router_id",
+    # hsrp_group_number and hsrp_timers are deliberately absent — see the
+    # recipes' own docstring in protocol_registry.py for why (renumbering a
+    # group isn't a single safe command; timers are one packed string this
+    # template substitution can't split back into two positions).
+    "hsrp_priority": "set_hsrp_priority",
+    "hsrp_virtual_ip": "set_hsrp_virtual_ip",
+    "hsrp_auth": "set_hsrp_auth",
+    "hsrp_version": "set_hsrp_version",
+    # advertisement_interval reuses a new dedicated recipe; preempt_setting
+    # reuses the SAME enable_vrrp_preempt intent the compiled Backup
+    # signature already uses — both fixes are the identical command
+    # regardless of which path (FSM signature vs. Mismatch Investigation)
+    # detected the problem.
+    "advertisement_interval": "set_vrrp_advertisement_interval",
+    "preempt_setting": "enable_vrrp_preempt",
 }
 
 
@@ -134,16 +180,53 @@ class GatewayDeviceAdapter(DeviceAdapter):
         return {k: v for k, v in self._interfaces(device_ip).items()
                 if v.get("neighbor_count") is not None}
 
-    def _infer_local_interface(self, device_ip: str) -> Optional[str]:
-        """Which local interface this neighbor was seen on. Unambiguous when the
-        device has exactly one protocol-enabled interface (the single-link MVP
-        case); otherwise honestly unresolved (returns None) rather than guessed."""
+    def _infer_local_interface(self, device_ip: str, nbr: Any = None) -> Optional[str]:
+        """Which local interface this neighbor was seen on.
+
+        Prefers the EXACT interface the protocol's own neighbor table
+        already reports for THIS specific neighbor (e.g. OSPF's "show ip
+        ospf neighbor" trailing Interface column, captured by
+        _OSPF_NEIGHBOR_PARSER's extra_attrs) when the caller has that
+        neighbor object in hand. This resolves a multi-homed device (more
+        than one protocol-enabled interface — real routers with several
+        neighbors on different links, not just the single-link MVP case)
+        exactly, without needing real CDP/LLDP topology discovery at all.
+        Before this, a device with >1 OSPF interface always fell through to
+        the single-interface heuristic below and got skipped entirely —
+        silently disabling the whole Mismatch Investigation for exactly the
+        multi-neighbor routers most likely to need it.
+
+        Falls back to the single-protocol-interface heuristic (unambiguous
+        only when the device has exactly one) when no per-neighbor
+        interface is available — e.g. a protocol whose neighbor-table
+        parser doesn't capture it yet, or no neighbor object was passed."""
+        if nbr is not None:
+            iface = nbr.get("interface")
+            if iface:
+                return iface
         ifaces = self._ospf_interfaces(device_ip)
         return next(iter(ifaces)) if len(ifaces) == 1 else None
 
-    def _infer_remote_interface(self, remote_ip: str) -> Optional[str]:
-        """Same heuristic, applied to the far end. See module docstring for the
-        documented limitation on multi-homed topologies."""
+    def _infer_remote_interface(self, remote_ip: str, local_ip: Optional[str] = None,
+                               rid_map: Optional[Dict[str, str]] = None) -> Optional[str]:
+        """Same idea as _infer_local_interface, but for the far end: finds
+        the remote device's OWN neighbor entry that points back to
+        `local_ip` (via the router-id map) and reads THAT neighbor's own
+        interface attribute — resolving the remote side exactly for a
+        multi-homed remote device too, not just the near side.
+
+        Falls back to the single-interface heuristic when `local_ip`/
+        `rid_map` aren't supplied, or the remote neighbor table doesn't
+        capture a per-neighbor interface. See module docstring for the
+        documented limitation that remains in that fallback case."""
+        if local_ip is not None and rid_map is not None:
+            for nbr in self._neighbors(remote_ip):
+                neighbor_id = getattr(nbr, "id", "")
+                if rid_map.get(neighbor_id, neighbor_id) == local_ip:
+                    iface = nbr.get("interface")
+                    if iface:
+                        return iface
+                    break
         ifaces = self._ospf_interfaces(remote_ip)
         return next(iter(ifaces)) if len(ifaces) == 1 else None
 
@@ -202,8 +285,9 @@ class GatewayDeviceAdapter(DeviceAdapter):
                 if real_pair:
                     local_ctx, remote_ctx = real_pair
                 else:
-                    local_ctx = self._infer_local_interface(local_ip)
-                    remote_ctx = self._infer_remote_interface(remote_ip)
+                    local_ctx = self._infer_local_interface(local_ip, nbr=nbr)
+                    remote_ctx = self._infer_remote_interface(
+                        remote_ip, local_ip=local_ip, rid_map=rid_map)
                 if not local_ctx or not remote_ctx:
                     logger.info(
                         "Mismatch investigation: skipping %s<->%s — interface pairing "
@@ -249,10 +333,28 @@ class GatewayDeviceAdapter(DeviceAdapter):
         if not intent_name or device is None:
             return f"! no gateway-resolved remediation for ({param_name}) on {endpoint.device}"
         from core.vendor.operations import RemediationIntent
+        # Recipes render via named placeholders ("{area}", "{router_id}",
+        # ...), not a generic "{value}" — READ_INTENT_ATTR already gives us
+        # the right placeholder name for this param (it's the same
+        # attribute name the recipe's own defaults dict uses), so pass
+        # target_value under that key too. Without this, an area/router-id
+        # fix silently rendered its recipe's DEFAULT ("area 0") instead of
+        # the actual value this violation needs.
+        placeholder = READ_INTENT_ATTR.get(param_name, "value")
+        # For HSRP/VRRP, endpoint.context is the SAME "iface:group"
+        # composite _HSRP_STANDBY_PARSER's id_template produces (a device
+        # can run multiple groups per interface) — passing it as
+        # neighbor_ip too lets render_remediation_fix's existing
+        # fhrp_iface/fhrp_group split (already used by add_hsrp_preempt)
+        # resolve correctly here as well, instead of falling back to its
+        # "group 1" default regardless of the real group number. A no-op
+        # for OSPF/BGP, whose bare interface-name context has no colon to
+        # split.
         intent = RemediationIntent(
             name=intent_name,
             params={"protocol": self._protocol, "interface": endpoint.context,
-                    "value": target_value},
+                    "neighbor_ip": endpoint.context,
+                    "value": target_value, placeholder: target_value},
             target_device=endpoint.device,
             rationale=f"Align {param_name} to {target_value} (Mismatch Investigation)",
         )

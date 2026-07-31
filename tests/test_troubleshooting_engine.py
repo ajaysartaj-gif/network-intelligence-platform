@@ -347,6 +347,69 @@ def test_memory_dedup_unit():
     print("[6] command-memory dedup/normalize: PASS")
 
 
+def _no_evidence_engine():
+    """Silent LLM + a non-informative collector, so no evidence ever binds
+    and confidence never improves. patience is set high enough (and
+    max_steps large enough) that the loop keeps running read-only commands
+    until make_ai()'s 4-command plan_cmds list is genuinely exhausted for
+    every device, actually reaching the `if not outputs:` branch --
+    test_escalates_instead_of_guessing's lower patience=2 exits earlier via
+    the separate "confidence hasn't improved" plateau path instead, which
+    is a different branch from the one this integration point lives in."""
+    collector = lambda dev, cmds: {cmds[0]: "GigabitEthernet0/0 is up, line protocol is up"}
+    return TroubleshootingEngine(
+        ai_call=make_ai(mode="silent"), devices=DEVICES,
+        collector=collector,
+        validator=lambda c: c.lower().strip().startswith("show"),
+        grounder=lambda q, d: "",
+        fix_validator=lambda cmds, ad, dr: "✅ 1 ok · 0 blocked",
+        config=TSConfig(max_steps=6, patience=10),
+    )
+
+
+def test_diagnostic_capability_evidence_is_used_instead_of_escalating(monkeypatch):
+    """When read-only evidence is exhausted, the engine must consult the
+    Diagnostic Capability Framework before giving up. Here it's mocked to
+    return real, informative output -- the same evidence-bound MTU/EXSTART
+    text used elsewhere in this file -- and the engine must ingest it
+    (landing in session.executed with a "[diagnostic]" label) rather than
+    immediately escalating with "no further non-redundant evidence"."""
+    import core.diagnostics as diag
+
+    def fake_request_evidence(*, technology, vendor, device, send, active_hypotheses,
+                              read_only_evidence_exhausted, **kw):
+        class _Result:
+            command = "debug ip ospf adj"
+            output = "Neighbor 2.2.2.2 state EXSTART, MTU 1500"
+            refused = False
+        return _Result()
+
+    monkeypatch.setattr(diag, "request_evidence", fake_request_evidence)
+
+    eng = _no_evidence_engine()
+    s = eng.run("ospf issue").session
+
+    diagnostic_entries = [c for c in s.executed if "[diagnostic]" in c.command]
+    assert diagnostic_entries, "diagnostic capability evidence must be recorded in the audit trail"
+    assert s.escalation_reason != (
+        "no further non-redundant evidence adds diagnostic value "
+        "(requesting more evidence rather than guessing).")
+
+
+def test_no_diagnostic_capability_falls_back_to_existing_escalation(monkeypatch):
+    """When the framework has nothing to offer (mocked to return None, same
+    as when no capability is registered for the detected technology),
+    behavior must be byte-identical to today's escalation path."""
+    import core.diagnostics as diag
+    monkeypatch.setattr(diag, "request_evidence", lambda **kw: None)
+
+    eng = _no_evidence_engine()
+    s = eng.run("ospf issue").session
+
+    assert s.status in (ResolutionStatus.ESCALATE, ResolutionStatus.LIKELY_CAUSE_PRESENT)
+    assert s.fix is None
+
+
 if __name__ == "__main__":
     test_converges_to_fix_with_traceable_evidence()
     test_no_command_ever_repeats()

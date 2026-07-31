@@ -7,8 +7,9 @@ Cisco's doc structure varies by IOS version, platform family, and product
 line.  Rather than hardcoding URL patterns that break with every release,
 this fetcher uses a search-first strategy:
 
-  1. Build vendor-scoped queries that work via DuckDuckGo HTML search
-     (no API key, no rate limit for low volume).
+  1. Build vendor-scoped search queries (VendorFetcher._web_search tries
+     the real, key-based Brave Search API first, falling back to a
+     keyless DuckDuckGo scrape only if no key is configured).
   2. Parse candidate result URLs and filter to trusted Cisco domains.
   3. Fetch the HTML and extract command details.
 """
@@ -30,9 +31,6 @@ class CiscoFetcher(VendorFetcher):
     vendor_key   = "cisco"
     display_name = "Cisco"
     trusted_domains = ["cisco.com"]
-
-    # Use DuckDuckGo HTML endpoint — no API key, works server-side
-    DDG_SEARCH_URL = "https://html.duckduckgo.com/html/?q={query}"
 
     # Platform → query hint mapping
     PLATFORM_HINTS = {
@@ -62,16 +60,16 @@ class CiscoFetcher(VendorFetcher):
 
         # Build multiple query strategies, most specific first
         queries = [
-            f'"{command}" "{platform_hint}" "command reference" site:cisco.com',
-            f'"{command}" "command reference" site:cisco.com',
-            f'"{command}" site:cisco.com',
+            f'"{command}" "{platform_hint}" "command reference"',
+            f'"{command}" "command reference"',
+            f'"{command}"',
         ]
 
         seen: set = set()
         candidates: List[Tuple[str, str]] = []
 
         for q in queries:
-            results = self._duckduckgo_search(q)
+            results = self._web_search(q)
             for url, title in results:
                 if url in seen:
                     continue
@@ -87,44 +85,6 @@ class CiscoFetcher(VendorFetcher):
                     return candidates
 
         return candidates
-
-    def _duckduckgo_search(self, query: str) -> List[Tuple[str, str]]:
-        """Return [(url, title), ...] from DuckDuckGo HTML results."""
-        try:
-            import requests
-            url = self.DDG_SEARCH_URL.format(query=quote_plus(query))
-            r = requests.get(
-                url,
-                timeout=self.HTTP_TIMEOUT,
-                headers={"User-Agent": self.USER_AGENT},
-            )
-            if r.status_code != 200:
-                return []
-
-            soup = self._get_soup(r.text)
-            if not soup:
-                return []
-
-            out: List[Tuple[str, str]] = []
-            for a in soup.find_all("a", class_="result__a", limit=20):
-                href = a.get("href", "")
-                title = self._clean_text(a.get_text(), 200)
-                if not href:
-                    continue
-                # DDG wraps real URL in their redirect; extract uddg=
-                m = re.search(r"uddg=([^&]+)", href)
-                if m:
-                    from urllib.parse import unquote
-                    real_url = unquote(m.group(1))
-                else:
-                    real_url = href
-                if real_url.startswith("http"):
-                    out.append((real_url, title))
-            return out
-
-        except Exception as exc:
-            logger.debug(f"DuckDuckGo search failed: {exc}")
-            return []
 
     # ── Parse a Cisco doc page ────────────────────────────────────────────────
 

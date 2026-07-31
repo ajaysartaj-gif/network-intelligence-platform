@@ -255,7 +255,14 @@ def fetch_and_ingest_vendor_doc(
     fetcher = get_fetcher(vendor)
     if not fetcher:
         return {"skipped": True, "reason": f"no fetcher registered for vendor '{vendor}'"}
-    entry = fetcher.fetch(command, platform)
+    # This function IS the platform's knowledge-ingestion path (its own
+    # docstring above) — exactly where Tavily Search + Extract belong per
+    # the intended architecture (internet for ingestion, local knowledge
+    # for reasoning). Falls back to the old fetch() (raw HTML + per-vendor
+    # BeautifulSoup parsing) only if no TAVILY_API_KEY is configured or
+    # nothing usable was found — kept deliberately until the new pipeline
+    # is fully validated in production.
+    entry = fetcher.ingest_via_search_and_extract(command, platform) or fetcher.fetch(command, platform)
     if not entry:
         return {"skipped": True, "reason": f"no live doc found for '{command}' ({vendor})"}
 
@@ -265,7 +272,23 @@ def fetch_and_ingest_vendor_doc(
         doc_id=doc_id, title=entry.citation.source_title or command,
         content=content, source_type=SourceType.VENDOR_DOCS,
         vendor=vendor, platform=platform, tags=["vendor_doc", "live_fetch"],
-        extra={"source_url": entry.citation.source_url or ""},
+        # Full provenance on every ingested chunk, not just source_url:
+        # min_version (version/OS the doc applies to), confidence (was
+        # this HIGH/real or an UNVERIFIED fallback), ttl_days (this
+        # entry's own expiry policy), and retrieved_at (when the content
+        # was actually fetched, distinct from ingest()'s own
+        # "ingested_at" — the two can differ once background/scheduled
+        # refreshes exist). layer.ingest() already computes and stores
+        # its own content_hash for dedup/versioning (see
+        # EnterpriseKnowledgeLayer.ingest) — not duplicated here to avoid
+        # two differently-scoped "content_hash" values under one name.
+        extra={
+            "source_url": entry.citation.source_url or "",
+            "min_version": entry.min_version or "",
+            "confidence": entry.citation.confidence.value,
+            "ttl_days": entry.ttl_days,
+            "retrieved_at": entry.fetched_at,
+        },
     )
     return layer.ingest(rec)
 

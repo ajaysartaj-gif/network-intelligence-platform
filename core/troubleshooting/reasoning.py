@@ -234,7 +234,8 @@ class Reasoner:
             f"{run_block}"
             "\nReturn STRICT JSON only — up to 3 objects, best first:\n"
             '[{"device": "<ip or \'all\'>", "operation": "<operation name>", '
-            '"params": {"protocol": "<optional>", "interface": "<optional>"}, '
+            '"params": {"protocol": "<required — the protocol under investigation>", '
+            '"interface": "<optional>"}, '
             '"purpose": "<what it reveals>", "tests_hypotheses": ["<hyp id>"], '
             '"value": <0-1>}]\n'
             "JSON array only."

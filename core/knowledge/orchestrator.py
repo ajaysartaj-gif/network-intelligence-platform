@@ -15,11 +15,25 @@ Lookup priority (highest to lowest):
 RAG is primary over MCP per the operator's requirement: curated local
 knowledge is consulted first; only a weak semantic match (below the score
 cutoff) falls through to live web/MCP sources.
+
+Tier 3 (web fetcher) is decoupled from the live reasoning path by default
+(lookup()'s `blocking=False`): a cache+RAG miss during live troubleshooting
+kicks off ingestion in a background thread and returns immediately with
+whatever's already available (MCP / stale cache / unverified) — the
+background result gets persisted into the cache for the NEXT lookup, so
+knowledge still grows automatically, it just never blocks the current
+answer on a live network round-trip. Explicit ingestion callers (the
+`vendor-doc` CLI, scheduled refreshes) pass `blocking=True` to wait for a
+live result directly. AI_NET_STUDIO_OFFLINE_MODE=true disables tier 3
+entirely, blocking or not, for environments that must never make an
+outbound call.
 """
 from __future__ import annotations
 
 import concurrent.futures
 import logging
+import os
+import threading
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -55,9 +69,31 @@ except ImportError as _ri:
 # Minimum cosine similarity for a RAG hit to be trusted over web/MCP. Below
 # this, the local match is too weak and we fall through to live sources.
 # Tunable via env because the cutoff depends on the embedding model.
-import os
 from core.legacy_compat import env as _legacy_env
 _RAG_MIN_SCORE = float(_legacy_env("AI_NET_STUDIO_RAG_MIN_SCORE", "NETBRAIN_RAG_MIN_SCORE", "0.45"))
+
+
+def _offline_mode() -> bool:
+    """AI_NET_STUDIO_OFFLINE_MODE=true disables tier 3 (web fetcher)
+    entirely — blocking or background — for environments that must never
+    make an outbound call, not even opportunistically after a local
+    knowledge miss."""
+    return _legacy_env("AI_NET_STUDIO_OFFLINE_MODE", "NETBRAIN_OFFLINE_MODE", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+# Background ingestion runs on a small shared pool, not one thread per
+# call — troubleshooting sessions can generate many near-simultaneous
+# lookups (e.g. one per command in a single report), and an unbounded
+# thread-per-lookup would be its own resource leak.
+_BACKGROUND_POOL = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="knowledge-bg-ingest")
+# De-dupes concurrent/rapid-fire lookups for the identical (vendor, command,
+# platform) from each independently kicking off their own background fetch —
+# without this, N reports all missing the same command in the same few
+# seconds would fire N redundant live searches instead of one.
+_INFLIGHT_LOCK = threading.Lock()
+_INFLIGHT_KEYS: set = set()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -85,11 +121,21 @@ class KnowledgeOrchestrator:
         vendor: str,
         command: str,
         platform: Optional[str] = None,
+        blocking: bool = False,
     ) -> KnowledgeEntry:
         """
         Look up one command. ALWAYS returns a KnowledgeEntry (never None) —
         if nothing's found, returns an UNVERIFIED entry so the operator
         sees the AI guess with a warning.
+
+        `blocking=False` (the default, used by every live troubleshooting
+        call site) means a cache+RAG miss never waits on tier 3's live
+        network round-trip: ingestion is kicked off in the background
+        (persisted into the cache for the NEXT lookup) and this call falls
+        straight through to MCP/stale-cache/unverified for its own answer.
+        Pass `blocking=True` only from an explicit, user-initiated ingestion
+        path (e.g. the `vendor-doc` CLI, a scheduled refresh) that actually
+        wants to wait for a live result.
         """
         vendor = (vendor or "").lower().strip()
         command = (command or "").strip()
@@ -121,15 +167,24 @@ class KnowledgeOrchestrator:
             logger.debug(f"RAG below threshold for {vendor}/{command}, falling through")
 
         # ── 3. Web fetcher ───────────────────────────────────────────────────
-        if self.enable_web_fetch:
-            fetched = self._web_fetch(vendor, command, platform)
-            if fetched:
-                self.cache.upsert(fetched)
-                logger.info(
-                    f"Web FETCH OK: {vendor}/{command} from {fetched.citation.source_url}"
-                )
-                return fetched
-            logger.debug(f"Web fetcher returned nothing for {vendor}/{command}")
+        if self.enable_web_fetch and not _offline_mode():
+            if blocking:
+                fetched = self._web_fetch(vendor, command, platform)
+                if fetched:
+                    self._persist_fetch_result(vendor, command, platform, fetched, cached)
+                    logger.info(
+                        f"Web FETCH OK: {vendor}/{command} from {fetched.citation.source_url}"
+                    )
+                    return fetched
+                logger.debug(f"Web fetcher returned nothing for {vendor}/{command}")
+            else:
+                # Never wait on this: kick off ingestion in the background
+                # and fall through immediately to MCP/stale-cache/unverified
+                # below for THIS call's answer. The background result (if
+                # any) lands in the cache for the next lookup of the same
+                # command — automatic knowledge growth without putting a
+                # live network round-trip in the critical reasoning path.
+                self._kick_off_background_ingest(vendor, command, platform)
 
         # ── 4. MCP sources (FALLBACK — only after RAG and fetcher) ───────────
         if self.enable_mcp:
@@ -249,7 +304,93 @@ class KnowledgeOrchestrator:
         if not fetcher:
             logger.debug(f"No fetcher for vendor '{vendor}'")
             return None
+        # Only reached after cache + RAG both missed (see lookup() above) —
+        # this is exactly the "cache miss" trigger point real internet
+        # access should be scoped to, per the architecture: local
+        # knowledge first, live search+extract only to backfill a genuine
+        # gap, with the old raw-HTML fetch()/BeautifulSoup path kept as a
+        # fallback until the new pipeline is fully validated in
+        # production, not because it's expected to work well on its own
+        # (see SearchBackendBlocked's docstring for why the DDG scrape it
+        # falls back to is largely non-functional today).
+        entry = fetcher.ingest_via_search_and_extract(command, platform)
+        if entry:
+            return entry
         return fetcher.fetch(command, platform)
+
+    def _kick_off_background_ingest(self, vendor: str, command: str, platform: Optional[str]) -> None:
+        """Fire-and-forget: runs the exact same _web_fetch this class would
+        run synchronously in blocking mode, on a shared background pool,
+        persisting a success into the cache for the next lookup. Never
+        raises into the caller — a failed background fetch just means the
+        next lookup tries again, exactly like a cache miss today."""
+        key = (vendor, command, platform or "")
+        with _INFLIGHT_LOCK:
+            if key in _INFLIGHT_KEYS:
+                logger.debug(f"Background ingest already in flight for {vendor}/{command}")
+                return
+            _INFLIGHT_KEYS.add(key)
+
+        def _run() -> None:
+            try:
+                fetched = self._web_fetch(vendor, command, platform)
+                if fetched:
+                    existing = self.cache.get(vendor, command, platform)
+                    self._persist_fetch_result(vendor, command, platform, fetched, existing)
+                else:
+                    logger.debug(f"Background ingest found nothing for {vendor}/{command}")
+            except Exception as exc:
+                logger.debug(f"Background ingest failed for {vendor}/{command}: {exc}")
+            finally:
+                with _INFLIGHT_LOCK:
+                    _INFLIGHT_KEYS.discard(key)
+
+        _BACKGROUND_POOL.submit(_run)
+
+    def _persist_fetch_result(
+        self, vendor: str, command: str, platform: Optional[str],
+        fetched: KnowledgeEntry, existing: Optional[KnowledgeEntry],
+    ) -> None:
+        """Decide how to persist a fresh fetch by comparing content_hash
+        against what's already cached — but ONLY within the same
+        canonical source_doc_id. Validation against real vendor docs
+        found candidate-selection isn't stable across independent
+        ingestion runs (search ranking can surface a different, equally
+        valid page for the same command) — comparing hashes across two
+        DIFFERENT documents produced false "content changed" positives
+        that were really just "a different source got picked this time".
+
+        Three real outcomes:
+          - same document, same hash  -> genuinely unchanged: touch() only
+          - same document, diff hash  -> the SAME page's content actually
+            changed: a real, logged content-change event
+          - different document        -> a new source was selected, not a
+            revision of the old one: upsert, logged distinctly so this
+            never gets conflated with an actual content change
+
+        This method treats source_doc_id as opaque — it only ever checks
+        for equality, never inspects its shape. That's deliberate: today
+        every entry's id happens to be a normalized URL (see
+        KnowledgeEntry.source_doc_id's own docstring), but this comparison
+        logic doesn't know or care, so a future switch to a vendor
+        document ID or a semantic identity (vendor+platform+command+doc
+        type) needs zero changes here.
+        """
+        same_document = bool(
+            existing and existing.source_doc_id and fetched.source_doc_id
+            and existing.source_doc_id == fetched.source_doc_id
+        )
+        if same_document and existing.content_hash == fetched.content_hash:
+            if self.cache.touch(vendor, command, platform):
+                logger.info(f"Content unchanged for {vendor}/{command} — refreshed freshness only")
+                return
+        elif same_document:
+            logger.info(f"Content CHANGED for {vendor}/{command} at {fetched.source_doc_id}")
+        elif existing and existing.source_doc_id and fetched.source_doc_id:
+            logger.info(
+                f"New source selected for {vendor}/{command}: {fetched.source_doc_id} "
+                f"(was {existing.source_doc_id}) — not treated as a content change")
+        self.cache.upsert(fetched)
 
     def _mcp_lookup(
         self,

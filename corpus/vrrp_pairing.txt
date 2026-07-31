@@ -1,0 +1,16 @@
+# Auto-drafted by core.knowledge.compiler.auto_draft from corpus/general/ prose — published without a review gate; each PARAM's trailing comment cites its source section for later audit.
+
+ENUMERATE: high_availability
+HEALTHY: master, backup
+
+# virtual_mac_address (auto-drafted, must_differ) was removed after manual
+# review against its own cited source: the prose explicitly says VRRP uses
+# a SHARED virtual MAC by design (both routers use the identical value —
+# never something that legitimately differs between them), and the real
+# symptom described is a THIRD device (switch port-security/firewall)
+# filtering that MAC after failover, not a local-vs-remote router
+# comparison at all. Not fixable by correcting the relation — the
+# underlying symptom doesn't fit this schema, so this param was a
+# mismodeled extraction, not a wrong-but-salvageable one.
+PARAM: advertisement_interval | must_equal | true | master_election | multiple_masters | vrrp_enabled  # source: vrrp.txt §Common failure symptom: multiple routers simultaneously claim Master
+PARAM: preempt_setting | must_equal | false | master_reclaim | previous_master_stays_backup | vrrp_enabled  # source: vrrp.txt §Common failure symptom: previous Master doesn't reclaim Master role after recovery

@@ -32,6 +32,11 @@ _CORPUS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
 # this to a new relationship = one more entry here + one more corpus/*.txt file;
 # no engine or strategy code changes.
 _RELATIONSHIP_KEYWORDS = {
+    "mpls_l3vpn_peering": ("mpls_l3vpn",),
+    "vxlan_evpn_peering": ("vxlan_evpn",),
+    "pim_neighbor": ("multicast_pim",),
+    "eigrp_adjacency": ("eigrp",),
+    "vrrp_pairing": ("vrrp",),
     "ospf_adjacency": ("ospf",),
     "hsrp_pairing": ("hsrp",),
 }
