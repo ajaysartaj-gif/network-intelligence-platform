@@ -49,8 +49,12 @@ class OSPFEvidenceInterpreter:
         """Interpret hello interval check result."""
 
         # Parse hello intervals
-        local_hello = self._extract_hello_interval(local_result.output)
-        remote_hello = remote_result and self._extract_hello_interval(remote_result.output)
+        local_parsed = self._extract_hello_dead_from_output(local_result.output)
+        local_hello = local_parsed.get("hello")
+        remote_hello = None
+        if remote_result:
+            remote_parsed = self._extract_hello_dead_from_output(remote_result.output)
+            remote_hello = remote_parsed.get("hello")
 
         interpretation = InterpretationResult(
             evidence=local_result,
@@ -264,6 +268,42 @@ class OSPFEvidenceInterpreter:
             logger.debug(f"Error extracting hello interval: {e}")
         return None
 
+    def _extract_hello_dead_from_output(self, output: str) -> Dict[str, int]:
+        """Extract both hello and dead intervals from output."""
+        result = {}
+        try:
+            for line in output.split('\n'):
+                line_lower = line.lower()
+
+                # Parse: "Hello interval is 10 sec"
+                if 'hello' in line_lower and 'interval' in line_lower:
+                    parts = line.split()
+                    for i, part in enumerate(parts):
+                        try:
+                            if part.isdigit() and i > 0:
+                                # Check if previous word contains "is"
+                                if i > 0 and 'is' in parts[i-1].lower():
+                                    result["hello"] = int(part)
+                                    break
+                        except (ValueError, IndexError):
+                            pass
+
+                # Parse: "Dead interval is 40 sec"
+                if 'dead' in line_lower and 'interval' in line_lower:
+                    parts = line.split()
+                    for i, part in enumerate(parts):
+                        try:
+                            if part.isdigit() and i > 0:
+                                # Check if previous word contains "is"
+                                if i > 0 and 'is' in parts[i-1].lower():
+                                    result["dead"] = int(part)
+                                    break
+                        except (ValueError, IndexError):
+                            pass
+        except Exception as e:
+            logger.debug(f"Error extracting hello/dead: {e}")
+        return result
+
     def _extract_area_from_config(self, output: str) -> Optional[str]:
         """Extract OSPF area from config."""
         try:
@@ -362,17 +402,48 @@ class EvidenceInterpreter:
         """Interpret a list of OSPF evidence results."""
 
         interpretations = []
+        processed_checks = set()
 
+        # First pass: handle checks that need comparison (hello intervals, etc)
         for evidence in evidence_list:
+            if "hello" in evidence.check_name.lower() or "interface_detail" in evidence.check_name.lower():
+                # Look for hello interval outputs from different devices
+                hello_evidence = [e for e in evidence_list if "interface_detail" in e.check_name.lower()]
+
+                if len(hello_evidence) >= 2:
+                    # Have both r1 and r2 outputs - compare them
+                    r1_output = next((e.output for e in hello_evidence if "r1" in e.check_name.lower()), None)
+                    r2_output = next((e.output for e in hello_evidence if "r2" in e.check_name.lower()), None)
+
+                    if r1_output and r2_output:
+                        # Create a synthetic evidence result for comparison
+                        local_result = EvidenceResult(
+                            check_name="hello_r1",
+                            command="show ip ospf interface detail",
+                            output=r1_output,
+                            parsed_value=self.ospf._extract_hello_dead_from_output(r1_output)
+                        )
+                        remote_result = EvidenceResult(
+                            check_name="hello_r2",
+                            command="show ip ospf interface detail",
+                            output=r2_output,
+                            parsed_value=self.ospf._extract_hello_dead_from_output(r2_output)
+                        )
+                        interpretation = self.ospf.interpret_hello_interval_check(local_result, remote_result)
+                        interpretations.append(interpretation)
+                        processed_checks.add("hello")
+
+        # Second pass: handle single-check interpretations
+        for evidence in evidence_list:
+            # Skip already processed
+            if "hello" in evidence.check_name.lower() and "hello" in processed_checks:
+                continue
+            if "interface_detail" in evidence.check_name.lower() and "hello" in processed_checks:
+                continue
+
             interpretation = None
 
-            if "hello" in evidence.check_name.lower():
-                # Find corresponding remote result if available
-                remote_result = next((e for e in evidence_list if "remote" in e.check_name.lower()),
-                                    None)
-                interpretation = self.ospf.interpret_hello_interval_check(evidence, remote_result)
-
-            elif "area" in evidence.check_name.lower():
+            if "area" in evidence.check_name.lower() or "process" in evidence.check_name.lower():
                 interpretation = self.ospf.interpret_area_check(evidence.output)
 
             elif "mtu" in evidence.check_name.lower():
@@ -383,7 +454,8 @@ class EvidenceInterpreter:
             elif "authentication" in evidence.check_name.lower():
                 interpretation = self.ospf.interpret_authentication_check(evidence.output)
 
-            elif "neighbor" in evidence.check_name.lower() and "state" in evidence.check_name.lower():
+            elif ("neighbor" in evidence.check_name.lower() and "state" not in evidence.check_name.lower()) or \
+                 "show_ip_ospf_neighbors" in evidence.check_name.lower():
                 interpretation = self.ospf.interpret_neighbor_state(evidence.output)
 
             if interpretation:

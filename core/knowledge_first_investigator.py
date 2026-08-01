@@ -97,6 +97,7 @@ class KnowledgeFirstInvestigator:
                    issue_type: str,
                    root_device: str,
                    affected_devices: List[str],
+                   device_outputs: Optional[Dict[str, str]] = None,
                    max_cycles: int = 5,
                    confidence_threshold: float = 0.85) -> Dict[str, Any]:
         """
@@ -112,6 +113,8 @@ class KnowledgeFirstInvestigator:
             Starting device
         affected_devices : List[str]
             All affected devices
+        device_outputs : Dict[str, str], optional
+            Map of check names to actual device outputs (for testing)
         max_cycles : int
             Maximum investigation cycles before stopping
         confidence_threshold : float
@@ -164,7 +167,8 @@ class KnowledgeFirstInvestigator:
             cycle_result = self._run_investigation_cycle(
                 cycle_num=cycle_num,
                 plan=plan,
-                root_device=root_device
+                root_device=root_device,
+                device_outputs=device_outputs
             )
 
             self.investigation_cycles.append(cycle_result)
@@ -250,7 +254,8 @@ class KnowledgeFirstInvestigator:
     def _run_investigation_cycle(self,
                                 cycle_num: int,
                                 plan: InvestigationPlan,
-                                root_device: str) -> InvestigationCycle:
+                                root_device: str,
+                                device_outputs: Optional[Dict[str, str]] = None) -> InvestigationCycle:
         """Execute a single investigation cycle."""
 
         logger.info(f"Cycle {cycle_num}: Plan → Collect → Interpret → Update")
@@ -261,8 +266,8 @@ class KnowledgeFirstInvestigator:
 
         logger.info(f"Planning {len(checks_to_run)} checks...")
 
-        # STEP 2: Collect evidence (simulated)
-        evidence_collected = self._collect_evidence(checks_to_run, root_device)
+        # STEP 2: Collect evidence (from device outputs if provided)
+        evidence_collected = self._collect_evidence(checks_to_run, root_device, device_outputs)
         logger.info(f"Collected {len(evidence_collected)} evidence items")
 
         # STEP 3: Interpret evidence
@@ -354,34 +359,135 @@ class KnowledgeFirstInvestigator:
 
     def _collect_evidence(self,
                          checks: List[Any],
-                         root_device: str) -> List[EvidenceResult]:
-        """Simulate collecting evidence from device."""
+                         root_device: str,
+                         device_outputs: Optional[Dict[str, str]] = None) -> List[EvidenceResult]:
+        """Collect evidence from device (using test data if provided, or simulated)."""
 
         evidence = []
 
-        for check in checks:
-            # Simulate evidence collection
-            # For simulated evidence, provide sensible defaults
-            parsed_value = {}
-
-            if "hello" in check.name.lower():
-                parsed_value = {"hello": 10, "dead": 40}
-            elif "mtu" in check.name.lower():
-                parsed_value = {"mtu": 1500}
-            elif "authentication" in check.name.lower():
-                parsed_value = {"auth_type": "none"}
-            elif "neighbor" in check.name.lower():
-                parsed_value = {"state": "EXSTART"}
-
-            result = EvidenceResult(
-                check_name=check.name,
-                command=check.command,
-                output="[simulated output]",  # Would be real SSH output
-                parsed_value=parsed_value
-            )
-            evidence.append(result)
+        if device_outputs:
+            # When test data provided, extract ALL device outputs and create evidence
+            for check_name, output in device_outputs.items():
+                parsed_value = self._parse_evidence(check_name, output)
+                result = EvidenceResult(
+                    check_name=check_name,
+                    command=f"[test output for {check_name}]",
+                    output=output,
+                    parsed_value=parsed_value
+                )
+                evidence.append(result)
+        else:
+            # Fallback to check-based collection (simulated)
+            for check in checks:
+                parsed_value = self._parse_evidence(check.name, None)
+                result = EvidenceResult(
+                    check_name=check.name,
+                    command=check.command,
+                    output="[simulated output]",
+                    parsed_value=parsed_value
+                )
+                evidence.append(result)
 
         return evidence
+
+    def _parse_evidence(self, check_name: str, output: Optional[str]) -> Dict[str, Any]:
+        """Parse device output to extract relevant values."""
+
+        if not output:
+            # Fallback to sensible defaults if no output provided
+            if "hello" in check_name.lower():
+                return {"hello": 10, "dead": 40}
+            elif "mtu" in check_name.lower():
+                return {"mtu": 1500}
+            elif "authentication" in check_name.lower():
+                return {"auth_type": "none"}
+            elif "neighbor" in check_name.lower():
+                return {"state": "EXSTART"}
+            else:
+                return {}
+
+        # Parse actual output
+        parsed = {}
+
+        # OSPF Hello/Dead interval parsing
+        if "hello" in check_name.lower() or "interface_detail" in check_name.lower():
+            for line in output.split('\n'):
+                if 'hello' in line.lower() and 'interval' in line.lower():
+                    # "Hello interval is 10 sec" or "Hello 10"
+                    parts = line.split()
+                    for i, part in enumerate(parts):
+                        if 'hello' in part.lower() and i + 2 < len(parts):
+                            try:
+                                parsed["hello"] = int(parts[i + 2])
+                            except (ValueError, IndexError):
+                                pass
+                if 'dead' in line.lower() and 'interval' in line.lower():
+                    # "Dead interval is 40 sec" or "Dead 40"
+                    parts = line.split()
+                    for i, part in enumerate(parts):
+                        if 'dead' in part.lower() and i + 2 < len(parts):
+                            try:
+                                parsed["dead"] = int(parts[i + 2])
+                            except (ValueError, IndexError):
+                                pass
+
+        # OSPF neighbor state parsing
+        if "neighbors" in check_name.lower():
+            for line in output.split('\n'):
+                if any(state in line for state in ["EXSTART", "EXCHANGE", "LOADING", "FULL", "DOWN", "INIT"]):
+                    # Extract state from output
+                    parts = line.split()
+                    for i, part in enumerate(parts):
+                        if "/" in part:  # State format is "EXSTART/DR" or similar
+                            parsed["state"] = part.split("/")[0]
+                            break
+
+        # OSPF Area parsing
+        if "process" in check_name.lower() or "area" in check_name.lower():
+            for line in output.split('\n'):
+                if 'area' in line.lower() and any(c.isdigit() for c in line):
+                    # "Area 0" or "Area 1" etc
+                    parts = line.split()
+                    for i, part in enumerate(parts):
+                        if 'area' in part.lower() and i + 1 < len(parts):
+                            try:
+                                parsed["area"] = int(parts[i + 1])
+                            except (ValueError, IndexError):
+                                pass
+
+        # MTU parsing
+        if "mtu" in check_name.lower():
+            for line in output.split('\n'):
+                if 'mtu' in line.lower():
+                    parts = line.split()
+                    for i, part in enumerate(parts):
+                        if 'mtu' in part.lower() and i + 1 < len(parts):
+                            try:
+                                parsed["mtu"] = int(parts[i + 1])
+                            except (ValueError, IndexError):
+                                pass
+
+        # BGP AS number parsing
+        if "bgp" in check_name.lower() and "neighbor" in check_name.lower():
+            for line in output.split('\n'):
+                if 'remote as' in line.lower() or 'remote-as' in line.lower():
+                    parts = line.split()
+                    for i, part in enumerate(parts):
+                        if 'as' in part.lower() and i + 1 < len(parts):
+                            try:
+                                parsed["remote_as"] = int(parts[i + 1])
+                            except (ValueError, IndexError):
+                                pass
+                if 'local as' in line.lower():
+                    parts = line.split()
+                    for i, part in enumerate(parts):
+                        if 'as' in part.lower() and i + 1 < len(parts):
+                            try:
+                                parsed["local_as"] = int(parts[i + 1])
+                            except (ValueError, IndexError):
+                                pass
+
+        return parsed if parsed else {"raw": output[:100]}
 
     def _retrieve_knowledge_for_gap(self, gap: KnowledgeGap):
         """Retrieve knowledge to fill a gap."""

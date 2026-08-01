@@ -76,6 +76,7 @@ class ValidationRunner:
             issue_type=case.issue_type,
             root_device=case.root_device,
             affected_devices=case.affected_devices,
+            device_outputs=case.device_outputs,
             max_cycles=case.max_cycles_allowed,
             confidence_threshold=case.min_confidence_required
         )
