@@ -248,14 +248,180 @@ class OSPFProtocolPlanner:
         return plan
 
     def plan_for_flapping(self, root_device: str) -> InvestigationPlan:
-        """Plan investigation for OSPF neighbor flapping."""
-        # Similar structure for flapping issues
-        pass
+        """Plan investigation for OSPF neighbor flapping (going UP/DOWN repeatedly)."""
+
+        plan = InvestigationPlan(
+            protocol=Protocol.OSPF,
+            issue_type="FLAPPING",
+            root_device=root_device,
+            affected_devices=[root_device],
+
+            prerequisite_checks=[
+                DiagnosticCheck(
+                    name="Check interface stability",
+                    command="show interface status | include down",
+                    priority=1,
+                    info_gain=0.80,
+                    estimated_time_sec=1,
+                    expected_in_healthy_state="interface up",
+                    eliminates_hypotheses=["Physical interface down"],
+                ),
+            ],
+
+            primary_checks=[
+                DiagnosticCheck(
+                    name="Check for input/output errors on interface",
+                    command="show interface | include errors",
+                    priority=1,
+                    info_gain=0.85,
+                    estimated_time_sec=1,
+                    expected_in_healthy_state="0 errors",
+                    eliminates_hypotheses=["Interface errors causing loss"],
+                ),
+                DiagnosticCheck(
+                    name="Check OSPF retransmit timeout",
+                    command="show ip ospf neighbors detail",
+                    priority=2,
+                    info_gain=0.70,
+                    estimated_time_sec=2,
+                    expected_in_healthy_state="no timeout messages",
+                    eliminates_hypotheses=["Retransmit timeout due to packet loss"],
+                ),
+                DiagnosticCheck(
+                    name="Check output queue depth",
+                    command="show interface | include queue",
+                    priority=3,
+                    info_gain=0.75,
+                    estimated_time_sec=1,
+                    expected_in_healthy_state="queue drops=0",
+                    eliminates_hypotheses=["Output queue drops"],
+                ),
+                DiagnosticCheck(
+                    name="Check for packet loss on link",
+                    command="ping -c 100 neighbor | include loss",
+                    priority=4,
+                    info_gain=0.80,
+                    estimated_time_sec=3,
+                    expected_in_healthy_state="0% packet loss",
+                    eliminates_hypotheses=["Packet loss causing retransmit"],
+                ),
+            ],
+
+            secondary_checks=[
+                DiagnosticCheck(
+                    name="Check interface MTU configuration",
+                    command="show interface | include mtu",
+                    priority=5,
+                    info_gain=0.60,
+                    estimated_time_sec=1,
+                    expected_in_healthy_state="mtu=1500",
+                    eliminates_hypotheses=["MTU causing packet loss"],
+                ),
+            ],
+
+            vendor_specific_checks=[],
+
+            expected_duration_sec=12,
+            confidence_threshold=0.80,
+            high_info_gain_checks=["Check for input/output errors on interface", "Check for packet loss on link"],
+
+            protocol_knowledge_needed=[
+                "OSPF retransmit mechanism and timeout behavior",
+                "Packet loss impact on OSPF adjacency",
+                "OSPF exponential backoff"
+            ],
+            vendor_knowledge_needed=[],
+            enterprise_knowledge_needed=[]
+        )
+
+        return plan
 
     def plan_for_degradation(self, root_device: str) -> InvestigationPlan:
         """Plan investigation for OSPF route quality degradation."""
-        # Similar structure for degradation
-        pass
+
+        plan = InvestigationPlan(
+            protocol=Protocol.OSPF,
+            issue_type="DEGRADATION",
+            root_device=root_device,
+            affected_devices=[root_device],
+
+            prerequisite_checks=[
+                DiagnosticCheck(
+                    name="Verify neighbors are FULL",
+                    command="show ip ospf neighbors",
+                    priority=1,
+                    info_gain=0.90,
+                    estimated_time_sec=1,
+                    expected_in_healthy_state="state=FULL",
+                    eliminates_hypotheses=["Incomplete adjacency"],
+                ),
+                DiagnosticCheck(
+                    name="Verify routes are learned",
+                    command="show ip route ospf",
+                    priority=2,
+                    info_gain=0.85,
+                    estimated_time_sec=1,
+                    expected_in_healthy_state="routes present",
+                    eliminates_hypotheses=["No routes learned"],
+                ),
+            ],
+
+            primary_checks=[
+                DiagnosticCheck(
+                    name="Check OSPF metric/cost configuration",
+                    command="show ip ospf interface",
+                    priority=1,
+                    info_gain=0.75,
+                    estimated_time_sec=2,
+                    expected_in_healthy_state="cost matches interface speed",
+                    eliminates_hypotheses=["Incorrect OSPF cost"],
+                ),
+                DiagnosticCheck(
+                    name="Check for OSPF metric/default route conflicts",
+                    command="show ip route | include default",
+                    priority=2,
+                    info_gain=0.70,
+                    estimated_time_sec=1,
+                    expected_in_healthy_state="default route has good metric",
+                    eliminates_hypotheses=["Default route override"],
+                ),
+                DiagnosticCheck(
+                    name="Check OSPF area type (stub/not-so-stubby)",
+                    command="show ip ospf",
+                    priority=3,
+                    info_gain=0.65,
+                    estimated_time_sec=1,
+                    expected_in_healthy_state="area type standard",
+                    eliminates_hypotheses=["Stub area restrictions"],
+                ),
+                DiagnosticCheck(
+                    name="Check for route redistribution issues",
+                    command="show ip ospf redistribution",
+                    priority=4,
+                    info_gain=0.60,
+                    estimated_time_sec=1,
+                    expected_in_healthy_state="no redistribution filtering",
+                    eliminates_hypotheses=["Route filtering"],
+                ),
+            ],
+
+            secondary_checks=[],
+            vendor_specific_checks=[],
+
+            expected_duration_sec=10,
+            confidence_threshold=0.80,
+            high_info_gain_checks=["Check OSPF metric/cost configuration"],
+
+            protocol_knowledge_needed=[
+                "OSPF metric calculation and path selection",
+                "OSPF area types and their restrictions",
+                "Route redistribution in OSPF"
+            ],
+            vendor_knowledge_needed=[],
+            enterprise_knowledge_needed=[]
+        )
+
+        return plan
 
 
 class BGPProtocolPlanner:
@@ -264,6 +430,104 @@ class BGPProtocolPlanner:
     def __init__(self):
         self.protocol = Protocol.BGP
         logger.info("BGPProtocolPlanner initialized")
+
+    def plan_for_flapping(self, local_device: str, neighbor_ip: str) -> InvestigationPlan:
+        """Plan investigation for BGP session flapping (going UP/DOWN repeatedly)."""
+
+        plan = InvestigationPlan(
+            protocol=Protocol.BGP,
+            issue_type="FLAPPING",
+            root_device=local_device,
+            affected_devices=[local_device, neighbor_ip],
+
+            prerequisite_checks=[
+                DiagnosticCheck(
+                    name="Verify TCP connectivity on port 179",
+                    command="netstat -an | grep 179",
+                    priority=1,
+                    info_gain=0.85,
+                    estimated_time_sec=1,
+                    expected_in_healthy_state="TCP state established",
+                    eliminates_hypotheses=["TCP connectivity issue"],
+                ),
+                DiagnosticCheck(
+                    name="Verify neighbor is reachable",
+                    command=f"ping {neighbor_ip}",
+                    priority=2,
+                    info_gain=0.80,
+                    estimated_time_sec=2,
+                    expected_in_healthy_state="replies received",
+                    eliminates_hypotheses=["Neighbor unreachable"],
+                ),
+            ],
+
+            primary_checks=[
+                DiagnosticCheck(
+                    name="Check for link packet loss (BGP keepalives)",
+                    command="ping -c 100 neighbor | include loss",
+                    priority=1,
+                    info_gain=0.85,
+                    estimated_time_sec=3,
+                    expected_in_healthy_state="0% packet loss",
+                    eliminates_hypotheses=["Packet loss on link"],
+                ),
+                DiagnosticCheck(
+                    name="Check output queue depth and drops",
+                    command="show interface | include queue",
+                    priority=2,
+                    info_gain=0.80,
+                    estimated_time_sec=1,
+                    expected_in_healthy_state="queue depth low, drops=0",
+                    eliminates_hypotheses=["Output queue drops"],
+                ),
+                DiagnosticCheck(
+                    name="Check BGP keepalive/hold time mismatch",
+                    command="show ip bgp neighbors detail",
+                    priority=3,
+                    info_gain=0.75,
+                    estimated_time_sec=2,
+                    expected_in_healthy_state="keepalive/hold match",
+                    eliminates_hypotheses=["Keepalive/hold time mismatch"],
+                ),
+                DiagnosticCheck(
+                    name="Check for BGP configuration changes",
+                    command="show run | include neighbor",
+                    priority=4,
+                    info_gain=0.60,
+                    estimated_time_sec=1,
+                    expected_in_healthy_state="config unchanged",
+                    eliminates_hypotheses=["Config changes"],
+                ),
+            ],
+
+            secondary_checks=[
+                DiagnosticCheck(
+                    name="Check for route flapping",
+                    command="show ip bgp dampening",
+                    priority=5,
+                    info_gain=0.50,
+                    estimated_time_sec=1,
+                    expected_in_healthy_state="no route flaps",
+                    eliminates_hypotheses=[],
+                ),
+            ],
+
+            vendor_specific_checks=[],
+
+            expected_duration_sec=12,
+            confidence_threshold=0.85,
+            high_info_gain_checks=["Check for link packet loss (BGP keepalives)", "Check output queue depth and drops"],
+
+            protocol_knowledge_needed=[
+                "BGP keepalive/hold time interaction",
+                "BGP session establishment and maintenance",
+                "Impact of packet loss on BGP"
+            ],
+            vendor_knowledge_needed=[],
+            enterprise_knowledge_needed=[]
+        )
+
+        return plan
 
     def plan_for_session_down(self, local_device: str, neighbor_ip: str) -> InvestigationPlan:
         """Plan investigation for BGP session down."""
@@ -392,6 +656,8 @@ class ProtocolPlanner:
             elif protocol == Protocol.BGP:
                 if issue_type.upper() == "SESSION_DOWN":
                     return self.bgp_planner.plan_for_session_down(root_device, neighbor_device or "unknown")
+                elif issue_type.upper() == "FLAPPING" or issue_type.upper() == "SESSION_FLAPPING":
+                    return self.bgp_planner.plan_for_flapping(root_device, neighbor_device or "unknown")
 
             logger.warning(f"No plan for {protocol.value} / {issue_type}")
             return None

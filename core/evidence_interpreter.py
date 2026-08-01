@@ -132,6 +132,10 @@ class OSPFEvidenceInterpreter:
             next_questions=[]
         )
 
+        # Handle None values
+        if local_mtu is None:
+            local_mtu = 1500
+
         # OSPF requires at least 1500 byte MTU for default packet size
         # Minimum is actually 576, but most implementations expect 1500
         if local_mtu < 1500:

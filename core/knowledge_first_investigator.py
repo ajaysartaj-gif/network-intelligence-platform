@@ -271,22 +271,40 @@ class KnowledgeFirstInvestigator:
 
         # STEP 4: Update confidence based on interpretations
         for interp in interpretations:
-            # Build likelihood ratios for each hypothesis
+            # Build likelihood ratios for each hypothesis based on evidence strength
             likelihood_ratios = {}
 
             if interp.eliminates_hypothesis:
                 for hyp in interp.eliminates_hypothesis:
-                    likelihood_ratios[hyp] = 0.1  # Evidence contradicts hypothesis
+                    # Evidence strongly contradicts this hypothesis
+                    # Use confidence_delta to determine strength
+                    if interp.confidence_delta > 0.5:
+                        likelihood_ratios[hyp] = 0.05  # Very strong contradiction
+                    elif interp.confidence_delta > 0.3:
+                        likelihood_ratios[hyp] = 0.1   # Strong contradiction
+                    else:
+                        likelihood_ratios[hyp] = 0.3   # Moderate contradiction
 
             if interp.supports_hypothesis:
                 for hyp in interp.supports_hypothesis:
-                    likelihood_ratios[hyp] = 10.0  # Evidence supports hypothesis
+                    # Evidence supports this hypothesis
+                    if interp.confidence_delta > 0.5:
+                        likelihood_ratios[hyp] = 100.0  # Very strong support
+                    elif interp.confidence_delta > 0.3:
+                        likelihood_ratios[hyp] = 20.0   # Strong support
+                    else:
+                        likelihood_ratios[hyp] = 5.0    # Moderate support
 
             if likelihood_ratios:
                 self.confidence_manager.update_with_evidence(
                     evidence_name=interp.evidence.check_name,
                     likelihood_ratio_per_hypothesis=likelihood_ratios
                 )
+
+            logger.info(
+                f"Evidence '{interp.evidence.check_name}': {interp.interpretation} "
+                f"(delta: +{interp.confidence_delta:.0%})"
+            )
 
         confidence = self.confidence_manager.get_confidence_score()
         logger.info(f"Confidence after cycle: {confidence:.0%}")
@@ -343,11 +361,23 @@ class KnowledgeFirstInvestigator:
 
         for check in checks:
             # Simulate evidence collection
+            # For simulated evidence, provide sensible defaults
+            parsed_value = {}
+
+            if "hello" in check.name.lower():
+                parsed_value = {"hello": 10, "dead": 40}
+            elif "mtu" in check.name.lower():
+                parsed_value = {"mtu": 1500}
+            elif "authentication" in check.name.lower():
+                parsed_value = {"auth_type": "none"}
+            elif "neighbor" in check.name.lower():
+                parsed_value = {"state": "EXSTART"}
+
             result = EvidenceResult(
                 check_name=check.name,
                 command=check.command,
                 output="[simulated output]",  # Would be real SSH output
-                parsed_value={}
+                parsed_value=parsed_value
             )
             evidence.append(result)
 
