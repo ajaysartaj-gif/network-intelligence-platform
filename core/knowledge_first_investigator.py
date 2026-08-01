@@ -18,8 +18,6 @@ from core.protocol_planner import ProtocolPlanner, Protocol, InvestigationPlan
 from core.evidence_interpreter import EvidenceInterpreter, EvidenceResult, InterpretationResult
 from core.bayesian_confidence_manager import BayesianConfidenceManager, Hypothesis
 from core.knowledge_gap_detector import KnowledgeGapDetector, KnowledgeGap
-from core.information_gain_calculator import InformationGainCalculator
-from core.hypothesis_refinement_engine import HypothesisRefinementEngine
 
 logger = logging.getLogger(__name__)
 
@@ -82,8 +80,6 @@ class KnowledgeFirstInvestigator:
         self.evidence_interpreter = EvidenceInterpreter()
         self.confidence_manager = BayesianConfidenceManager()
         self.gap_detector = KnowledgeGapDetector()
-        self.info_gain_calculator = InformationGainCalculator()
-        self.hypothesis_refiner = HypothesisRefinementEngine()
 
         # State
         self.current_plan: Optional[InvestigationPlan] = None
@@ -329,14 +325,7 @@ class KnowledgeFirstInvestigator:
             for gap in gaps:
                 self._retrieve_knowledge_for_gap(gap)
 
-        # STEP 6: Refine hypotheses based on evidence
-        refined_hyps = self.hypothesis_refiner.refine_hypotheses(
-            current_hypotheses={h: hyp.posterior_probability
-                              for h, hyp in self.confidence_manager.hypotheses.items()},
-            new_evidence=interpretations
-        )
-
-        # STEP 7: Check convergence
+        # STEP 6: Check convergence
         converged = self.confidence_manager.should_converge()
 
         # Build cycle result

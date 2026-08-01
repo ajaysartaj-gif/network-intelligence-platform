@@ -21,8 +21,6 @@ from core.evidence_interpreter import EvidenceInterpreter, EvidenceResult, OSPFE
 from core.bayesian_confidence_manager import BayesianConfidenceManager, Hypothesis
 from core.knowledge_first_investigator import KnowledgeFirstInvestigator
 from core.knowledge_gap_detector import KnowledgeGapDetector, KnowledgeSource
-from core.information_gain_calculator import InformationGainCalculator
-from core.hypothesis_refinement_engine import HypothesisRefinementEngine
 
 
 class TestProtocolPlanner(unittest.TestCase):
@@ -295,87 +293,6 @@ class TestKnowledgeGapDetector(unittest.TestCase):
         # Priority should increase (1 is highest)
         for i in range(len(sorted_gaps) - 1):
             self.assertLessEqual(sorted_gaps[i].priority, sorted_gaps[i + 1].priority)
-
-
-class TestInformationGainCalculator(unittest.TestCase):
-    """Test information-gain-aware prioritization."""
-
-    def setUp(self):
-        self.calculator = InformationGainCalculator()
-
-    def test_prioritize_checks_by_info_gain(self):
-        """Test prioritizing checks by information gain."""
-        checks = [
-            {
-                "name": "Check hello interval",
-                "info_gain": 0.9,
-                "time_estimate_sec": 2,
-                "eliminates_hypotheses": ["hello_mismatch"]
-            },
-            {
-                "name": "Check interface status",
-                "info_gain": 0.3,
-                "time_estimate_sec": 1,
-                "eliminates_hypotheses": []
-            },
-            {
-                "name": "Check area config",
-                "info_gain": 0.7,
-                "time_estimate_sec": 2,
-                "eliminates_hypotheses": ["area_mismatch"]
-            },
-        ]
-
-        hypotheses = {
-            "hello_mismatch": 0.4,
-            "area_mismatch": 0.3,
-            "other": 0.3,
-        }
-
-        priorities = self.calculator.prioritize_checks(checks, hypotheses)
-
-        # Highest priority should be hello check (high info gain, eliminates high-prob hypothesis)
-        self.assertEqual(priorities[0].check_name, "Check hello interval")
-        self.assertGreater(priorities[0].priority_score, priorities[1].priority_score)
-
-    def test_entropy_calculation(self):
-        """Test Shannon entropy calculation."""
-        # Certain hypothesis (entropy should be low)
-        certain = {"hypothesis": 1.0}
-        entropy_certain = self.calculator.entropy_of_hypotheses(certain)
-        self.assertAlmostEqual(entropy_certain, 0.0, places=5)
-
-        # Uniform distribution (entropy should be high)
-        uniform = {"h1": 0.5, "h2": 0.5}
-        entropy_uniform = self.calculator.entropy_of_hypotheses(uniform)
-        self.assertGreater(entropy_uniform, entropy_certain)
-
-
-class TestHypothesisRefinementEngine(unittest.TestCase):
-    """Test hypothesis refinement."""
-
-    def setUp(self):
-        self.refiner = HypothesisRefinementEngine()
-
-    def test_should_generate_new_hypotheses_low_confidence(self):
-        """Test detecting when new hypotheses needed due to low confidence."""
-        should_gen = self.refiner.should_generate_new_hypotheses(
-            current_hypotheses={"h1": 0.35, "h2": 0.30, "h3": 0.35},
-            confidence=0.30,
-            cycle_number=2
-        )
-
-        self.assertTrue(should_gen)
-
-    def test_should_not_generate_when_converged(self):
-        """Test not generating new hypotheses when converged."""
-        should_gen = self.refiner.should_generate_new_hypotheses(
-            current_hypotheses={"h1": 0.85, "h2": 0.10, "h3": 0.05},
-            confidence=0.85,
-            cycle_number=1
-        )
-
-        self.assertFalse(should_gen)
 
 
 class TestKnowledgeFirstInvestigator(unittest.TestCase):
