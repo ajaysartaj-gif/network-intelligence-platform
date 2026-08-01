@@ -22,6 +22,12 @@ from core.remediation_executor import ExecutionResult, RemediationExecutor, Reme
 from core.pattern_db import PatternDatabase
 from core.prediction_forecaster import AutonomousDecisionMaker, PatternPredictor, PredictedIssue
 from core.external_knowledge_layer import ExternalKnowledgeIntegrator, ExternalSolution
+from core.explainability import ExplainabilityEngine
+from core.multi_device_orchestrator import MultiDeviceOrchestrator, DeviceCommand
+from core.predictive_forecaster_enhanced import PredictiveForecaster
+from core.hypothesis_generator import AIHypothesisGenerator
+from core.reinforcement_learning import ReinforcementLearningEngine
+from core.network_health_scorer import NetworkHealthScorer
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +59,11 @@ class TroubleshootingSession:
     diagnosis_confidence: float = 0.0  # Confidence of diagnosis (0.0-1.0)
     used_external_knowledge: bool = False  # Did we search external sources?
     duration_seconds: float = 0.0
+    # New: 6 core enhancements
+    explanations: Optional[List[Any]] = None  # ExplainabilityEngine output
+    generated_hypotheses: Optional[List[Any]] = None  # AIHypothesisGenerator output
+    predicted_issues: Optional[List[Any]] = None  # PredictiveForecaster output
+    network_health: Optional[Dict[str, Any]] = None  # NetworkHealthScorer output
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -129,7 +140,33 @@ class AutonomousNetworkTroubleshooter:
         self.external_knowledge: Optional[ExternalKnowledgeIntegrator] = None
         self.use_external_knowledge = False  # Flag to enable/disable
 
-        logger.info("AutonomousNetworkTroubleshooter initialized with all 5 phases + external knowledge")
+        # 6 Core Enhancements (NEW)
+        # 1. Explainability: Generate reasoning for every decision
+        self.explainer = ExplainabilityEngine(ai_call)
+
+        # 2. Multi-Device Orchestrator: Coordinate network-wide changes
+        self.orchestrator = MultiDeviceOrchestrator(topology_graph, self.executor)
+
+        # 3. Predictive Forecaster: Predict issues 24-48 hours ahead
+        self.forecaster_enhanced = PredictiveForecaster(self.pattern_db)
+
+        # 4. Hypothesis Generator: Create hypotheses for unknown issues
+        self.hypothesis_gen = AIHypothesisGenerator(ai_call, self.pattern_db)
+
+        # 5. Reinforcement Learning: Learn from every outcome
+        self.learner = ReinforcementLearningEngine(
+            self.pattern_db,
+            self.decision_maker,
+            self.intake
+        )
+
+        # 6. Network Health Scorer: Real-time health 0-100
+        self.health_scorer = NetworkHealthScorer(self.pattern_db, self.forecaster_enhanced)
+
+        logger.info(
+            "AutonomousNetworkTroubleshooter initialized with all 5 phases + "
+            "external knowledge + 6 core enhancements"
+        )
 
     def troubleshoot(self,
                      user_query: str,
@@ -176,6 +213,19 @@ class AutonomousNetworkTroubleshooter:
             self._execute_path_b_on_demand(session, approval_callback)
         else:  # LEARNING
             self._execute_path_c_learning(session)
+
+        # STEP 4: Generate explanations (NEW - 6 Core Enhancements)
+        self.generate_explanations(session)
+
+        # STEP 5: Generate hypotheses if diagnosis failed (NEW)
+        if session.diagnosis_confidence < 0.60:
+            self.generate_hypotheses(session)
+
+        # STEP 6: Predict future issues if telemetry available (NEW)
+        if telemetry_metrics:
+            session.predicted_issues = self.predict_future_issues(telemetry_metrics)
+            # Also calculate network health
+            session.network_health = self.score_network_health(telemetry_metrics)
 
         return session
 
@@ -416,6 +466,80 @@ class AutonomousNetworkTroubleshooter:
             )
 
         logger.info(f"✅ Pattern learned: {pattern_id}")
+
+        # NEW: Learn from outcome using reinforcement learning
+        self.learner.learn_from_outcome(session)
+
+    # ── 6 Core Enhancements Integration ────────────────────────────────────────────
+
+    def generate_explanations(self, session: TroubleshootingSession) -> List[Any]:
+        """
+        Generate step-by-step explanations for the troubleshooting session.
+
+        Used to display to user: "Here's why I made each decision"
+        """
+        try:
+            explanations = self.explainer.explain_full_session(session)
+            session.explanations = explanations
+            logger.info(f"Generated {len(explanations)} explanation steps")
+            return explanations
+        except Exception as e:
+            logger.error(f"Explanation generation failed: {e}")
+            return []
+
+    def generate_hypotheses(self, session: TroubleshootingSession) -> List[Any]:
+        """
+        Generate novel hypotheses when internal diagnosis fails.
+
+        Fallback when confidence is low: Claude creates creative approaches.
+        """
+        if session.diagnosis_confidence >= 0.60:
+            return []
+
+        try:
+            hypotheses = self.hypothesis_gen.generate_hypotheses(
+                session.problem,
+                max_hypotheses=3
+            )
+            session.generated_hypotheses = hypotheses
+            logger.info(f"Generated {len(hypotheses)} hypothesis/hypotheses")
+            return hypotheses
+        except Exception as e:
+            logger.error(f"Hypothesis generation failed: {e}")
+            return []
+
+    def predict_future_issues(self, telemetry_metrics: Dict[str, Any]) -> List[Any]:
+        """
+        Predict issues 24-48 hours ahead using trend analysis.
+
+        Enables proactive fixing before users notice problems.
+        """
+        if not telemetry_metrics:
+            return []
+
+        try:
+            predictions = self.forecaster_enhanced.predict_issues_24h_ahead(
+                telemetry_metrics
+            )
+            logger.info(f"Predicted {len(predictions)} future issue(s)")
+            return predictions
+        except Exception as e:
+            logger.error(f"Prediction failed: {e}")
+            return []
+
+    def score_network_health(self, telemetry_metrics: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Calculate real-time network health score (0-100).
+
+        Enables executive dashboard and proactive capacity planning.
+        """
+        try:
+            health = self.health_scorer.calculate_network_health(telemetry_metrics)
+            logger.info(f"Network health: {health['overall_health']:.0f}/100 ({health['health_grade']})")
+            return health
+        except Exception as e:
+            logger.error(f"Health scoring failed: {e}")
+            return {"overall_health": 50, "health_grade": "Unknown"}
 
     # ── External Knowledge Integration ────────────────────────────────────────────
 
