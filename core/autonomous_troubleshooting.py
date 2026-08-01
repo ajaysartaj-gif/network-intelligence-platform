@@ -21,6 +21,7 @@ from core.semantic_intake import ProblemStatement, ProblemScope, ProblemSymptom,
 from core.remediation_executor import ExecutionResult, RemediationExecutor, RemediationPlan
 from core.pattern_db import PatternDatabase
 from core.prediction_forecaster import AutonomousDecisionMaker, PatternPredictor, PredictedIssue
+from core.external_knowledge_layer import ExternalKnowledgeIntegrator, ExternalSolution
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,9 @@ class TroubleshootingSession:
     execution_result: Optional[ExecutionResult] = None
     outcome: Optional[str] = None  # "fixed" | "degraded" | "error"
     pattern_id: Optional[str] = None  # (Path C) Stored pattern ID
+    external_solution: Optional[ExternalSolution] = None  # (Unknown issues) External sources
+    diagnosis_confidence: float = 0.0  # Confidence of diagnosis (0.0-1.0)
+    used_external_knowledge: bool = False  # Did we search external sources?
     duration_seconds: float = 0.0
 
 
@@ -120,7 +124,12 @@ class AutonomousNetworkTroubleshooter:
             success_rate_threshold=0.80
         )
 
-        logger.info("AutonomousNetworkTroubleshooter initialized with all 5 phases")
+        # Phase 4.5: External Knowledge Integration (for unknown issues)
+        # Will be initialized lazily with RAG + web search
+        self.external_knowledge: Optional[ExternalKnowledgeIntegrator] = None
+        self.use_external_knowledge = False  # Flag to enable/disable
+
+        logger.info("AutonomousNetworkTroubleshooter initialized with all 5 phases + external knowledge")
 
     def troubleshoot(self,
                      user_query: str,
@@ -200,16 +209,17 @@ class AutonomousNetworkTroubleshooter:
         report = self.troubleshoot_engine.run(session.problem.raw_text)
         session.diagnosis_report = report.to_dict() if hasattr(report, "to_dict") else {}
         session.root_cause = report.root_cause if hasattr(report, "root_cause") else None
+        session.diagnosis_confidence = report.confidence if hasattr(report, "confidence") else 0.5
+
+        # STEP 2.5: If low confidence, search external sources
+        if session.diagnosis_confidence < 0.75:
+            if self._search_external_knowledge(session):
+                logger.info("✨ Using external solution for autonomous path")
 
         # STEP 3: Decide on fix (Phase 4 - autonomous decision)
-        if report.fix if hasattr(report, "fix") else None:
+        if not session.suggested_fix and (report.fix if hasattr(report, "fix") else None):
+            # Create remediation plan from internal diagnosis
             fix = report.fix
-            confidence = report.confidence if hasattr(report, "confidence") else 0.5
-
-            # Check pattern DB for similar fix
-            suggestion = self.pattern_db.get_suggested_fix(session.problem.raw_text)
-
-            # Create remediation plan
             plan = RemediationPlan(
                 root_cause=session.root_cause or "Unknown",
                 fix_explanation=fix.explanation if hasattr(fix, "explanation") else "",
@@ -221,6 +231,15 @@ class AutonomousNetworkTroubleshooter:
             )
             session.suggested_fix = plan
 
+        if session.suggested_fix:
+            confidence = session.diagnosis_confidence
+            plan = session.suggested_fix
+
+            # If external solution, cap confidence at 0.95 (untested)
+            if session.external_solution:
+                confidence = min(confidence, external_solution.confidence)
+                logger.warning("⚠️ Using untested external solution - confidence capped")
+
             # STEP 4: Autonomous decision
             should_auto_apply = self.decision_maker.should_auto_apply(
                 session.root_cause or "",
@@ -228,7 +247,8 @@ class AutonomousNetworkTroubleshooter:
                 confidence
             )
 
-            if should_auto_apply:
+            if should_auto_apply and not session.external_solution:
+                # Only auto-apply if NOT external (external always needs approval)
                 logger.info("✅ Applying fix autonomously (high confidence + good track record)")
                 result = self.executor.execute(
                     plan, self.approved_devices,
@@ -237,7 +257,7 @@ class AutonomousNetworkTroubleshooter:
                 session.execution_result = result
                 session.outcome = result.outcome
             else:
-                logger.info("⏳ Queuing for human approval (new or uncertain fix)")
+                logger.info("⏳ Queuing for human approval (new/uncertain fix or external source)")
                 if approval_callback:
                     approved = approval_callback(plan)
                     if approved:
@@ -256,7 +276,7 @@ class AutonomousNetworkTroubleshooter:
                                   approval_callback: Optional[Callable] = None) -> None:
         """
         Path B: On-Demand Troubleshooting
-        diagnose → approve → execute
+        diagnose → [search external if low confidence] → approve → execute
         """
         logger.info("=== PATH B: ON-DEMAND TROUBLESHOOTING ===")
 
@@ -265,37 +285,62 @@ class AutonomousNetworkTroubleshooter:
         report = self.troubleshoot_engine.run(session.problem.raw_text)
         session.diagnosis_report = report.to_dict() if hasattr(report, "to_dict") else {}
         session.root_cause = report.root_cause if hasattr(report, "root_cause") else None
+        session.diagnosis_confidence = report.confidence if hasattr(report, "confidence") else 0.5
 
-        # STEP 2: Prepare fix
-        if report.fix if hasattr(report, "fix") else None:
-            fix = report.fix
-            plan = RemediationPlan(
-                root_cause=session.root_cause or "Unknown",
-                fix_explanation=fix.explanation if hasattr(fix, "explanation") else "",
-                fix_commands=fix.commands if hasattr(fix, "commands") else [],
-                rollback_commands=fix.rollback if hasattr(fix, "rollback") else [],
-                verification_commands=fix.verify if hasattr(fix, "verify") else [],
-                expected_outcome=fix.expected_outcome if hasattr(fix, "expected_outcome") else "",
-                risk_level="medium",
+        # STEP 2: If low confidence, search external sources
+        if session.diagnosis_confidence < 0.75:
+            if self._search_external_knowledge(session):
+                # External solution found, use it
+                logger.info("✨ Using external solution")
+            else:
+                # No fix available (internal or external)
+                if not (report.fix if hasattr(report, "fix") else None):
+                    logger.warning("❌ No solution found (internal or external)")
+                    self._record_and_learn(session)
+                    return
+
+        # STEP 3: Prepare fix
+        if not session.suggested_fix:  # Not already set by external search
+            if report.fix if hasattr(report, "fix") else None:
+                fix = report.fix
+                plan = RemediationPlan(
+                    root_cause=session.root_cause or "Unknown",
+                    fix_explanation=fix.explanation if hasattr(fix, "explanation") else "",
+                    fix_commands=fix.commands if hasattr(fix, "commands") else [],
+                    rollback_commands=fix.rollback if hasattr(fix, "rollback") else [],
+                    verification_commands=fix.verify if hasattr(fix, "verify") else [],
+                    expected_outcome=fix.expected_outcome if hasattr(fix, "expected_outcome") else "",
+                    risk_level="medium",
+                )
+                session.suggested_fix = plan
+            else:
+                logger.warning("❌ No fix available")
+                self._record_and_learn(session)
+                return
+
+        # STEP 4: Mark external fixes as requiring approval
+        if session.external_solution:
+            logger.warning(
+                "⚠️ This is an untested fix from external sources - "
+                "requires your approval and careful validation"
             )
-            session.suggested_fix = plan
 
-            # STEP 3: Wait for approval
-            logger.info("Awaiting human approval...")
-            if approval_callback:
-                approved = approval_callback(plan)
-                if approved:
-                    logger.info("✅ Fix approved, executing...")
-                    result = self.executor.execute(
-                        plan, self.approved_devices,
-                        approval_callback=None
-                    )
-                    session.execution_result = result
-                    session.outcome = result.outcome
-                else:
-                    logger.info("❌ Fix not approved")
+        # STEP 5: Wait for approval
+        logger.info("Awaiting human approval...")
+        if approval_callback:
+            approved = approval_callback(session.suggested_fix)
+            if approved:
+                logger.info("✅ Fix approved, executing...")
+                result = self.executor.execute(
+                    session.suggested_fix, self.approved_devices,
+                    approval_callback=None
+                )
+                session.execution_result = result
+                session.outcome = result.outcome
+            else:
+                logger.info("❌ Fix not approved")
 
-        # STEP 4: Learn (optional for Path B, but supported)
+        # STEP 6: Learn (optional for Path B, but supported)
         self._record_and_learn(session)
 
     def _execute_path_c_learning(self, session: TroubleshootingSession) -> None:
@@ -372,6 +417,83 @@ class AutonomousNetworkTroubleshooter:
 
         logger.info(f"✅ Pattern learned: {pattern_id}")
 
+    # ── External Knowledge Integration ────────────────────────────────────────────
+
+    def enable_external_knowledge(self,
+                                  rag_engine: Any,
+                                  web_search_fn: Optional[Callable] = None,
+                                  mcp_tools: Optional[Any] = None) -> None:
+        """
+        Enable external knowledge integration for unknown issues.
+
+        Parameters
+        ----------
+        rag_engine : RAGEngine
+            Knowledge base retrieval engine (from core.knowledge.rag)
+        web_search_fn : Callable, optional
+            Web search function
+        mcp_tools : Any, optional
+            MCP tools for vendor APIs
+        """
+        from core.external_knowledge_layer import create_external_knowledge_integrator
+
+        self.external_knowledge = create_external_knowledge_integrator(
+            rag_engine=rag_engine,
+            web_search_fn=web_search_fn,
+            mcp_tools=mcp_tools,
+            ai_call=self.ai,
+        )
+        self.use_external_knowledge = True
+        logger.info("✅ External knowledge integration enabled (RAG + web search)")
+
+    def _search_external_knowledge(self, session: TroubleshootingSession) -> bool:
+        """
+        Search external sources for solution to unknown issue.
+
+        Returns
+        -------
+        bool
+            True if external solution was found and applied, False otherwise
+        """
+        if not self.use_external_knowledge or not self.external_knowledge:
+            return False
+
+        if session.diagnosis_confidence >= 0.75:  # Good enough confidence
+            return False
+
+        logger.info("🔍 Diagnosis confidence too low, searching external sources...")
+        external_solution = self.external_knowledge.find_solution_for_unknown_issue(
+            problem_statement=session.problem,
+            confidence=session.diagnosis_confidence
+        )
+
+        if not external_solution:
+            logger.warning("  No external solutions found")
+            return False
+
+        logger.info(
+            f"  ✅ Found external solution from {len(external_solution.sources)} source(s) "
+            f"(confidence: {external_solution.confidence:.0%})"
+        )
+
+        # Store external solution in session
+        session.external_solution = external_solution
+        session.used_external_knowledge = True
+
+        # Create remediation plan from external solution
+        plan = RemediationPlan(
+            root_cause=external_solution.root_cause,
+            fix_explanation=external_solution.fix_explanation,
+            fix_commands=external_solution.fix_commands,
+            rollback_commands=external_solution.rollback_commands,
+            verification_commands=external_solution.verification_commands,
+            expected_outcome=external_solution.expected_outcome,
+            risk_level=external_solution.risk_level,
+        )
+        session.suggested_fix = plan
+
+        return True
+
     # ── Utility methods ────────────────────────────────────────────────────────
 
     def get_stats(self) -> Dict[str, Any]:
@@ -379,6 +501,7 @@ class AutonomousNetworkTroubleshooter:
         return {
             "pattern_db": self.pattern_db.get_stats(),
             "approved_devices": len(self.approved_devices),
+            "external_knowledge_enabled": self.use_external_knowledge,
         }
 
 
