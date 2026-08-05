@@ -622,6 +622,7 @@ class InfrastructurePlatform:
     Unified platform for network design, troubleshooting, and configuration.
 
     Handles any infrastructure domain through adapters.
+    Includes intelligence layer for dependency analysis.
     """
 
     def __init__(self):
@@ -631,6 +632,13 @@ class InfrastructurePlatform:
         self.decisions = DecisionSupportEngine()
         self.safety = SafetyFramework()
         self.learning = LearningSystem()
+
+        # Import here to avoid circular dependency
+        try:
+            from platform.intelligence import DependencyIntelligence
+            self.dependencies = DependencyIntelligence()
+        except ImportError:
+            self.dependencies = None
 
     def troubleshoot(
         self,
@@ -693,6 +701,37 @@ class InfrastructurePlatform:
         )
         record.lessons_learned = lessons
         return record
+
+    def analyze_change_impact(self, change_id: str, affected_systems: List[str]) -> Dict[str, Any]:
+        """Analyze the full cross-domain impact of a change."""
+        if not self.dependencies:
+            return {"error": "Dependency intelligence not available"}
+
+        impact = self.dependencies.analyze_change_impact(change_id, affected_systems)
+        return {
+            "change_id": impact.change_id,
+            "direct_impact": impact.direct_impact,
+            "secondary_impact": impact.secondary_impact,
+            "cascading_impact": impact.cascading_impact,
+            "total_systems_affected": impact.total_systems_affected,
+            "blast_radius_percentage": impact.blast_radius_percentage,
+            "risk_score": impact.risk_score,
+            "mitigation_steps": impact.mitigation_steps
+        }
+
+    def predict_cascade_failure(self, system_id: str) -> Dict[str, Any]:
+        """Predict cascading failures if this system fails."""
+        if not self.dependencies:
+            return {"error": "Dependency intelligence not available"}
+
+        cascade = self.dependencies.predict_cascade(system_id)
+        return {
+            "initial_failure": cascade.initial_failure,
+            "systems_affected": cascade.systems_affected,
+            "cascade_duration": cascade.total_cascade_duration,
+            "prevention_strategy": cascade.prevention_strategy,
+            "stages": cascade.cascade_stages
+        }
 
 
 # ============================================================================
